@@ -713,13 +713,25 @@ off-diagonal. L-BRDiv's Alg. 1 line 7 gives `w^{i,j} = 1 + Σ_{k≠j}(α₁^{i,k
 all `α = 1`.** L-BRDiv is BRDiv with the fixed weights replaced by learned multipliers, and the
 paper's stated selling point is precisely that this **removes the need to tune `α`**.
 
-This lets me sharpen §7.3, whose wording is slightly imprecise. "BRDiv's `XP_LOSS_WEIGHTS` is
-already population-size-invariant by construction" — the *ratio* of self-play to cross-play weight
-is `(1 + 2(K−1)) : 1`, which does change with `K`. The accurate statement is: **BRDiv has no
-learned multiplier, so there is no multiplier-update pathology to correct; L-BRDiv's `α` receive
-gradient from an unnormalized sum over ~K² pair terms, so `LAGRANGE_LR` must be scaled by
-~(n_ref/n)².** The observed entropy runaway is a property of the *learned* multipliers, not of the
-weighting scheme both methods share. Update §7.3 accordingly.
+**[CORRECTED — see below.]** I initially read this as showing §7.3's "BRDiv's `XP_LOSS_WEIGHTS`
+is already population-size-invariant" to be imprecise, since the *paper's* metric gives a
+self-play:cross-play weight ratio of `(1 + 2(K−1)) : 1` that varies with `K`. **That reading was
+wrong.** It conflates the paper's diversity metric with the implementation's per-sample
+policy-gradient weights. `BRDiv.py:389-391` builds
+`sp_weight = (1 + 2·XP_LOSS_WEIGHTS)·(n/2)` and `xp_weight = XP_LOSS_WEIGHTS·(n/(2(n−1)))`, and
+against the sampling distribution `P(SP) = 1/n`, `P(XP) = (n−1)/n` the expected contributions are
+`(1 + 2·XP_LOSS_WEIGHTS)/2` and `XP_LOSS_WEIGHTS/2` — **exactly independent of n** (verified
+numerically at n = 3, 5, 10, 20). The `n` factors exist precisely to cancel the sampling
+probabilities. The original §7.3 claim stands: **do not rescale `XP_LOSS_WEIGHTS`.**
+
+The genuine contrast with L-BRDiv remains: L-BRDiv's `α` are *learned* by SGD on an unnormalized
+sum over ~n² pair terms, so `LAGRANGE_LR` must be scaled by ~(n_ref/n)². BRDiv has no learned
+multiplier and therefore no such pathology.
+
+Separately confirmed empirically: an n=5 BRDiv run collapsed to a near-flat cross-play matrix, and
+the fix was raising the sample budget (`NUM_ENVS` 64→128, `TOTAL_TIMESTEPS` 4.5e7→7e7, ≈3×) to
+offset the 1/n² self-play dilution — not adjusting the diversity weight. Direction established;
+values are sweep starting points, not tuned.
 
 Other details: BRDiv uses **MAA2C** with a shared centralized critic that estimates cross-play
 matrix entries directly (one-hot `(i, −j)` concatenated to the critic input), with separate `D^SP`
@@ -931,11 +943,11 @@ storage concern follows directly.
 Rev 6 was written after reading the first five papers. The remaining ten produced these
 additional items, not yet folded into the plan:
 
-1. **§7.3 wording is imprecise about BRDiv.** "Population-size-invariant by construction" — the
-   self-play:cross-play weight ratio is `(1 + 2(K−1)) : 1` and *does* vary with `K`. The accurate
-   statement is that BRDiv has **no learned multiplier**, so there is no multiplier-update
-   pathology; L-BRDiv's `α` receive gradient from an unnormalized ~K² sum, which is what forces
-   `LAGRANGE_LR` scaling. L-BRDiv reduces exactly to BRDiv when all `α = 1`.
+1. ~~**§7.3 wording is imprecise about BRDiv.**~~ **RETRACTED.** This item was wrong and was
+   briefly folded into rev 7 before being retracted in rev 8. `XP_LOSS_WEIGHTS` really is
+   population-size-invariant — `BRDiv.py:389-391` cancels the sampling probabilities exactly. The
+   original claim needed no correction. The real L-BRDiv/BRDiv contrast is the *learned* multiplier,
+   which stands.
 2. **§9 axis 9 is wrong as written.** BRDiv and L-BRDiv *are* response-oriented (Minimum Coverage
    Set). Correct split: **FCP and CoMeDi are population-oriented; BRDiv and L-BRDiv are
    response-oriented; ZSC-Eval's BR-Div applies the same idea to selection.** Our four generators

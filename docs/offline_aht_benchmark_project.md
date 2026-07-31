@@ -625,16 +625,40 @@ Verified mechanics that the implementation and the docs must preserve:
   growing the population quadratically dilutes per-policy self-play data at fixed
   `NUM_ENVS`/`TOTAL_TIMESTEPS`. Separately, L-BRDiv's Lagrange multiplier gradient is an
   **unnormalized sum over ~n² pair terms**, so `LAGRANGE_LR` must be scaled by ~(n_ref/n)² or the
-  multiplier update overcorrects (observed empirically: entropy runaway to ~49, pg_loss to −25).
-  **[rev 7] Corrected explanation.** Rev 1–6 said BRDiv's `XP_LOSS_WEIGHTS` is "population-size-
-  invariant by construction." That is imprecise: expanding BRDiv's metric gives a self-play weight
-  of `1 + 2(K−1)` against off-diagonal weights of `−1`, so the **ratio does vary with K**. And
-  L-BRDiv's weight rule reduces *exactly* to BRDiv's when all `α = 1` — they share the weighting
-  scheme. The real asymmetry is that **BRDiv has no learned multiplier to overcorrect**, whereas
-  L-BRDiv's `α` are trained by SGD on an unnormalized sum over ~K² pair terms, which is what
-  forces `LAGRANGE_LR` scaling. The conclusion ("do not 'fix' BRDiv") stands; the reason is
-  different. All of this belongs in the benchmark's documentation as guidance, since anyone
-  regenerating populations at a different size will hit it.
+  multiplier update overcorrects (observed: entropy runaway to ~49, pg_loss to −25 at n=5 with
+  the n=3 value).
+- **BRDiv's `XP_LOSS_WEIGHTS` genuinely does not need rescaling — verified in code.**
+  `BRDiv.py:389–391` constructs the policy-gradient weights as
+  `sp_weight = (1 + 2·XP_LOSS_WEIGHTS)·(n/2)` and `xp_weight = XP_LOSS_WEIGHTS·(n/(2(n−1)))`.
+  Against the sampling distribution `P(SP) = 1/n`, `P(XP) = (n−1)/n`, the expected per-sample
+  contributions are `P(SP)·sp_weight = (1 + 2·XP_LOSS_WEIGHTS)/2` and
+  `P(XP)·xp_weight = XP_LOSS_WEIGHTS/2` — **both exactly independent of n** (checked numerically
+  at n = 3, 5, 10, 20: 0.55 and 0.025 throughout, for `XP_LOSS_WEIGHTS = 0.05`). The `n` factors
+  in the implementation exist precisely to cancel the sampling probabilities. **Do not "fix" it.**
+
+  > **[rev 8] Retraction of a rev 7 "correction".** Rev 7 claimed this statement was imprecise,
+  > on the grounds that expanding the *paper's* BRDiv metric (Eq. 6) gives diagonal weight
+  > `1 + 2(K−1)` against off-diagonal `−1`, a ratio that varies with K. That reasoning conflates
+  > two different objects: the paper's **diversity metric** and the implementation's **per-sample
+  > policy-gradient weights**, which additionally compensate for the sampling distribution. The
+  > rev 1–6 claim was correct as written; rev 7 replaced it with a confused one. Reinstated above
+  > with the code-level derivation that settles it.
+
+- **[rev 8] The n=5 BRDiv diversity collapse was a sample-count problem, not a loss-balance one.**
+  Raising `PARTNER_POP_SIZE` 3 → 5 at fixed `NUM_ENVS`/`TOTAL_TIMESTEPS` produced a near-flat
+  cross-play matrix. The fix that worked was scaling the *budget* — `NUM_ENVS` 64 → 128 and
+  `TOTAL_TIMESTEPS` 4.5e7 → 7e7, ≈3× combined, restoring per-policy self-play sample count
+  against the 1/n² dilution — **not** touching `XP_LOSS_WEIGHTS`. This is the single most useful
+  piece of population-scaling guidance we have, because the symptom (collapsed diversity) points
+  at the diversity weight while the cause is elsewhere.
+
+  **Status: direction confirmed, values not final.** These came from exploratory runs, not a
+  tuning sweep. Treat the *directions* — scale budget with n², scale L-BRDiv's `LAGRANGE_LR` by
+  (n_ref/n)², leave BRDiv's `XP_LOSS_WEIGHTS` alone — as established, and the specific numbers as
+  starting points for §7.2's sweep rather than as the tuned configuration.
+
+All of this belongs in the benchmark's documentation as guidance, since anyone regenerating
+populations at a different size will hit it.
 
 ### 7.4 [rev 7] The handshake confound — a threat to §8's cross-play diagnostic
 
@@ -1264,6 +1288,14 @@ Ordered for Phase 0a. Items 1–3 are the critical path; 4–6 run alongside.
 
 ## 14. Change log
 
+### Rev 8 (BRDiv retraction; population-scaling status)
+
+| # | Change | Evidence |
+|---|---|---|
+| 1 | **Retracted rev 7's BRDiv "correction."** `XP_LOSS_WEIGHTS` really is population-size-invariant: `BRDiv.py:389–391` builds `sp_weight`/`xp_weight` with `n` factors that exactly cancel the sampling probabilities, giving expected per-sample contributions independent of `n`. Rev 7 conflated the paper's Eq. 6 metric with the implementation's policy-gradient weights. §7.3 reinstated with the code-level derivation. | `BRDiv.py:389–391`; verified numerically at n = 3, 5, 10, 20 |
+| 2 | **New finding recorded**: the n=5 BRDiv diversity collapse (near-flat cross-play matrix) was **absolute sample-count dilution**, fixed by scaling `NUM_ENVS` 64→128 and `TOTAL_TIMESTEPS` 4.5e7→7e7 (≈3×) — *not* by touching `XP_LOSS_WEIGHTS`. The symptom points at the diversity weight; the cause is the 1/n² self-play draw probability. | Exploratory LBF 12×12 runs, 2026-07-30 |
+| 3 | **Status qualifier added to §7.3.** These values came from exploratory runs, not a tuning sweep. Directions are established; specific numbers are starting points for §7.2's sweep, not the tuned configuration. Rev 7 and earlier read as more settled than the evidence supports. | — |
+
 ### Rev 7 (remaining ten papers — literature pass complete)
 
 Rev 6 was written after the five decision-critical papers. Rev 7 adds the four teammate-generation
@@ -1271,7 +1303,7 @@ papers, LIAM, MeLIBA, AMAGO, DT, IQL, and D4RL. **All 15 papers in `papers/` hav
 
 | # | Change | Evidence |
 |---|---|---|
-| 1 | **Correction to §7.3's BRDiv claim.** "Population-size-invariant by construction" is imprecise — the self-play:cross-play ratio is `(1+2(K−1)):1` and does vary with K. The real asymmetry is that BRDiv has **no learned multiplier**; L-BRDiv's weight rule reduces to BRDiv's when all `α = 1`. Conclusion unchanged, reason corrected. | BRDiv Eq. 6; L-BRDiv Alg. 1 line 7 |
+| 1 | ~~**Correction to §7.3's BRDiv claim.**~~ **RETRACTED in rev 8** — this "correction" was itself wrong. It conflated the paper's diversity metric with the implementation's per-sample policy-gradient weights. The original rev 1–6 claim was correct. See §7.3. | — |
 | 2 | **Correction to §9 axis 9.** BRDiv and L-BRDiv are **response-oriented** (Minimum Coverage Set), not population-oriented. Correct split: FCP/CoMeDi population-oriented; BRDiv/L-BRDiv response-oriented; ZSC-Eval's BR-Div the same idea applied to *selection*. Our four generators span the distinction, making it testable rather than assertable. | L-BRDiv §4–5 |
 | 3 | **New §7.4 — the handshake confound.** Cross-play minimization can produce identity-revealing handshakes followed by deliberate sabotage, so low off-diagonal cross-play entries may measure signalling rather than convention difference — contaminating §8's primary population diagnostic. Mitigations: verify mixed-play is enabled and record `β`; add a **handshake probe**. | CoMeDi §3.2–3.3 |
 | 4 | **Oracle / FIAM ceiling row added** (roster now thirteen). With an expected-negative result, the ceiling matters as much as the floor: "all methods near random" and "all methods near random *and so is the oracle*" are different papers. | LIAM §4.2 |
