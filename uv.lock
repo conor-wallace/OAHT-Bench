@@ -1233,6 +1233,7 @@ dependencies = [
     { name = "h5py" },
     { name = "jax-aht" },
     { name = "numpy" },
+    { name = "pydantic" },
 ]
 
 [package.optional-dependencies]
@@ -1245,6 +1246,7 @@ requires-dist = [
     { name = "h5py", specifier = ">=3.10" },
     { name = "jax-aht", git = "https://github.com/LARG/jax-aht.git?rev=0885df95c386121b9c94cb0fb516531895e29702" },
     { name = "numpy" },
+    { name = "pydantic", specifier = ">=2.7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
 ]
 provides-extras = ["dev"]

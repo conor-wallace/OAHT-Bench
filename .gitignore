@@ -223,3 +223,6 @@ papers/
 
 # uv
 .venv/
+
+# Local Claude Code settings (machine-specific permissions)
+.claude/settings.local.json

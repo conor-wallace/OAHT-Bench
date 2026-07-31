@@ -11,9 +11,13 @@ license = {text = "MIT"}
 
 dependencies = [
     "jax-aht",
+    "pydantic>=2.7",
     "h5py>=3.10",
     "numpy",
 ]
+
+[project.scripts]
+oaht-bench = "oaht_bench.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]

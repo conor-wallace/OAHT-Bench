@@ -1,0 +1,26 @@
+{
+  "env": {
+    "different_levels": true,
+    "env_name": "lbf",
+    "fov": null,
+    "grid_size": 12,
+    "name": "lbf_12x12",
+    "notes": "Gridworld. Matches the existing checkpoints/lbf/lbf_12x12 populations.",
+    "num_agents": 2,
+    "num_food": 6,
+    "rollout_length": 128,
+    "schema_version": 1,
+    "tier": "tier1"
+  },
+  "extra": {},
+  "generator": "fcp",
+  "job_type": "teammate_generation",
+  "label": "fcp_lbf_smoke",
+  "learning_rate": 0.0005,
+  "num_envs": 8,
+  "output_dir": "results",
+  "population_size": 5,
+  "schema_version": 1,
+  "seed": 0,
+  "total_timesteps": 1000000.0
+}
