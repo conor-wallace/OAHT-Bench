@@ -22,7 +22,17 @@ dev = ["pytest>=8.0"]
 include = ["oaht_bench*"]
 
 [tool.uv.sources]
-jax-aht = { path = "../jax-aht", editable = true }
+# Pinned to an immutable upstream commit -- not a branch, not a local path.
+# Results must be reproducible from this file alone; a floating ref or a
+# developer's working copy makes "which jax-aht?" unanswerable.
+#
+# 0885df9 is LARG/jax-aht main as of 2026-07-31. Bumping it is a deliberate act:
+# it can change environment dynamics or teammate-generation behaviour, which
+# invalidates collected datasets and trained populations. Record the reason in
+# the commit message and re-hash affected artifacts.
+#
+# Configs are deliberately NOT inherited from upstream -- see configs/README.md.
+jax-aht = { git = "https://github.com/LARG/jax-aht.git", rev = "0885df95c386121b9c94cb0fb516531895e29702" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

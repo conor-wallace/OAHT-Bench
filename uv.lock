@@ -705,7 +705,7 @@ cuda12 = [
 [[package]]
 name = "jax-aht"
 version = "1.0.0"
-source = { editable = "../jax-aht" }
+source = { git = "https://github.com/LARG/jax-aht.git?rev=0885df95c386121b9c94cb0fb516531895e29702#0885df95c386121b9c94cb0fb516531895e29702" }
 dependencies = [
     { name = "chex" },
     { name = "distrax" },
@@ -730,34 +730,6 @@ dependencies = [
     { name = "rliable" },
     { name = "safetensors" },
     { name = "setuptools" },
-    { name = "wandb" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "chex", specifier = "==0.1.88" },
-    { name = "distrax" },
-    { name = "flax", specifier = "==0.10.2" },
-    { name = "gymnax" },
-    { name = "huggingface-hub" },
-    { name = "hydra-core" },
-    { name = "jax", marker = "sys_platform == 'darwin'", specifier = "==0.5.3" },
-    { name = "jax", extras = ["cuda12"], marker = "sys_platform == 'linux'", specifier = "==0.5.3" },
-    { name = "jaxmarl", specifier = "==0.0.7" },
-    { name = "jumanji", specifier = "==1.1.0" },
-    { name = "matplotlib" },
-    { name = "ml-dtypes", specifier = "==0.4.0" },
-    { name = "moviepy" },
-    { name = "numpy" },
-    { name = "omegaconf" },
-    { name = "optax", specifier = "==0.2.4" },
-    { name = "orbax-checkpoint", specifier = "==0.11.1" },
-    { name = "orbax-export", specifier = "==0.0.6" },
-    { name = "pandas", specifier = "<=2.3.3" },
-    { name = "prettytable" },
-    { name = "rliable" },
-    { name = "safetensors" },
-    { name = "setuptools", specifier = "<81" },
     { name = "wandb" },
 ]
 
@@ -1271,7 +1243,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "h5py", specifier = ">=3.10" },
-    { name = "jax-aht", editable = "../jax-aht" },
+    { name = "jax-aht", git = "https://github.com/LARG/jax-aht.git?rev=0885df95c386121b9c94cb0fb516531895e29702" },
     { name = "numpy" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
 ]
