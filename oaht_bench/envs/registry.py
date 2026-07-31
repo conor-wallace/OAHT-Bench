@@ -13,7 +13,9 @@ the tier assignment, not new environment code.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Literal
 
 Tier = Literal["tier1", "tier2", "debug"]
@@ -47,9 +49,32 @@ class EnvConfig:
     notes: str = ""
 
 
+_REGISTRY: dict[str, EnvConfig] = {}
+
+
+def register(cfg: EnvConfig) -> EnvConfig:
+    """Add a configuration to the registry and return it.
+
+    Registration is co-located with declaration so that defining a config *is*
+    registering it. An earlier version collected configs into a hand-maintained
+    list, which silently dropped any config someone forgot to append.
+
+    Duplicate names are rejected rather than silently overwritten: a config name
+    is recorded in dataset metadata (§4.2), so two configs sharing one would make
+    already-collected data ambiguous about which environment produced it.
+    """
+    if cfg.name in _REGISTRY:
+        raise ValueError(
+            f"Duplicate environment config name {cfg.name!r}. Names appear in dataset "
+            f"metadata and must identify exactly one configuration."
+        )
+    _REGISTRY[cfg.name] = cfg
+    return cfg
+
+
 #: LBF at the configuration the existing bayes-tom populations were trained against
 #: (§7.5), so Phase 0 data collection needs no retraining.
-_LBF_12x12 = EnvConfig(
+LBF_12X12 = register(EnvConfig(
     name="lbf_12x12",
     env_name="lbf",
     env_kwargs={
@@ -61,22 +86,11 @@ _LBF_12x12 = EnvConfig(
     },
     tier="tier1",
     notes="Gridworld. Matches existing checkpoints/lbf/lbf_12x12 populations.",
-)
-
-#: Overcooked-v1 (JaxMARL). Tier 1 is counter_circuit rather than cramped_room:
-#: ZSC-Eval reports that the simpler layouts fail to differentiate algorithms, and
-#: the "full resource-sharing" layouts discriminate better (§10.3).
-_OVERCOOKED_LAYOUTS: dict[str, tuple[Tier, bool, str]] = {
-    "counter_circuit": ("tier1", True, "Full resource-sharing; discriminates between methods."),
-    "coord_ring": ("tier2", True, "Full resource-sharing; Tier 1 fallback."),
-    "cramped_room": ("tier2", True, "Standard easy reference layout."),
-    "asymm_advantages": ("tier2", False, "ZSC-Eval: fails to differentiate algorithms."),
-    "forced_coord": ("tier2", False, "ZSC-Eval: fails to differentiate algorithms."),
-}
+))
 
 #: Full Hanabi. Turn-based with legal-action masking and hidden own-hand — the
 #: configuration that imposes the strictest requirements on every interface (§11).
-_HANABI = EnvConfig(
+HANABI = register(EnvConfig(
     name="hanabi",
     env_name="hanabi",
     env_kwargs={
@@ -91,10 +105,10 @@ _HANABI = EnvConfig(
     tier="tier1",
     turn_based=True,
     notes="Turn-based, action-masked, hidden own hand. The abstraction stress test.",
-)
+))
 
 #: Reduced Hanabi for fast iteration. Never appears in results (§12.5).
-_MINI_HANABI = EnvConfig(
+MINI_HANABI = register(EnvConfig(
     name="mini_hanabi",
     env_name="hanabi",
     env_kwargs={
@@ -109,26 +123,36 @@ _MINI_HANABI = EnvConfig(
     tier="debug",
     turn_based=True,
     notes="Development/debug configuration only.",
-)
+))
 
+#: Overcooked-v1 (JaxMARL). Tier 1 is counter_circuit rather than cramped_room:
+#: ZSC-Eval reports that the simpler layouts fail to differentiate algorithms, and
+#: the "full resource-sharing" layouts discriminate better (§10.3). Registered in a
+#: loop because the five layouts differ only in these three fields; writing them out
+#: would be five near-identical blocks whose differences are easy to miss.
+_OVERCOOKED_LAYOUTS: dict[str, tuple[Tier, bool, str]] = {
+    "counter_circuit": ("tier1", True, "Full resource-sharing; discriminates between methods."),
+    "coord_ring": ("tier2", True, "Full resource-sharing; Tier 1 fallback."),
+    "cramped_room": ("tier2", True, "Standard easy reference layout."),
+    "asymm_advantages": ("tier2", False, "ZSC-Eval: fails to differentiate algorithms."),
+    "forced_coord": ("tier2", False, "ZSC-Eval: fails to differentiate algorithms."),
+}
 
-def _build_registry() -> dict[str, EnvConfig]:
-    configs = [_LBF_12x12, _HANABI, _MINI_HANABI]
-    for layout, (tier, symmetric, notes) in _OVERCOOKED_LAYOUTS.items():
-        configs.append(
-            EnvConfig(
-                name=f"overcooked_{layout}",
-                env_name="overcooked-v1",
-                env_kwargs={"layout": layout},
-                tier=tier,
-                symmetric_roles=symmetric,
-                notes=notes,
-            )
+for _layout, (_tier, _symmetric, _notes) in _OVERCOOKED_LAYOUTS.items():
+    register(
+        EnvConfig(
+            name=f"overcooked_{_layout}",
+            env_name="overcooked-v1",
+            env_kwargs={"layout": _layout},
+            tier=_tier,
+            symmetric_roles=_symmetric,
+            notes=_notes,
         )
-    return {c.name: c for c in configs}
+    )
+del _layout, _tier, _symmetric, _notes
 
-
-REGISTRY: dict[str, EnvConfig] = _build_registry()
+#: Read-only view. Mutate through :func:`register` so duplicates are caught.
+REGISTRY: Mapping[str, EnvConfig] = MappingProxyType(_REGISTRY)
 
 
 def get_config(name: str) -> EnvConfig:

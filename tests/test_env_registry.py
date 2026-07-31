@@ -11,9 +11,50 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from oaht_bench.envs.registry import REGISTRY, config_names, get_config, make
+from oaht_bench.envs.registry import (
+    REGISTRY,
+    EnvConfig,
+    config_names,
+    get_config,
+    make,
+    register,
+)
 
 ALL_CONFIGS = config_names()
+
+
+def test_declaring_a_config_registers_it():
+    """Registration is co-located with declaration, not a hand-maintained list.
+
+    The module-level constants and the registry must not be able to disagree.
+    """
+    from oaht_bench.envs import registry as mod
+
+    declared = {
+        v.name
+        for k, v in vars(mod).items()
+        if isinstance(v, EnvConfig) and not k.startswith("_")
+    }
+    assert declared <= set(REGISTRY), "a declared config is missing from the registry"
+
+
+def test_duplicate_names_are_rejected():
+    """Names identify datasets (§4.2); two configs sharing one makes data ambiguous."""
+    with pytest.raises(ValueError, match="Duplicate"):
+        register(EnvConfig(name="hanabi", env_name="hanabi"))
+
+
+def test_registry_is_not_mutable_in_place():
+    """Callers must go through register(), which enforces the duplicate check."""
+    with pytest.raises(TypeError):
+        REGISTRY["injected"] = EnvConfig(name="injected", env_name="lbf")  # type: ignore[index]
+
+
+def test_configs_compare_by_value():
+    """Value equality lets us ask whether a dataset's recorded config still matches."""
+    a = EnvConfig(name="x", env_name="lbf", env_kwargs={"grid_size": 12})
+    b = EnvConfig(name="x", env_name="lbf", env_kwargs={"grid_size": 12})
+    assert a == b
 
 
 def test_registry_covers_the_committed_scope():
@@ -32,7 +73,6 @@ def test_tier1_overcooked_is_not_a_non_discriminative_layout():
 @pytest.mark.parametrize("name", ALL_CONFIGS)
 def test_env_resets_and_steps(name: str):
     """Each configuration resets, exposes per-agent observations, and steps."""
-    cfg = get_config(name)
     env = make(name)
     rng = jax.random.PRNGKey(0)
 
@@ -55,7 +95,7 @@ def test_env_resets_and_steps(name: str):
         logits = jnp.where(mask > 0, 0.0, -jnp.inf)
         actions[agent] = jax.random.categorical(jax.random.fold_in(step_rng, i), logits)
 
-    obs2, state2, rewards, dones, infos = env.step(step_rng, state, actions)
+    obs2, _, rewards, dones, _ = env.step(step_rng, state, actions)
     assert set(obs2) >= set(agents)
     assert set(rewards) >= set(agents)
     assert "__all__" in dones, f"{name}: expected an aggregate done flag"
@@ -65,7 +105,7 @@ def test_env_resets_and_steps(name: str):
 def test_action_masks_are_nonempty_and_consistent(name: str):
     """A legal action always exists, and the mask width matches the action space."""
     env = make(name)
-    obs, state = env.reset(jax.random.PRNGKey(0))
+    _, state = env.reset(jax.random.PRNGKey(0))
     avail = env.get_avail_actions(state)
     for agent in env.agents:
         mask = jnp.asarray(avail[agent])
