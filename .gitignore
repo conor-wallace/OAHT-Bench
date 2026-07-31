@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Reference papers — third-party PDFs, not redistributable.
+# Read locally; findings are extracted into docs/baseline_specs.md.
+papers/
