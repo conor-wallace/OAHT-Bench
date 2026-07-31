@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oaht-bench"
+version = "0.1.0"
+description = "A survey and benchmark for offline ad-hoc teamwork"
+requires-python = ">=3.11,<3.12"
+license = {text = "MIT"}
+
+dependencies = [
+    "jax-aht",
+    "h5py>=3.10",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+include = ["oaht_bench*"]
+
+[tool.uv.sources]
+jax-aht = { path = "../jax-aht", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
