@@ -22,7 +22,7 @@ def _job(**overrides) -> TeammateGenerationJob:
     kwargs = dict(
         label="t",
         env=get_preset("lbf_12x12"),
-        generator=FcpConfig(PARTNER_POP_SIZE=5),
+        generator=FcpConfig(population_size=5),
     )
     kwargs.update(overrides)
     return TeammateGenerationJob(**kwargs)
@@ -100,7 +100,7 @@ def test_content_hash_is_stable_and_order_independent():
 def test_content_hash_changes_with_any_field():
     base = _job()
     assert base.content_hash() != _job(seed=1).content_hash()
-    assert base.content_hash() != _job(generator=FcpConfig(PARTNER_POP_SIZE=6)).content_hash()
+    assert base.content_hash() != _job(generator=FcpConfig(population_size=6)).content_hash()
     assert base.content_hash() != _job(env=get_preset("hanabi")).content_hash()
 
 
@@ -168,3 +168,56 @@ def test_task_config_matches_jax_aht_task_schema():
     assert task["ENV_NAME"] == "lbf"
     assert task["ROLLOUT_LENGTH"] == 128
     assert task["ENV_KWARGS"]["grid_size"] == 12
+
+
+# --- naming boundary -------------------------------------------------------
+
+
+def test_config_fields_are_snake_case():
+    """Our public API must not leak the absorbed code's SCREAMING_CASE keys.
+
+    Config authors write JSON against these field names; jax-aht's Hydra
+    convention is an implementation detail of the boundary, translated in exactly
+    one place (``to_algorithm_dict``).
+    """
+    from oaht_bench.configs.env import HanabiConfig, LbfConfig, OvercookedV1Config
+    from oaht_bench.configs.job import TeammateGenerationJob
+    from oaht_bench.configs.teammate_gen import (
+        BrDivConfig,
+        CoMeDiConfig,
+        FcpConfig,
+        LBrDivConfig,
+        PpoHyperparams,
+    )
+
+    models = [
+        LbfConfig, HanabiConfig, OvercookedV1Config, TeammateGenerationJob,
+        PpoHyperparams, FcpConfig, CoMeDiConfig, BrDivConfig, LBrDivConfig,
+    ]
+    offenders = [
+        f"{m.__name__}.{name}"
+        for m in models
+        for name in m.model_fields
+        if name != name.lower()
+    ]
+    assert not offenders, f"non-snake_case config fields: {offenders}"
+
+
+def test_generator_translates_to_upstream_keys():
+    """The boundary translation produces the keys the absorbed code reads."""
+    from oaht_bench.configs.teammate_gen import BrDivConfig, FcpConfig, LBrDivConfig
+
+    fcp = FcpConfig(population_size=5).to_algorithm_dict()
+    assert fcp["ALG"] == "fcp"
+    assert fcp["PARTNER_POP_SIZE"] == 5
+    assert fcp["LR"] == 1e-4  # from PpoHyperparams.learning_rate
+
+    assert BrDivConfig(cross_play_weight=0.05).to_algorithm_dict()["XP_LOSS_WEIGHTS"] == 0.05
+    assert LBrDivConfig(lagrange_learning_rate=0.0036).to_algorithm_dict()["LAGRANGE_LR"] == 0.0036
+
+
+def test_comedi_defaults_to_eight_minibatches():
+    """CoMeDi's base config differs from the shared PPO default; keep it."""
+    from oaht_bench.configs.teammate_gen import CoMeDiConfig
+
+    assert CoMeDiConfig().to_algorithm_dict()["NUM_MINIBATCHES"] == 8

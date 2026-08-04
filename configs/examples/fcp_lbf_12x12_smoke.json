@@ -13,29 +13,29 @@
     "tier": "tier1"
   },
   "generator": {
-    "ACTOR_TYPE": "mlp",
-    "NUM_CHECKPOINTS": 2,
-    "NUM_ENVS": 4,
-    "NUM_SEEDS": 1,
-    "PARTNER_POP_SIZE": 2,
-    "TOTAL_TIMESTEPS": 2048.0,
-    "TRAIN_SEED": 20374,
+    "actor_type": "mlp",
     "generator": "fcp",
+    "num_checkpoints": 2,
+    "num_envs": 4,
+    "num_seeds": 1,
+    "population_size": 2,
     "ppo": {
-      "ANNEAL_LR": false,
-      "CLIP_EPS": 0.05,
-      "ENT_COEF": 0.01,
-      "GAE_LAMBDA": 0.95,
-      "GAMMA": 0.99,
-      "LR": 0.0001,
-      "MAX_GRAD_NORM": 1.0,
-      "NUM_MINIBATCHES": 4,
-      "UPDATE_EPOCHS": 15,
-      "VF_COEF": 0.5
-    }
+      "anneal_lr": false,
+      "clip_eps": 0.05,
+      "entropy_coef": 0.01,
+      "gae_lambda": 0.95,
+      "gamma": 0.99,
+      "learning_rate": 0.0001,
+      "max_grad_norm": 1.0,
+      "num_minibatches": 4,
+      "update_epochs": 15,
+      "value_coef": 0.5
+    },
+    "total_timesteps": 2048.0,
+    "train_seed": 20374
   },
   "job_type": "teammate_generation",
-  "label": "smoke",
+  "label": "fcp_lbf_smoke",
   "logging": {
     "use_wandb": false,
     "verbose": false,
