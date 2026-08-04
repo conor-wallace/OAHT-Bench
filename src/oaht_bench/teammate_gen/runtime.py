@@ -241,3 +241,83 @@ class CoMeDiRuntime(BaseConfig):
     def to_agent_dict(self) -> dict[str, Any]:
         """Keys the absorbed agent initializers read."""
         return {**self.network.to_agent_dict(), "POP_SIZE": self.population_size}
+
+
+class PairedDiversityRuntime(BaseConfig):
+    """Derived values for BRDiv and L-BRDiv.
+
+    Both train *paired* populations — a confederate and its best response — so
+    they carry separate actor counts for each side, and both minibatch over those
+    counts rather than over a combined actor axis.
+
+    The two algorithms share this shape entirely; they differ only in how the
+    cross-play term is weighted (BRDiv fixes it, L-BRDiv learns it), which is
+    authored config rather than anything derived.
+    """
+
+    # --- authored ---
+    ppo: PpoHyperparams
+    network: MlpNetwork
+    rollout_length: int = Field(gt=0)
+    num_envs: int = Field(gt=0)
+    total_timesteps: float = Field(gt=0)
+    num_checkpoints: int = Field(gt=0)
+    population_size: int = Field(gt=0)
+    num_eval_episodes: int = Field(gt=0)
+
+    #: BRDiv only. Fixed cross-play weight; see the config field for why it must
+    #: not be rescaled with population size.
+    cross_play_weight: float | None = None
+    #: L-BRDiv only. Learned multipliers, which *do* need (n_ref/n)^2 scaling.
+    lagrange_learning_rate: float | None = None
+    tolerance_factor: float | None = None
+
+    # --- derived ---
+    num_game_agents: int = Field(gt=0)
+    num_conf_actors: int = Field(gt=0)
+    num_br_actors: int = Field(gt=0)
+    num_updates: int = Field(gt=0)
+
+    @classmethod
+    def from_config(cls, gen: Any, rollout_length: int, num_agents: int) -> PairedDiversityRuntime:
+        if num_agents != 2:
+            raise ValueError(
+                f"{gen.generator} trains confederate/best-response pairs and assumes "
+                f"exactly 2 agents; this environment has {num_agents}."
+            )
+        num_updates = int(gen.total_timesteps // (rollout_length * gen.num_envs))
+        if num_updates < 1:
+            raise ValueError(
+                f"total_timesteps={gen.total_timesteps:g} gives {num_updates} updates "
+                f"at rollout_length={rollout_length} and num_envs={gen.num_envs}; "
+                f"training would be a no-op. Raise it above "
+                f"{rollout_length * gen.num_envs}."
+            )
+        if gen.ppo.num_minibatches > gen.num_envs:
+            raise ValueError(
+                f"{gen.generator} minibatches over each side's actors, which is "
+                f"num_envs={gen.num_envs} wide; num_minibatches="
+                f"{gen.ppo.num_minibatches} exceeds it."
+            )
+
+        return cls(
+            ppo=gen.ppo,
+            network=gen.network,
+            rollout_length=rollout_length,
+            num_envs=gen.num_envs,
+            total_timesteps=gen.total_timesteps,
+            num_checkpoints=gen.num_checkpoints,
+            population_size=gen.population_size,
+            num_eval_episodes=gen.num_eval_episodes,
+            cross_play_weight=getattr(gen, "cross_play_weight", None),
+            lagrange_learning_rate=getattr(gen, "lagrange_learning_rate", None),
+            tolerance_factor=getattr(gen, "tolerance_factor", None),
+            num_game_agents=num_agents,
+            num_conf_actors=gen.num_envs,
+            num_br_actors=gen.num_envs,
+            num_updates=num_updates,
+        )
+
+    def to_agent_dict(self) -> dict[str, Any]:
+        """Keys the absorbed agent initializers read."""
+        return {**self.network.to_agent_dict(), "POP_SIZE": self.population_size}

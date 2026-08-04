@@ -500,3 +500,69 @@ def test_comedi_requires_two_agents():
     gen = CoMeDiConfig(population_size=2, num_envs=8)
     with pytest.raises(ValueError, match="exactly 2 agents"):
         CoMeDiRuntime.from_config(gen, rollout_length=128, num_agents=3)
+
+
+def test_paired_runtime_serves_both_brdiv_and_lbrdiv():
+    """BRDiv and L-BRDiv share their derived shape entirely.
+
+    They differ only in how the cross-play term is weighted -- BRDiv fixes it,
+    L-BRDiv learns it -- which is authored config, not anything derived.
+    """
+    from oaht_bench.configs.teammate_gen import BrDivConfig, LBrDivConfig
+    from oaht_bench.teammate_gen.runtime import PairedDiversityRuntime
+
+    shared = dict(population_size=2, num_envs=8, total_timesteps=8192)
+    br = PairedDiversityRuntime.from_config(
+        BrDivConfig(**shared), rollout_length=128, num_agents=2
+    )
+    lbr = PairedDiversityRuntime.from_config(
+        LBrDivConfig(**shared), rollout_length=128, num_agents=2
+    )
+
+    assert (br.num_updates, br.num_conf_actors, br.num_br_actors) == (
+        lbr.num_updates, lbr.num_conf_actors, lbr.num_br_actors
+    )
+    assert br.cross_play_weight is not None and br.lagrange_learning_rate is None
+    assert lbr.lagrange_learning_rate is not None and lbr.cross_play_weight is None
+
+
+def test_paired_runtime_rejects_a_no_op_budget():
+    from oaht_bench.configs.teammate_gen import BrDivConfig
+    from oaht_bench.teammate_gen.runtime import PairedDiversityRuntime
+
+    with pytest.raises(ValueError, match="would be a no-op"):
+        PairedDiversityRuntime.from_config(
+            BrDivConfig(population_size=2, num_envs=8, total_timesteps=100),
+            rollout_length=128, num_agents=2,
+        )
+
+
+def test_paired_runtime_requires_two_agents():
+    from oaht_bench.configs.teammate_gen import LBrDivConfig
+    from oaht_bench.teammate_gen.runtime import PairedDiversityRuntime
+
+    with pytest.raises(ValueError, match="exactly 2 agents"):
+        PairedDiversityRuntime.from_config(
+            LBrDivConfig(population_size=2, num_envs=8, total_timesteps=1e5),
+            rollout_length=128, num_agents=3,
+        )
+
+
+def test_no_generator_reads_a_config_dict():
+    """All four generators are converted; none should index a dict by string key.
+
+    Guards the boundary: the typed config is the only way parameters reach the
+    training code.
+    """
+    import pathlib
+    import re
+
+    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "oaht_bench" / "teammate_gen"
+    # runtime.py quotes the old pattern in its module docstring to explain what
+    # it replaced, so it is prose rather than a live read.
+    offenders = []
+    for path in sorted(p for p in src.glob("*.py") if p.name != "runtime.py"):
+        for i, line in enumerate(path.read_text().splitlines(), 1):
+            if re.search(r'\b(config|algorithm_config|warmup_config)\["', line):
+                offenders.append(f"{path.name}:{i}")
+    assert not offenders, f"config dict reads remain: {offenders}"

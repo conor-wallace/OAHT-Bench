@@ -6,12 +6,12 @@ python teammate_generation/run.py algorithm=brdiv/lbf/lbf_7x7_nolevels task=lbf/
 
 Limitations: does not support recurrent actors.
 '''
-import shutil
 import time
 import logging
 from typing import NamedTuple
 from functools import partial
 
+import chex
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -24,6 +24,14 @@ from oaht_bench.agents.population_interface import AgentPopulation
 from oaht_bench.common.plot_utils import get_metric_names
 from oaht_bench.common.run_episodes import run_episodes
 from oaht_bench.common.save_load_utils import save_train_run
+from oaht_bench.common.logging import RunLogger
+from oaht_bench.configs.job import TeammateGenerationJob
+from oaht_bench.envs.protocols import TrainingEnv
+from oaht_bench.teammate_gen.runtime import PairedDiversityRuntime, TrainOutput
+
+#: A trained paired population: stacked confederate parameters plus the policy
+#: class that reads them. Leading axes are ``(num_seeds, population_size)``.
+PairedPopulation = tuple[chex.ArrayTree, AgentPopulation]
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper
 from oaht_bench.teammate_gen.marl.ppo_utils import unbatchify, _create_minibatches
@@ -71,29 +79,28 @@ def gather_params(partner_params_pytree, idx_vec):
 
     return jax.tree.map(gather_leaf, partner_params_pytree)
 
-def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
-    num_agents = env.num_agents
-    assert num_agents == 2, "This code assumes the environment has exactly 2 agents."
+def train_brdiv_partners(
+    train_rng: chex.PRNGKey,
+    env: TrainingEnv,
+    config: PairedDiversityRuntime,
+    conf_policy,
+    br_policy,
+) -> TrainOutput:
 
-    # Define different minibatch sizes for interactions with ego agent and one with BR agent
-    config["NUM_GAME_AGENTS"] = num_agents
-    config["NUM_CONF_ACTORS"] = config["NUM_ENVS"]
-    config["NUM_BR_ACTORS"] = config["NUM_ENVS"]
-    config["NUM_UPDATES"] = config["TOTAL_TIMESTEPS"] // (config["ROLLOUT_LENGTH"] * config["NUM_ENVS"])
 
     def make_brdiv_agents(config):
         def linear_schedule(count):
-            frac = 1.0 - (count // (config["NUM_MINIBATCHES"] * config["UPDATE_EPOCHS"])) / config["NUM_UPDATES"]
-            return config["LR"] * frac
+            frac = 1.0 - (count // (config.ppo.num_minibatches * config.ppo.update_epochs)) / config.num_updates
+            return config.ppo.learning_rate * frac
 
         def train(rng):
             rng, init_conf_rng, init_br_rng = jax.random.split(rng, 3)
-            all_conf_init_rngs = jax.random.split(init_conf_rng, config["PARTNER_POP_SIZE"])
-            all_br_init_rngs = jax.random.split(init_br_rng, config["PARTNER_POP_SIZE"])
-            identity_matrix = jnp.eye(config["PARTNER_POP_SIZE"])
+            all_conf_init_rngs = jax.random.split(init_conf_rng, config.population_size)
+            all_br_init_rngs = jax.random.split(init_br_rng, config.population_size)
+            identity_matrix = jnp.eye(config.population_size)
 
-            init_conf_hstate = conf_policy.init_hstate(config["NUM_CONF_ACTORS"])
-            init_br_hstate = br_policy.init_hstate(config["NUM_BR_ACTORS"])
+            init_conf_hstate = conf_policy.init_hstate(config.num_conf_actors)
+            init_br_hstate = br_policy.init_hstate(config.num_br_actors)
 
             def init_train_states(rng_agents, rng_brs):
                 def init_single_pair_optimizers(rng_agent, rng_br):
@@ -106,13 +113,13 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
 
                 # Define optimizers for both confederate and BR policy
                 tx = optax.chain(
-                    optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-                    optax.adam(learning_rate=linear_schedule if config["ANNEAL_LR"] else config["LR"],
+                    optax.clip_by_global_norm(config.ppo.max_grad_norm),
+                    optax.adam(learning_rate=linear_schedule if config.ppo.anneal_lr else config.ppo.learning_rate,
                     eps=1e-5),
                 )
                 tx_br = optax.chain(
-                    optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-                    optax.adam(learning_rate=linear_schedule if config["ANNEAL_LR"] else config["LR"],
+                    optax.clip_by_global_norm(config.ppo.max_grad_norm),
+                    optax.adam(learning_rate=linear_schedule if config.ppo.anneal_lr else config.ppo.learning_rate,
                     eps=1e-5),
                 )
 
@@ -171,8 +178,8 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
 
                 # For done envs, resample both conf and brs
                 needs_resample = last_done["__all__"]
-                resampled_conf_ids = jax.random.randint(conf_sampling_rng, (config["NUM_CONF_ACTORS"],), 0, config["PARTNER_POP_SIZE"])
-                resampled_br_ids = jax.random.randint(br_sampling_rng, (config["NUM_BR_ACTORS"],), 0, config["PARTNER_POP_SIZE"])
+                resampled_conf_ids = jax.random.randint(conf_sampling_rng, (config.num_conf_actors,), 0, config.population_size)
+                resampled_br_ids = jax.random.randint(br_sampling_rng, (config.num_br_actors,), 0, config.population_size)
 
                 # Determine final indices based on whether resampling was needed for each env
                 updated_conf_ids = jnp.where(
@@ -221,7 +228,7 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
                 avail_actions_1 = avail_actions["agent_1"].astype(jnp.float32)
 
                 # Agent_0 action
-                act0_rng = jax.random.split(act0_rng, config["NUM_ENVS"])
+                act0_rng = jax.random.split(act0_rng, config.num_envs)
                 act_0, val_0, pi_0, new_conf_h = jax.vmap(forward_pass_conf)(updated_conf_params,
                         last_obs["agent_0"], updated_br_onehot_ids, last_done["agent_0"], avail_actions_0,
                         updated_conf_h, act0_rng)
@@ -229,7 +236,7 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
                 act_0, val_0, logp_0 = act_0.squeeze(), val_0.squeeze(), logp_0.squeeze()
 
                 # Agent_1 action
-                act1_rng = jax.random.split(act1_rng, config["NUM_ENVS"])
+                act1_rng = jax.random.split(act1_rng, config.num_envs)
                 act_1, val_1, pi_1, new_br_h = jax.vmap(forward_pass_br)(updated_br_params,
                         last_obs["agent_1"], updated_conf_onehot_ids, last_done["agent_1"], avail_actions_1,
                         updated_br_h, act1_rng)
@@ -238,11 +245,11 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
 
                 # Combine actions into the env format
                 combined_actions = jnp.concatenate([act_0, act_1], axis=0)
-                env_act = unbatchify(combined_actions, env.agents, config["NUM_ENVS"], num_agents)
+                env_act = unbatchify(combined_actions, env.agents, config.num_envs, config.num_game_agents)
                 env_act = {k: v.flatten() for k, v in env_act.items()}
 
                 # Step env
-                step_rngs = jax.random.split(step_rng, config["NUM_ENVS"])
+                step_rngs = jax.random.split(step_rng, config.num_envs)
                 obs_next, env_state_next, reward, done, info = jax.vmap(env.step, in_axes=(0,0,0))(
                     step_rngs, env_state, env_act
                 )
@@ -300,10 +307,10 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
                         transition.value,
                         transition.reward,
                     )
-                    delta = reward + config["GAMMA"] * next_value * (1 - done) - value
+                    delta = reward + config.ppo.gamma * next_value * (1 - done) - value
                     gae = (
                         delta
-                        + config["GAMMA"] * config["GAE_LAMBDA"] * (1 - done) * gae
+                        + config.ppo.gamma * config.ppo.gae_lambda * (1 - done) * gae
                     )
                     return (gae, value), gae
 
@@ -317,7 +324,7 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
                 return advantages, advantages + traj_batch.value
 
             def run_all_episodes(rng, train_state_conf, train_state_br):
-                conf_ids, br_ids = _get_all_ids(config["PARTNER_POP_SIZE"])
+                conf_ids, br_ids = _get_all_ids(config.population_size)
                 gathered_conf_model_params = gather_params(train_state_conf.params, conf_ids)
                 gathered_br_model_params = gather_params(train_state_br.params, br_ids)
 
@@ -327,7 +334,7 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
                         eval_rng, env,
                         conf_param, conf_policy,
                         br_param, br_policy,
-                        config["ROLLOUT_LENGTH"], config["NUM_EVAL_EPISODES"],
+                        config.rollout_length, config.num_eval_episodes,
                     )
                 ep_infos = jax.vmap(run_episodes_fixed_rng)(
                     gathered_conf_model_params, gathered_br_model_params, # leaves where shape is (pop_size*pop_size, ...)
@@ -366,7 +373,7 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
                         value_pred_clipped = traj_batch.value + (
                             value - traj_batch.value
                             ).clip(
-                            -config["CLIP_EPS"], config["CLIP_EPS"])
+                            -config.ppo.clip_eps, config.ppo.clip_eps)
                         value_losses = jnp.square(value - target_v)
                         value_losses_clipped = jnp.square(value_pred_clipped - target_v)
                         value_loss = jax.lax.cond(
@@ -376,7 +383,7 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
                             (loss_weights * jnp.maximum(value_losses, value_losses_clipped)).sum() / (loss_weights.sum() + 1e-8)
                         )
 
-                        n = config["PARTNER_POP_SIZE"]
+                        n = config.population_size
                         # Apply different loss weights for SP and XP data
                         # Loss weights consist of two parts: the first term is the weighting from the BRDiv loss fucntion
                         # The second term is a reweighting term to compensate for the data collection process, which uniformly and independently
@@ -385,8 +392,8 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
                         # Thus, we set the 2nd term of the SP weight to n/2, and the 2nd term of the XP weight to n/(2 * (n-1)).
 
                         is_sp = jnp.equal(jnp.argmax(traj_batch.self_onehot_id, axis=-1), jnp.argmax(traj_batch.oppo_onehot_id, axis=-1))
-                        sp_weight = (1 + 2*config["XP_LOSS_WEIGHTS"]) * (n/2)
-                        xp_weight = config["XP_LOSS_WEIGHTS"] * (n / (2 * (n-1)))
+                        sp_weight = (1 + 2*config.cross_play_weight) * (n/2)
+                        xp_weight = config.cross_play_weight * (n / (2 * (n-1)))
                         actor_weights = jnp.where(is_sp, sp_weight, xp_weight)
 
                         # Policy gradient loss
@@ -395,8 +402,8 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
                         pg_loss_1 = ratio * gae_norm * actor_weights
                         pg_loss_2 = jnp.clip(
                             ratio,
-                            1.0 - config["CLIP_EPS"],
-                            1.0 + config["CLIP_EPS"]) * gae_norm * actor_weights
+                            1.0 - config.ppo.clip_eps,
+                            1.0 + config.ppo.clip_eps) * gae_norm * actor_weights
                         pg_loss = jax.lax.cond(
                             loss_weights.sum() == 0,
                             lambda x: jnp.zeros_like(x).astype(jnp.float32),
@@ -414,10 +421,10 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
                             (loss_weights * pi.entropy()).sum()/(loss_weights.sum() + 1e-8)
                         )
 
-                        total_loss = pg_loss + config["VF_COEF"] * value_loss - config["ENT_COEF"] * entropy
+                        total_loss = pg_loss + config.ppo.value_coef * value_loss - config.ppo.entropy_coef * entropy
                         return total_loss, (value_loss, pg_loss, entropy)
 
-                    possible_agent_ids = jnp.expand_dims(jnp.arange(config["PARTNER_POP_SIZE"]), 1)
+                    possible_agent_ids = jnp.expand_dims(jnp.arange(config.population_size), 1)
                     grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
 
                     def gather_conf_params_and_return_grads(agent_id):
@@ -453,9 +460,9 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
                 rng, perm_rng_conf, perm_rng_br = jax.random.split(rng, 3)
 
                 minibatches_conf = _create_minibatches(traj_batch_conf, advantages_conf, targets_conf, init_conf_hstate,
-                                                       config["NUM_CONF_ACTORS"], config["NUM_MINIBATCHES"], perm_rng_conf)
+                                                       config.num_conf_actors, config.ppo.num_minibatches, perm_rng_conf)
                 minibatches_br = _create_minibatches(traj_batch_br, advantages_br, targets_br, init_br_hstate,
-                                                     config["NUM_BR_ACTORS"], config["NUM_MINIBATCHES"], perm_rng_br)
+                                                     config.num_br_actors, config.ppo.num_minibatches, perm_rng_br)
 
                 # Update both policies
                 (train_state_conf, train_state_br), all_losses = jax.lax.scan(
@@ -484,15 +491,15 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
 
                 rng, conf_sampling_rng, br_sampling_rng = jax.random.split(rng, 3)
 
-                conf_ids = jax.random.randint(conf_sampling_rng, (config["NUM_ENVS"],), 0, config["PARTNER_POP_SIZE"])
-                br_ids = jax.random.randint(br_sampling_rng, (config["NUM_ENVS"],), 0, config["PARTNER_POP_SIZE"])
+                conf_ids = jax.random.randint(conf_sampling_rng, (config.num_envs,), 0, config.population_size)
+                br_ids = jax.random.randint(br_sampling_rng, (config.num_envs,), 0, config.population_size)
 
                 runner_state = (
                     all_train_state_conf, all_train_state_br, conf_ids, br_ids,
                     last_env_state, last_obs, last_done, last_conf_h, last_br_h, rng
                 )
                 runner_state, traj_batch = jax.lax.scan(
-                    _env_step, runner_state, None, config["ROLLOUT_LENGTH"])
+                    _env_step, runner_state, None, config.rollout_length)
                 (all_train_state_conf, all_train_state_br, last_conf_ids, last_br_ids,
                  last_env_state, last_obs, last_done, last_conf_h, last_br_h, rng) = runner_state
 
@@ -515,7 +522,7 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
                     done=last_done["agent_0"],
                     avail_actions=avail_actions_0,
                     hstate=last_conf_h,
-                    rng=jax.random.split(jax.random.PRNGKey(0), config["NUM_ENVS"])  # Dummy key since we're just extracting the value
+                    rng=jax.random.split(jax.random.PRNGKey(0), config.num_envs)  # Dummy key since we're just extracting the value
                 )
                 last_val_conf = last_val_conf.squeeze()
                 advantages_conf, targets_conf = _calculate_gae(traj_batch_conf, last_val_conf)
@@ -529,7 +536,7 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
                     done=last_done["agent_1"],
                     avail_actions=avail_actions_1,
                     hstate=last_br_h,
-                    rng=jax.random.split(jax.random.PRNGKey(0), config["NUM_ENVS"])  # Dummy key since we're just extracting the value
+                    rng=jax.random.split(jax.random.PRNGKey(0), config.num_envs)  # Dummy key since we're just extracting the value
                 )
                 last_val_br = last_val_br.squeeze()
                 advantages_br, targets_br = _calculate_gae(traj_batch_br, last_val_br)
@@ -545,7 +552,7 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
                 )
 
                 update_state, all_losses = jax.lax.scan(
-                    _update_epoch, update_state, None, config["UPDATE_EPOCHS"])
+                    _update_epoch, update_state, None, config.ppo.update_epochs)
                 all_train_state_conf, all_train_state_br = update_state[:2]
                 (_, (value_loss_conf, pg_loss_conf, entropy_conf)), (_, (value_loss_br, pg_loss_br, entropy_br)) = all_losses
 
@@ -575,8 +582,8 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
             # --------------------------
             # PPO Update and Checkpoint saving
             # --------------------------
-            ckpt_and_eval_interval = config["NUM_UPDATES"] // max(1, config["NUM_CHECKPOINTS"] - 1)  # -1 because we store a ckpt at the last update
-            num_ckpts = config["NUM_CHECKPOINTS"]
+            ckpt_and_eval_interval = config.num_updates // max(1, config.num_checkpoints - 1)  # -1 because we store a ckpt at the last update
+            num_ckpts = config.num_checkpoints
 
             # Build a PyTree that holds parameters for all conf agent checkpoints
             def init_ckpt_array(params_pytree):
@@ -596,7 +603,7 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
                 # Decide if we store a checkpoint
                 # update steps is 1-indexed because it was incremented at the end of the update step
                 to_store = jnp.logical_or(jnp.equal(jnp.mod(update_steps-1, ckpt_and_eval_interval), 0),
-                                        jnp.equal(update_steps, config["NUM_UPDATES"]))
+                                        jnp.equal(update_steps, config.num_updates))
 
                 def store_and_eval_ckpt(args):
                     ckpt_arr_and_ep_infos, rng, cidx = args
@@ -648,13 +655,13 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
 
             # Initialize environment
             rng, reset_rng = jax.random.split(rng)
-            reset_rngs = jax.random.split(reset_rng, config["NUM_ENVS"])
+            reset_rngs = jax.random.split(reset_rng, config.num_envs)
             init_obs, init_env_state = jax.vmap(env.reset, in_axes=(0,))(reset_rngs)
-            init_done = {k: jnp.zeros((config["NUM_ENVS"]), dtype=bool) for k in env.agents + ["__all__"]}
+            init_done = {k: jnp.zeros((config.num_envs), dtype=bool) for k in env.agents + ["__all__"]}
 
             # Initialize conf and br hstates
-            init_conf_h = conf_policy.init_hstate(config["NUM_CONF_ACTORS"])
-            init_br_h = br_policy.init_hstate(config["NUM_BR_ACTORS"])
+            init_conf_h = conf_policy.init_hstate(config.num_conf_actors)
+            init_br_h = br_policy.init_hstate(config.num_br_actors)
 
             update_runner_state = (
                 all_conf_optims, all_br_optims,
@@ -672,7 +679,7 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
                 _update_step_with_ckpt,
                 state_with_ckpt,
                 xs=None,
-                length=config["NUM_UPDATES"]
+                length=config.num_updates
             )
 
             (
@@ -698,11 +705,13 @@ def train_brdiv_partners(train_rng, env, config, conf_policy, br_policy):
     out = train_fn(train_rng)
     return out
 
-def get_brdiv_population(config, out, env):
+def get_brdiv_population(
+    job: TeammateGenerationJob, out: TrainOutput, env: TrainingEnv
+) -> PairedPopulation:
     '''
     Get the partner params and partner population for ego training.
     '''
-    brdiv_pop_size = config["algorithm"]["PARTNER_POP_SIZE"]
+    brdiv_pop_size = job.generator.population_size
 
     # partner_params has shape (num_seeds, brdiv_pop_size, ...)
     partner_params = out['final_params_conf']
@@ -711,7 +720,7 @@ def get_brdiv_population(config, out, env):
         action_dim=env.action_space(env.agents[1]).n,
         obs_dim=env.observation_space(env.agents[1]).shape[0],
         pop_size=brdiv_pop_size, # used to create onehot agent id
-        activation=config["algorithm"].get("ACTIVATION", "tanh")
+        activation=job.generator.network.activation
     )
 
     # Create partner population
@@ -722,36 +731,41 @@ def get_brdiv_population(config, out, env):
 
     return partner_params, partner_population
 
-def run_brdiv(config, wandb_logger):
-    algorithm_config = dict(config["algorithm"])
+def run_brdiv(job: TeammateGenerationJob, wandb_logger: RunLogger) -> PairedPopulation:
+    """Train a BRDiv confederate/best-response population from a job config."""
+    gen = job.generator
 
-    env = make_env(algorithm_config["ENV_NAME"], algorithm_config["ENV_KWARGS"])
+    env = make_env(job.env.env_name, job.env.env_kwargs())
     env = LogWrapper(env)
+
+    runtime = PairedDiversityRuntime.from_config(
+        gen, rollout_length=job.env.rollout_length, num_agents=env.num_agents
+    )
 
     log.info("Starting BRDiv training...")
     start = time.time()
 
     # Generate multiple random seeds from the base seed
-    rng = jax.random.PRNGKey(algorithm_config["TRAIN_SEED"])
-    rngs = jax.random.split(rng, algorithm_config["NUM_SEEDS"])
+    rng = jax.random.PRNGKey(gen.train_seed)
+    rngs = jax.random.split(rng, gen.num_seeds)
 
     # Initialize br and conf policies
     conf_policy = ActorWithConditionalCriticPolicy(
         action_dim=env.action_space(env.agents[0]).n,
         obs_dim=env.observation_space(env.agents[0]).shape[0],
-        pop_size=algorithm_config["PARTNER_POP_SIZE"],
+        pop_size=gen.population_size,
     )
     br_policy = ActorWithConditionalCriticPolicy(
         action_dim=env.action_space(env.agents[0]).n,
         obs_dim=env.observation_space(env.agents[0]).shape[0],
-        pop_size=algorithm_config["PARTNER_POP_SIZE"],
+        pop_size=gen.population_size,
     )
 
     # Create a vmapped version of train_brdiv_partners
     with jax.disable_jit(False):
         vmapped_train_fn = jax.jit(
             jax.vmap(
-                partial(train_brdiv_partners, env=env, config=algorithm_config, conf_policy=conf_policy, br_policy=br_policy)
+                partial(train_brdiv_partners, env=env, config=runtime, conf_policy=conf_policy, br_policy=br_policy)
             )
         )
         out = vmapped_train_fn(rngs)
@@ -759,15 +773,20 @@ def run_brdiv(config, wandb_logger):
     end = time.time()
     log.info(f"BRDiv training complete in {end - start} seconds")
 
-    metric_names = get_metric_names(algorithm_config["ENV_NAME"])
-    log_metrics(config, out, wandb_logger, metric_names)
+    metric_names = get_metric_names(job.env.env_name)
+    log_metrics(job, out, wandb_logger, metric_names)
 
-    partner_params, partner_population = get_brdiv_population(config, out, env)
+    partner_params, partner_population = get_brdiv_population(job, out, env)
 
     return partner_params, partner_population
 
 
-def log_metrics(config, outs, logger, metric_names: tuple):
+def log_metrics(
+    job: TeammateGenerationJob,
+    outs: TrainOutput,
+    logger: RunLogger,
+    metric_names: tuple,
+) -> None:
     metrics = outs["metrics"]
     # metrics now has shape (num_seeds, num_updates, pop_size)
     num_seeds, num_updates, pop_size = metrics["pg_loss_conf_agent"].shape # number of trained pairs
@@ -820,17 +839,5 @@ def log_metrics(config, outs, logger, metric_names: tuple):
         )
 
     ### Log artifacts
-    # OAHT-Bench: read the output directory from the config instead of Hydra's
-    # global. The benchmark drives these functions directly from a validated
-    # job config, so there is no HydraConfig to reach into, and an implicit
-    # global is the wrong place for something that determines where a released
-    # artifact lands.
-    savedir = config["run_dir"]
-    # Save train run output and log to wandb as artifact
-    out_savepath = save_train_run(outs, savedir, savename="saved_train_run")
-    if config["logger"]["log_train_out"]:
-        logger.log_artifact(name="saved_train_run", path=out_savepath, type_name="train_run")
-
-    # Cleanup locally logged out files
-    if not config["local_logger"]["save_train_out"]:
-        shutil.rmtree(out_savepath)
+    out_savepath = save_train_run(outs, job.run_dir(), savename="saved_train_run")
+    logger.log_artifact(name="saved_train_run", path=out_savepath, type_name="train_run")
