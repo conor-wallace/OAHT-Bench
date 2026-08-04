@@ -10,10 +10,35 @@ requires-python = ">=3.11,<3.12"
 license = {text = "MIT"}
 
 dependencies = [
-    "jax-aht",
+    # --- ours ---
     "pydantic>=2.7",
     "h5py>=3.10",
+    # --- inherited with the absorbed jax-aht code (PROVENANCE.md) ---
+    # Pinned to the JAX AI stack v2025.2.5 versions the absorbed code was
+    # written against. Bumping these can change environment dynamics, which
+    # invalidates collected datasets and trained populations.
+    "jax[cuda12]==0.5.3; platform_system == 'Linux'",
+    "jax==0.5.3; platform_system == 'Darwin'",
+    "chex==0.1.88",
+    "flax==0.10.2",
+    "ml_dtypes==0.4.0",
+    "optax==0.2.4",
+    "orbax-checkpoint==0.11.1",
+    "jumanji==1.1.0",
+    "jaxmarl==0.0.7",
+    "distrax",
+    "gymnax",
     "numpy",
+    "pandas<=2.3.3",
+    "safetensors",
+    "huggingface-hub",
+    "omegaconf",
+    "hydra-core",
+    "matplotlib",
+    "prettytable",
+    "rliable",  # IQM aggregation for BR-Prox (§8)
+    "wandb",
+    "setuptools<81",
 ]
 
 [project.scripts]
@@ -23,20 +48,8 @@ oaht-bench = "oaht_bench.cli:main"
 dev = ["pytest>=8.0"]
 
 [tool.setuptools.packages.find]
+where = ["src"]
 include = ["oaht_bench*"]
-
-[tool.uv.sources]
-# Pinned to an immutable upstream commit -- not a branch, not a local path.
-# Results must be reproducible from this file alone; a floating ref or a
-# developer's working copy makes "which jax-aht?" unanswerable.
-#
-# 0885df9 is LARG/jax-aht main as of 2026-07-31. Bumping it is a deliberate act:
-# it can change environment dynamics or teammate-generation behaviour, which
-# invalidates collected datasets and trained populations. Record the reason in
-# the commit message and re-hash affected artifacts.
-#
-# Configs are deliberately NOT inherited from upstream -- see configs/README.md.
-jax-aht = { git = "https://github.com/LARG/jax-aht.git", rev = "0885df95c386121b9c94cb0fb516531895e29702" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
