@@ -644,3 +644,92 @@ def test_lagrange_lr_is_scaled_for_population_size():
 
     assert _lagrange_lr(3) == pytest.approx(0.01)
     assert _lagrange_lr(5) == pytest.approx(0.0036, abs=1e-6)
+
+
+# --- minimal (delta) config files -------------------------------------------
+
+
+def test_minimal_dump_keeps_discriminator_tags():
+    """exclude_defaults alone drops job_type, env_name and generator.
+
+    Their values equal their defaults, but the discriminated unions need them to
+    choose a model, so a plain sparse dump produces an unloadable file.
+    """
+    from oaht_bench.configs.job import JobConfig
+
+    d = JobConfig(job=_job()).minimal_dump()
+    assert d["job"]["job_type"] == "teammate_generation"
+    assert d["job"]["env"]["env_name"] == "lbf"
+    assert d["job"]["generator"]["generator"] == "fcp"
+
+
+def test_minimal_dump_omits_defaults():
+    from oaht_bench.configs.job import JobConfig
+
+    d = JobConfig(job=_job()).minimal_dump()
+    assert "seed" not in d["job"]  # default 0
+    assert "logging" not in d["job"]  # all defaults
+    assert "ppo" not in d["job"]["generator"]  # FCP's LBF PPO block is all defaults here
+
+
+def test_minimal_dump_omits_all_default_nested_models():
+    """An untouched nested model is dropped whole, tag included.
+
+    Loading reconstructs it, so emitting a lone tag for it would be noise.
+    """
+    from oaht_bench.configs.job import JobConfig
+
+    d = JobConfig(job=_job()).minimal_dump()
+    assert "network" not in d["job"]["generator"]
+
+
+def test_minimal_dump_always_states_schema_version():
+    """A file without it is indistinguishable from one written against a schema
+    this build cannot interpret."""
+    from oaht_bench.configs.job import JobConfig
+
+    assert JobConfig(job=_job()).minimal_dump()["schema_version"] == SCHEMA_VERSION
+
+
+def test_minimal_and_full_forms_are_equivalent(tmp_path):
+    """The delta file must load to the same object, and the same hash, as the
+    full one -- otherwise provenance depends on which form was written."""
+    from oaht_bench.configs.job import JobConfig
+
+    original = _job()
+    lean = JobConfig(job=original).to_json_file(tmp_path / "lean.json", minimal=True)
+    fat = JobConfig(job=original).to_json_file(tmp_path / "fat.json", minimal=False)
+
+    a, b = load_job(lean), load_job(fat)
+    assert a == b == original
+    assert a.content_hash() == b.content_hash() == original.content_hash()
+    assert lean.read_text().count("\n") < fat.read_text().count("\n")
+
+
+@pytest.mark.parametrize("path", _shipped_configs(), ids=lambda p: f"{p.parent.name}/{p.stem}")
+def test_shipped_configs_are_deltas(path):
+    """Shipped configs state what the experiment changes, not every default."""
+    import json
+
+    payload = json.loads(path.read_text())
+    gen = payload["job"]["generator"]
+    # A generator block restating all ten PPO fields means the delta broke.
+    assert len(gen.get("ppo", {})) < 10
+
+
+def test_run_directories_record_the_full_config(tmp_path):
+    """Authored configs are deltas; recorded ones are not.
+
+    A run's job.json must remain self-describing even if a default later moves,
+    otherwise a released artifact's meaning depends on the code version that
+    reads it.
+    """
+    import json
+
+    from oaht_bench.configs import save_job
+
+    p = save_job(_job(), tmp_path / "job.json", minimal=False)
+    payload = json.loads(p.read_text())
+    ppo = payload["job"]["generator"]["ppo"]
+    assert len(ppo) == 10  # every PPO field stated
+    assert "logging" in payload["job"]

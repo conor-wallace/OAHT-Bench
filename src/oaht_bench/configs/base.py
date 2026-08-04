@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Literal, Self, get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -38,6 +38,49 @@ class BaseConfig(BaseModel):
         validate_assignment=True,
         validate_default=True,
     )
+
+    def minimal_dump(self) -> dict[str, Any]:
+        """Dump only what differs from the defaults, keeping discriminator tags.
+
+        Config files should show what an experiment *changes*, not restate every
+        default — a reader cannot tell which of fifty values were chosen and which
+        were inherited, and a default that moves has to be edited in every file.
+
+        Plain ``exclude_defaults=True`` is not enough: it drops ``job_type``,
+        ``env_name`` and ``generator``, whose values equal their defaults but which
+        the discriminated unions need to pick a model. So any field annotated as a
+        single-valued ``Literal`` is treated as a tag and always emitted.
+
+        The resulting file loads to exactly the same object, and therefore to the
+        same :meth:`content_hash`, as the full form.
+        """
+        sparse = self.model_dump(mode="json", exclude_defaults=True)
+        sparse = self._reinstate_tags(self, sparse)
+        if isinstance(self, VersionedConfig):
+            # Always stated: a file without it is indistinguishable from one
+            # written against a schema this build cannot interpret.
+            sparse["schema_version"] = self.schema_version
+        return sparse
+
+    @classmethod
+    def _reinstate_tags(cls, model: BaseModel, sparse: dict[str, Any]) -> dict[str, Any]:
+        """Add discriminator tags back to a sparse dump, recursively.
+
+        Only descends into nested models that survived the sparse dump. A nested
+        model left entirely at its defaults is omitted whole -- loading
+        reconstructs it, tag included -- so emitting a lone tag for it would be
+        noise.
+        """
+        full = model.model_dump(mode="json")
+        for name, field in type(model).model_fields.items():
+            ann = field.annotation
+            if get_origin(ann) is Literal and len(get_args(ann)) == 1 and name not in sparse:
+                sparse[name] = full[name]
+
+            value = getattr(model, name, None)
+            if isinstance(value, BaseModel) and isinstance(sparse.get(name), dict):
+                sparse[name] = cls._reinstate_tags(value, sparse[name])
+        return sparse
 
     def canonical_json(self) -> str:
         """Deterministic JSON rendering, used for hashing and on-disk records."""
@@ -97,10 +140,15 @@ class VersionedConfig(BaseConfig):
             raise ValueError(f"{path}: expected a JSON object, got {type(payload).__name__}")
         return cls.model_validate(payload)
 
-    def to_json_file(self, path: str | Path, *, indent: int = 2) -> Path:
-        """Write the config as human-editable JSON."""
+    def to_json_file(self, path: str | Path, *, indent: int = 2, minimal: bool = False) -> Path:
+        """Write the config as human-editable JSON.
+
+        ``minimal`` emits only what differs from the defaults — right for a config
+        someone authors and reads. Run directories keep the full form, so an
+        artifact remains self-describing even if a default later moves.
+        """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload: dict[str, Any] = self.model_dump(mode="json")
+        payload = self.minimal_dump() if minimal else self.model_dump(mode="json")
         path.write_text(json.dumps(payload, indent=indent, sort_keys=True) + "\n")
         return path

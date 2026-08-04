@@ -74,14 +74,14 @@ def validate_job(payload: dict, *, source: str = "<dict>") -> AnyJob:
     return JobConfig.model_validate(payload).job
 
 
-def save_job(job: AnyJob, path: str | Path, *, indent: int = 2) -> Path:
+def save_job(job: AnyJob, path: str | Path, *, indent: int = 2, minimal: bool = False) -> Path:
     """Write a job as a loadable config file.
 
     Wraps the job under the ``job`` key so the result round-trips through
     :func:`load_job`. Writing ``job.to_json_file`` directly would emit the job's
     own fields at the top level, which no longer loads.
     """
-    return JobConfig(job=job).to_json_file(path, indent=indent)
+    return JobConfig(job=job).to_json_file(path, indent=indent, minimal=minimal)
 
 
 __all__ = [

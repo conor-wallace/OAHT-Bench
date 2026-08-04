@@ -1,65 +1,28 @@
 {
   "job": {
     "env": {
-      "do_reward_shaping": true,
       "env_name": "overcooked-v1",
       "layout": "counter_circuit",
       "name": "overcooked_counter_circuit",
       "notes": "Full resource-sharing; discriminates between methods.",
-      "random_obj_state": true,
-      "reward_shaping": {
-        "COUNTER_DROP_REWARD": 0.0,
-        "COUNTER_PICKUP_REWARD": 0.0,
-        "ONION_PICKUP_REWARD": 0.1,
-        "PLACEMENT_IN_POT_REW": 0.5,
-        "PLATE_PICKUP_REWARD": 0.1,
-        "SOUP_PICKUP_REWARD": 1.0
-      },
       "rollout_length": 400,
-      "schema_version": 1,
       "tier": "tier1"
     },
     "generator": {
       "generator": "lbrdiv",
-      "lagrange_learning_rate": 0.01,
-      "network": {
-        "activation": "tanh",
-        "architecture": "mlp",
-        "hidden_dim": 64,
-        "policy_input_dim": null
-      },
-      "num_checkpoints": 5,
       "num_envs": 128,
-      "num_eval_episodes": 20,
-      "num_seeds": 1,
       "population_size": 3,
       "ppo": {
-        "anneal_lr": false,
         "clip_eps": 0.01,
         "entropy_coef": 0.05,
-        "gae_lambda": 0.95,
-        "gamma": 0.99,
         "learning_rate": 0.001,
-        "max_grad_norm": 1.0,
-        "num_minibatches": 8,
-        "update_epochs": 15,
-        "value_coef": 0.5
+        "num_minibatches": 8
       },
       "tolerance_factor": 10.0,
-      "total_timesteps": 90000000.0,
-      "train_seed": 20374
+      "total_timesteps": 90000000.0
     },
     "job_type": "teammate_generation",
-    "label": "lbrdiv_overcooked_counter_circuit",
-    "logging": {
-      "use_wandb": false,
-      "verbose": false,
-      "wandb_entity": null,
-      "wandb_project": null
-    },
-    "output_dir": "results",
-    "schema_version": 1,
-    "seed": 0
+    "label": "lbrdiv_overcooked_counter_circuit"
   },
   "schema_version": 1
 }

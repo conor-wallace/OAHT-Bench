@@ -7,7 +7,6 @@
       "max_life_tokens": 3,
       "name": "hanabi",
       "notes": "Turn-based, action-masked, hidden own hand. The abstraction stress test.",
-      "num_agents": 2,
       "num_cards_of_rank": [
         3,
         2,
@@ -18,50 +17,23 @@
       "num_colors": 5,
       "num_ranks": 5,
       "rollout_length": 128,
-      "schema_version": 1,
       "tier": "tier1"
     },
     "generator": {
       "generator": "lbrdiv",
-      "lagrange_learning_rate": 0.01,
-      "network": {
-        "activation": "tanh",
-        "architecture": "mlp",
-        "hidden_dim": 64,
-        "policy_input_dim": null
-      },
-      "num_checkpoints": 5,
       "num_envs": 128,
-      "num_eval_episodes": 20,
-      "num_seeds": 1,
       "population_size": 3,
       "ppo": {
         "anneal_lr": true,
         "clip_eps": 0.2,
-        "entropy_coef": 0.01,
-        "gae_lambda": 0.95,
         "gamma": 0.999,
         "learning_rate": 0.0005,
-        "max_grad_norm": 1.0,
-        "num_minibatches": 4,
-        "update_epochs": 4,
-        "value_coef": 0.5
+        "update_epochs": 4
       },
-      "tolerance_factor": 0.1,
-      "total_timesteps": 500000000.0,
-      "train_seed": 20374
+      "total_timesteps": 500000000.0
     },
     "job_type": "teammate_generation",
-    "label": "lbrdiv_hanabi",
-    "logging": {
-      "use_wandb": false,
-      "verbose": false,
-      "wandb_entity": null,
-      "wandb_project": null
-    },
-    "output_dir": "results",
-    "schema_version": 1,
-    "seed": 0
+    "label": "lbrdiv_hanabi"
   },
   "schema_version": 1
 }

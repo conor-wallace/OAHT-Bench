@@ -44,7 +44,9 @@ def run(job: TeammateGenerationJob) -> Path:
     if alg not in runners:
         raise ValueError(f"No runner for generator {alg!r}. Known: {sorted(runners)}")
 
-    save_job(job, run_dir / "job.json")
+    # Fully resolved, not the delta form the authored config uses: an artifact
+    # must stay self-describing even if a default later moves.
+    save_job(job, run_dir / "job.json", minimal=False)
     (run_dir / "resolved_config.json").write_text(
         json.dumps(cfg, indent=2, sort_keys=True, default=str) + "\n"
     )

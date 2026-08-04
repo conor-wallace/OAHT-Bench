@@ -189,7 +189,7 @@ def main() -> int:
                 label=f"{generator}_{env_name}", env=env, generator=gen
             )
             path = OUT_ROOT / env_name / f"{generator}.json"
-            save_job(job, path)
+            save_job(job, path, minimal=True)
             written.append((env_name, generator, gen, job))
 
     print(f"{'environment':30s} {'gen':8s} {'pop':>4s} {'envs':>5s} {'budget':>10s}  hash")
