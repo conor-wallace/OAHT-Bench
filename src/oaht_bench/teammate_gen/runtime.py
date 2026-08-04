@@ -139,3 +139,105 @@ class TrainOutput(TypedDict):
     checkpoints: chex.ArrayTree
     #: Index of the checkpoint selected as each member's final policy.
     final_ckpt_idx: chex.Array
+
+
+class CoMeDiRuntime(BaseConfig):
+    """Derived values for a CoMeDi run.
+
+    CoMeDi's update budget is not ``total_timesteps // rollout_length //
+    num_envs``. Each outer iteration spends steps on *population selection*
+    rollouts as well as training, so the divisor is the sum of both. Getting this
+    wrong changes how many updates happen without any error.
+    """
+
+    # --- authored ---
+    ppo: PpoHyperparams
+    network: MlpNetwork
+    actor_type: ActorType
+    rollout_length: int = Field(gt=0)
+    num_envs: int = Field(gt=0)
+    total_timesteps_per_iteration: float = Field(gt=0)
+    num_checkpoints: int = Field(gt=0)
+    population_size: int = Field(gt=0)
+    num_eval_episodes: int = Field(gt=0)
+    num_argmax_rollout_episodes: int = Field(gt=0)
+    cross_play_weight: float
+    mixed_play_weight: float
+
+    # --- derived ---
+    num_game_agents: int = Field(gt=0)
+    num_actors: int = Field(gt=0)
+    num_controlled_actors: int = Field(gt=0)
+    num_updates: int = Field(gt=0)
+
+    @classmethod
+    def from_config(cls, gen: Any, rollout_length: int, num_agents: int) -> CoMeDiRuntime:
+        """Build from a :class:`~oaht_bench.configs.teammate_gen.CoMeDiConfig`."""
+        if num_agents != 2:
+            raise ValueError(
+                f"CoMeDi assumes exactly 2 agents; this environment has {num_agents}."
+            )
+        num_actors = num_agents * gen.num_envs
+
+        # Population-selection rollouts are halved because the implementation
+        # vmaps over the whole population, evaluating against members a
+        # sequential implementation would not revisit.
+        selection_steps = (
+            gen.population_size * gen.num_argmax_rollout_episodes * rollout_length // 2
+        )
+        # Four rollout phases per update: SP, XP, MP, MP2.
+        training_steps = 4 * rollout_length * gen.num_envs
+        steps_per_update = selection_steps + training_steps
+        num_updates = int(gen.total_timesteps_per_iteration // steps_per_update)
+
+        if num_updates < 1:
+            raise ValueError(
+                f"total_timesteps_per_iteration="
+                f"{gen.total_timesteps_per_iteration:g} gives {num_updates} updates: "
+                f"each costs {steps_per_update} steps ({selection_steps} for "
+                f"population selection plus {training_steps} for the four rollout "
+                f"phases). Raise it above {steps_per_update}."
+            )
+
+        return cls(
+            ppo=gen.ppo,
+            network=gen.network,
+            actor_type=gen.actor_type,
+            rollout_length=rollout_length,
+            num_envs=gen.num_envs,
+            total_timesteps_per_iteration=gen.total_timesteps_per_iteration,
+            num_checkpoints=gen.num_checkpoints,
+            population_size=gen.population_size,
+            num_eval_episodes=gen.num_eval_episodes,
+            num_argmax_rollout_episodes=gen.num_argmax_rollout_episodes,
+            cross_play_weight=gen.cross_play_weight,
+            mixed_play_weight=gen.mixed_play_weight,
+            num_game_agents=num_agents,
+            num_actors=num_actors,
+            num_controlled_actors=num_actors,
+            num_updates=num_updates,
+        )
+
+    def warmup(self) -> PpoRuntime:
+        """The PPO runtime for CoMeDi's self-play warmup phase.
+
+        Replaces the ``warmup_config = dict(config)`` copy that overrode
+        ``TOTAL_TIMESTEPS`` and ``ACTOR_TYPE``. Making it a method states which
+        two values differ, instead of leaving a mutated copy for a reader to
+        diff against the original.
+        """
+        return PpoRuntime.from_config(
+            ppo=self.ppo,
+            network=self.network,
+            actor_type="pseudo_actor_with_conditional_critic",
+            rollout_length=self.rollout_length,
+            num_envs=self.num_envs,
+            total_timesteps=self.total_timesteps_per_iteration,
+            num_checkpoints=self.num_checkpoints,
+            num_agents=self.num_game_agents,
+            pop_size=self.population_size,
+        )
+
+    def to_agent_dict(self) -> dict[str, Any]:
+        """Keys the absorbed agent initializers read."""
+        return {**self.network.to_agent_dict(), "POP_SIZE": self.population_size}

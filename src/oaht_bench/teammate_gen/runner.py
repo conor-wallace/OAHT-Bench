@@ -57,9 +57,9 @@ def run(job: TeammateGenerationJob) -> Path:
         config=cfg,
         verbose=job.logging.verbose,
     ) as logger:
-        # FCP reads the typed job directly. The other three still take the
-        # nested dict until they are converted (see PROVENANCE / §7).
-        if alg == "fcp":
+        # FCP and CoMeDi read the typed job directly; BRDiv and L-BRDiv still
+        # take the nested dict until they are converted.
+        if alg in ("fcp", "comedi"):
             runners[alg](job, logger)
         else:
             runners[alg](cfg, logger)

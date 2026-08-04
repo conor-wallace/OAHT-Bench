@@ -444,3 +444,59 @@ def test_logger_survives_unserializable_values(tmp_path):
 
     lines = (tmp_path / "run" / "metrics.jsonl").read_text().splitlines()
     assert any('"Train/ok": 1.5' in ln for ln in lines)
+
+
+def test_comedi_runtime_accounts_for_selection_rollouts():
+    """CoMeDi's update budget is not total_timesteps // rollout_length // num_envs.
+
+    Each outer iteration also spends steps on population-selection rollouts, so
+    the divisor is selection + training. Using the plain formula silently changes
+    how many updates happen.
+    """
+    from oaht_bench.configs.teammate_gen import CoMeDiConfig
+    from oaht_bench.teammate_gen.runtime import CoMeDiRuntime
+
+    gen = CoMeDiConfig(
+        population_size=2, num_envs=8, num_argmax_rollout_episodes=2,
+        total_timesteps_per_iteration=8192,
+    )
+    rt = CoMeDiRuntime.from_config(gen, rollout_length=128, num_agents=2)
+
+    selection = 2 * 2 * 128 // 2
+    training = 4 * 128 * 8
+    assert rt.num_updates == int(8192 // (selection + training))
+    assert rt.num_updates != int(8192 // 128 // 8)  # the naive formula differs
+
+
+def test_comedi_runtime_rejects_a_budget_below_one_update():
+    from oaht_bench.configs.teammate_gen import CoMeDiConfig
+    from oaht_bench.teammate_gen.runtime import CoMeDiRuntime
+
+    gen = CoMeDiConfig(population_size=2, num_envs=8, total_timesteps_per_iteration=100)
+    with pytest.raises(ValueError, match="population selection"):
+        CoMeDiRuntime.from_config(gen, rollout_length=128, num_agents=2)
+
+
+def test_comedi_warmup_differs_in_exactly_two_values():
+    """The warmup replaced a mutated dict copy; state what it changes."""
+    from oaht_bench.configs.teammate_gen import CoMeDiConfig
+    from oaht_bench.teammate_gen.runtime import CoMeDiRuntime
+
+    gen = CoMeDiConfig(population_size=2, num_envs=8, total_timesteps_per_iteration=1e5)
+    rt = CoMeDiRuntime.from_config(gen, rollout_length=128, num_agents=2)
+    warm = rt.warmup()
+
+    assert warm.actor_type == "pseudo_actor_with_conditional_critic"
+    assert warm.actor_type != rt.actor_type
+    assert warm.total_timesteps == rt.total_timesteps_per_iteration
+    assert warm.pop_size == rt.population_size
+    assert warm.ppo == rt.ppo  # everything else carries over unchanged
+
+
+def test_comedi_requires_two_agents():
+    from oaht_bench.configs.teammate_gen import CoMeDiConfig
+    from oaht_bench.teammate_gen.runtime import CoMeDiRuntime
+
+    gen = CoMeDiConfig(population_size=2, num_envs=8)
+    with pytest.raises(ValueError, match="exactly 2 agents"):
+        CoMeDiRuntime.from_config(gen, rollout_length=128, num_agents=3)
