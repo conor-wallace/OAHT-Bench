@@ -1009,3 +1009,63 @@ def test_paired_generators_stream_rather_than_batch():
         text = (src / name).read_text()
         assert "io_callback" in text, f"{name} does not stream"
         assert "log_training_curves" not in text, f"{name} would double-log"
+
+
+# --- training step accounting ------------------------------------------------
+
+
+def test_training_plan_counts_fcp_members_as_parallel():
+    """FCP vmaps over members, so sequential depth is one member's worth."""
+    from oaht_bench.configs.teammate_gen import FcpConfig
+    from oaht_bench.teammate_gen.plan import training_plan
+
+    job = _job(generator=FcpConfig(population_size=5, total_timesteps=1e6, num_envs=8))
+    plan = training_plan(job)
+    assert plan.parallel_members == 5
+    assert plan.sequential_units == 1
+    assert plan.sequential_updates == plan.updates_per_unit
+    assert plan.total_updates == plan.updates_per_unit * 5
+
+
+def test_training_plan_counts_comedi_outer_iterations():
+    """CoMeDi's num_updates is per outer iteration, and it scans
+    arange(1, population_size) -- so population_size - 1 of them, after a warmup
+    with its own budget and a different formula."""
+    from oaht_bench.configs.teammate_gen import CoMeDiConfig
+    from oaht_bench.teammate_gen.plan import training_plan
+
+    gen = CoMeDiConfig(population_size=4, num_envs=8, total_timesteps_per_iteration=1e6)
+    plan = training_plan(_job(generator=gen))
+    assert plan.sequential_units == 3
+    assert plan.warmup_updates > 0
+    assert plan.sequential_updates == plan.warmup_updates + plan.updates_per_unit * 3
+
+
+def test_training_plan_counts_paired_generators_as_a_single_run():
+    """BRDiv and L-BRDiv train all pairs jointly, so num_updates is the total."""
+    from oaht_bench.configs.teammate_gen import BrDivConfig
+    from oaht_bench.teammate_gen.plan import training_plan
+
+    gen = BrDivConfig(population_size=3, num_envs=8, total_timesteps=1e6)
+    plan = training_plan(_job(generator=gen))
+    assert (plan.sequential_units, plan.parallel_members) == (1, 1)
+    assert plan.sequential_updates == plan.total_updates == plan.updates_per_unit
+
+
+def test_training_plan_surfaces_an_unrunnable_budget():
+    """The plan builds the same runtime the trainer does, so a budget that would
+    train nothing fails here rather than after a job is queued."""
+    from oaht_bench.configs.teammate_gen import BrDivConfig
+    from oaht_bench.teammate_gen.plan import training_plan
+
+    gen = BrDivConfig(population_size=3, num_envs=8, total_timesteps=100)
+    with pytest.raises(ValueError, match="would be a no-op"):
+        training_plan(_job(generator=gen))
+
+
+@pytest.mark.parametrize("path", _shipped_configs(), ids=lambda p: f"{p.parent.name}/{p.stem}")
+def test_shipped_configs_have_a_computable_plan(path):
+    from oaht_bench.configs import load_job
+    from oaht_bench.teammate_gen.plan import training_plan
+
+    assert training_plan(load_job(path)).sequential_updates >= 1

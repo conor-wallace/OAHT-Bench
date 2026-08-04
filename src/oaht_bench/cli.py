@@ -51,6 +51,15 @@ def _describe(job: AnyJob) -> str:
         f"config     {job.content_hash()}",
         f"run_dir    {job.run_dir()}",
     ]
+    if job.job_type == "teammate_generation":
+        # Imported here so config validation stays free of JAX.
+        from oaht_bench.teammate_gen.plan import training_plan
+
+        try:
+            lines += ["", *training_plan(job).describe().splitlines()]
+        except ValueError as e:
+            lines += ["", f"training plan   UNRUNNABLE: {e}"]
+
     env = getattr(job, "env", None)
     if env is not None:
         lines += [
