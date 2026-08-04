@@ -733,3 +733,71 @@ def test_run_directories_record_the_full_config(tmp_path):
     ppo = payload["job"]["generator"]["ppo"]
     assert len(ppo) == 10  # every PPO field stated
     assert "logging" in payload["job"]
+
+
+# --- cross-generator metric parity ------------------------------------------
+
+
+def test_log_training_curves_emits_the_shared_tags(tmp_path):
+    """All four generators must report the same episode statistics.
+
+    FCP and CoMeDi get these from ippo's in-training callback; BRDiv and
+    L-BRDiv have their own loops and collected but never logged them, so
+    convergence could not be compared across methods.
+    """
+    import json
+
+    import numpy as np
+
+    from oaht_bench.common.logging import RunLogger, log_training_curves
+
+    metrics = {
+        "returned_episode_returns": np.arange(6.0).reshape(2, 3),
+        "returned_episode_lengths": np.full((2, 3), 100.0),
+        "percent_eaten": np.arange(6.0).reshape(2, 3) * 2,
+        "pg_loss_conf_agent": np.zeros((2, 3, 4)),  # a loss, not an episode stat
+    }
+    with RunLogger(tmp_path / "run") as logger:
+        log_training_curves(logger, metrics, "lbf")
+
+    tags = set()
+    for line in (tmp_path / "run" / "metrics.jsonl").read_text().splitlines():
+        tags |= set(json.loads(line))
+    assert {
+        "Train/returned_episode_returns",
+        "Train/returned_episode_lengths",
+        "Train/percent_eaten",
+    } <= tags
+    assert not any(t.startswith("Train/pg_loss") for t in tags)
+
+
+def test_log_training_curves_averages_over_seeds(tmp_path):
+    """Statistics arrive as (num_seeds, num_updates); only the update axis survives."""
+    import json
+
+    import numpy as np
+
+    from oaht_bench.common.logging import RunLogger, log_training_curves
+
+    metrics = {"returned_episode_returns": np.array([[0.0, 2.0], [2.0, 4.0]])}
+    with RunLogger(tmp_path / "run") as logger:
+        log_training_curves(logger, metrics, "hanabi")
+
+    series = [
+        json.loads(l)["Train/returned_episode_returns"]
+        for l in (tmp_path / "run" / "metrics.jsonl").read_text().splitlines()
+        if "Train/returned_episode_returns" in json.loads(l)
+    ]
+    assert series == [1.0, 3.0]  # means over the seed axis, one per update
+
+
+def test_all_generators_log_training_curves():
+    """Guard the parity: every generator module must emit the shared tags."""
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "oaht_bench" / "teammate_gen"
+    # FCP and CoMeDi inherit them from ippo's callback; the other two call the
+    # helper explicitly.
+    assert "log_training_curves" in (src / "BRDiv.py").read_text()
+    assert "log_training_curves" in (src / "LBRDiv.py").read_text()
+    assert 'f"Train/{stat_name}"' in (src / "marl" / "ippo.py").read_text()

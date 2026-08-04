@@ -229,3 +229,63 @@ class RunLogger:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+
+#: Episode statistics logged for every generator, on top of whatever
+#: ``get_metric_names`` reports for the environment. ``returned_episode_lengths``
+#: is included because FCP and CoMeDi already emit it -- ``ippo``'s in-training
+#: callback logs every statistic rather than only the named ones -- and a metric
+#: present for two of four methods is not usable for comparison.
+_ALWAYS_LOGGED = ("returned_episode_returns", "returned_episode_lengths")
+
+
+def log_training_curves(
+    logger: RunLogger,
+    metrics: dict[str, Any],
+    env_name: str,
+    *,
+    prefix: str = "Train",
+) -> None:
+    """Log per-update episode statistics under the same tags across generators.
+
+    FCP and CoMeDi emit ``Train/<stat>`` from inside the PPO loop, through
+    ``ippo``'s ``io_callback``. BRDiv and L-BRDiv have their own training loops
+    and never call it, so they collected the same statistics but never logged
+    them. This emits them post-hoc from the returned metrics so convergence is
+    comparable across all four methods.
+
+    Args:
+        metrics: The training output's ``metrics`` dict. Episode statistics are
+            expected with shape ``(num_seeds, num_updates)``.
+        env_name: Selects the environment-specific statistics to include.
+
+    Note:
+        The tag is the same but the *measurement* is not identical across
+        methods: BRDiv and L-BRDiv compute these over confederate trajectories,
+        whereas FCP measures partner self-play. They are comparable as
+        convergence signals -- is training progressing, has it plateaued -- and
+        not as a like-for-like performance comparison between generators.
+    """
+    from oaht_bench.common.plot_utils import get_metric_names
+
+    wanted = tuple(dict.fromkeys(tuple(get_metric_names(env_name)) + _ALWAYS_LOGGED))
+    available = [k for k in wanted if k in metrics]
+    if not available:
+        return
+
+    curves = {}
+    for name in available:
+        arr = np.asarray(metrics[name])
+        if arr.ndim < 2:
+            continue
+        # Average over every axis but the update axis (axis 1).
+        axes = tuple(i for i in range(arr.ndim) if i != 1)
+        curves[name] = arr.mean(axis=axes)
+
+    if not curves:
+        return
+    num_updates = len(next(iter(curves.values())))
+    for step in range(num_updates):
+        for name, series in curves.items():
+            logger.log_item(f"{prefix}/{name}", series[step], train_step=step)
+    logger.commit()

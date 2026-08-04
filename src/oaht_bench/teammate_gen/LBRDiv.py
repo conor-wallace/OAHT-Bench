@@ -26,7 +26,7 @@ from oaht_bench.agents.population_interface import AgentPopulation
 from oaht_bench.common.plot_utils import get_metric_names
 from oaht_bench.common.run_episodes import run_episodes
 from oaht_bench.common.save_load_utils import save_train_run
-from oaht_bench.common.logging import RunLogger
+from oaht_bench.common.logging import RunLogger, log_training_curves
 from oaht_bench.configs.job import TeammateGenerationJob
 from oaht_bench.envs.protocols import TrainingEnv
 from oaht_bench.teammate_gen.runtime import PairedDiversityRuntime, TrainOutput
@@ -1103,6 +1103,9 @@ def log_metrics(
             title=array_name, xname="train_step")
         )
     logger.commit()
+
+    ### Per-update episode statistics, under the same tags FCP and CoMeDi use
+    log_training_curves(logger, metrics, job.env.env_name)
 
     ### Log artifacts
     out_savepath = save_train_run(outs, job.run_dir(), savename="saved_train_run")

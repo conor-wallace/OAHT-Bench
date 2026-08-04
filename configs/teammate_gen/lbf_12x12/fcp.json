@@ -17,7 +17,13 @@
       }
     },
     "job_type": "teammate_generation",
-    "label": "fcp_lbf_12x12"
+    "label": "fcp_lbf_12x12",
+    "logging": {
+      "use_wandb": true,
+      "verbose": false,
+      "wandb_entity": "bhd445",
+      "wandb_project": "oaht-bench"
+    }
   },
   "schema_version": 1
 }
