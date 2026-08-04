@@ -15,16 +15,14 @@ from pydantic import ValidationError
 from oaht_bench.configs import JOB_ADAPTER, SCHEMA_VERSION, get_preset, load_job
 from oaht_bench.configs.env import HanabiConfig, LbfConfig
 from oaht_bench.configs.job import TeammateGenerationJob
+from oaht_bench.configs.teammate_gen import FcpConfig
 
 
 def _job(**overrides) -> TeammateGenerationJob:
     kwargs = dict(
         label="t",
         env=get_preset("lbf_12x12"),
-        generator="fcp",
-        population_size=5,
-        total_timesteps=1e6,
-        num_envs=8,
+        generator=FcpConfig(PARTNER_POP_SIZE=5),
     )
     kwargs.update(overrides)
     return TeammateGenerationJob(**kwargs)
@@ -102,7 +100,7 @@ def test_content_hash_is_stable_and_order_independent():
 def test_content_hash_changes_with_any_field():
     base = _job()
     assert base.content_hash() != _job(seed=1).content_hash()
-    assert base.content_hash() != _job(population_size=6).content_hash()
+    assert base.content_hash() != _job(generator=FcpConfig(PARTNER_POP_SIZE=6)).content_hash()
     assert base.content_hash() != _job(env=get_preset("hanabi")).content_hash()
 
 

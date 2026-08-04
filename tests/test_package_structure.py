@@ -92,3 +92,37 @@ def test_no_dangling_references_to_unabsorbed_upstream():
                 if stripped.startswith((f"from {mod}", f"import {mod}")):
                     offenders.append(f"{path.relative_to(pkg)}:{i}: {stripped}")
     assert not offenders, "dangling upstream imports:\n" + "\n".join(offenders)
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "oaht_bench.teammate_gen.fcp",
+        "oaht_bench.teammate_gen.CoMeDi",
+        "oaht_bench.teammate_gen.BRDiv",
+        "oaht_bench.teammate_gen.LBRDiv",
+        "oaht_bench.algorithms.liam_agent",
+        "oaht_bench.algorithms.meliba_agent",
+        "oaht_bench.algorithms.initialize_baselines",
+    ],
+)
+def test_absorbed_modules_import(module: str):
+    """Every absorbed module must import under its new path.
+
+    The structural tests above only touch package ``__init__`` files, so a stale
+    intra-package import inside a module went unnoticed until the first real run.
+    Importing each one directly closes that gap.
+    """
+    importlib.import_module(module)
+
+
+def test_all_generators_are_dispatchable():
+    """Every generator named in the config union has a runner."""
+    from oaht_bench.configs.teammate_gen import GeneratorConfig
+    from oaht_bench.teammate_gen.runner import _generators
+
+    import typing
+
+    members = typing.get_args(typing.get_args(GeneratorConfig)[0])
+    declared = {m.model_fields["generator"].default for m in members}
+    assert declared == set(_generators())

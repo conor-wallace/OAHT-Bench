@@ -14,12 +14,31 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
-from oaht_bench.configs.base import VersionedConfig
+from oaht_bench.configs.base import BaseConfig, VersionedConfig
 from oaht_bench.configs.env import EnvConfig
+from oaht_bench.configs.teammate_gen import GeneratorConfig
 
-Generator = Literal["fcp", "comedi", "brdiv", "lbrdiv"]
+
+class LoggingConfig(BaseConfig):
+    """Where run metrics go. Weights & Biases is opt-in.
+
+    A benchmark must run identically for someone with no wandb account, and a
+    config carrying someone else's ``entity`` must never publish there by
+    accident. Metrics always land in ``<run_dir>/metrics.jsonl`` regardless.
+    """
+
+    use_wandb: bool = False
+    wandb_project: str | None = None
+    wandb_entity: str | None = None
+    verbose: bool = False
+
+    @model_validator(mode="after")
+    def _wandb_needs_a_project(self) -> "LoggingConfig":
+        if self.use_wandb and not self.wandb_project:
+            raise ValueError("use_wandb is set but wandb_project is empty.")
+        return self
 
 
 class JobBase(VersionedConfig):
@@ -30,6 +49,7 @@ class JobBase(VersionedConfig):
         "the config hash, which is what actually disambiguates runs."
     )
     seed: int = Field(default=0, description="Master seed for the run.")
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
     output_dir: str = Field(
         default="results",
         description="Root for run outputs. The run writes to "
@@ -46,17 +66,45 @@ class TeammateGenerationJob(JobBase):
 
     job_type: Literal["teammate_generation"] = "teammate_generation"
     env: EnvConfig
-    generator: Generator
-    population_size: int = Field(gt=0, description="PARTNER_POP_SIZE.")
-    total_timesteps: float = Field(gt=0)
-    num_envs: int = Field(gt=0)
-    learning_rate: float = Field(gt=0, default=5e-4)
-    extra: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Generator-specific overrides passed through to jax-aht's "
-        "algorithm config (e.g. LAGRANGE_LR, XP_LOSS_WEIGHTS, COMEDI_ALPHA). "
-        "Typed per-generator models supersede this once the sweeps are defined.",
-    )
+    generator: GeneratorConfig
+
+    def to_jax_aht_cfg(self) -> dict[str, Any]:
+        """Build the nested dict the absorbed training code expects.
+
+        jax-aht drops Hydra at the boundary — its runners call
+        ``OmegaConf.to_container`` and then pass a plain dict to
+        ``run_fcp``/``run_comedi``/``run_brdiv``/``run_lbrdiv`` — so this hands
+        off directly, with no Hydra and no generated YAML.
+        """
+        task = self.env.task_config()
+        algorithm = self.generator.to_algorithm_dict()
+        # The generators read env fields from inside the algorithm block too,
+        # because upstream Hydra interpolated them there.
+        algorithm.update(
+            {
+                "ENV_NAME": task["ENV_NAME"],
+                "ENV_KWARGS": task["ENV_KWARGS"],
+                "ROLLOUT_LENGTH": task["ROLLOUT_LENGTH"],
+            }
+        )
+        return {
+            **task,
+            "task": task,
+            # Where the absorbed training code writes checkpoints. Upstream read
+            # this from Hydra's global; we pass it explicitly.
+            "run_dir": self.run_dir(),
+            "algorithm": algorithm,
+            "label": self.label,
+            "name": f"{task['TASK_NAME']}/{algorithm['ALG']}/{self.label}",
+            "train_ego": False,
+            "run_heldout_eval": False,
+            "logger": {
+                "verbose": self.logging.verbose,
+                "log_train_out": True,
+                "log_eval_out": True,
+            },
+            "local_logger": {"save_train_out": True, "save_eval_out": True},
+        }
 
 
 class DatasetCollectionJob(JobBase):

@@ -68,11 +68,11 @@ def _dispatch(job: JobConfig) -> int:
     generally — does not pay JAX's import cost or require a working accelerator.
     """
     if job.job_type == "teammate_generation":
-        raise NotImplementedError(
-            "teammate_generation runner not yet wired. jax-aht's run_fcp/run_comedi/"
-            "run_brdiv/run_lbrdiv take a plain nested dict, so this dispatches via "
-            "job.env.task_config() without Hydra."
-        )
+        from oaht_bench.teammate_gen.runner import run as run_teammate_generation
+
+        run_dir = run_teammate_generation(job)
+        print(f"\nwrote {run_dir}")
+        return 0
     if job.job_type == "dataset_collection":
         raise NotImplementedError("dataset_collection runner not yet implemented (§4).")
     if job.job_type == "training":

@@ -7,13 +7,12 @@ import logging
 from functools import partial
 
 import jax
-import hydra
 import numpy as np
 from oaht_bench.agents.mlp_actor_critic_agent import MLPActorCriticPolicy
 from oaht_bench.agents.population_interface import AgentPopulation
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper
-from oaht_bench.marl.ippo import make_train as make_ppo_train
+from oaht_bench.teammate_gen.marl.ippo import make_train as make_ppo_train
 from oaht_bench.common.plot_utils import get_metric_names
 from oaht_bench.common.save_load_utils import save_train_run
 
@@ -82,7 +81,12 @@ def run_fcp(config, wandb_logger):
 
     # Save FIRST so the checkpoint survives even if metric logging OOMs
     # on long runs. Same pattern as teammate_generation/train_ego.py.
-    savedir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
+    # OAHT-Bench: read the output directory from the config instead of Hydra's
+    # global. The benchmark drives these functions directly from a validated
+    # job config, so there is no HydraConfig to reach into, and an implicit
+    # global is the wrong place for something that determines where a released
+    # artifact lands.
+    savedir = config["run_dir"]
     out_savepath = save_train_run(out, savedir, savename="saved_train_run")
     log_metrics(config, out, wandb_logger, out_savepath)
 

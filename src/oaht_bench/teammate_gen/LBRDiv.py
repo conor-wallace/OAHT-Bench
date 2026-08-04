@@ -14,7 +14,6 @@ import time
 import logging
 from functools import partial
 
-import hydra
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -29,7 +28,7 @@ from oaht_bench.common.run_episodes import run_episodes
 from oaht_bench.common.save_load_utils import save_train_run
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper
-from oaht_bench.marl.ppo_utils import unbatchify, _create_minibatches
+from oaht_bench.teammate_gen.marl.ppo_utils import unbatchify, _create_minibatches
 from oaht_bench.teammate_gen.BRDiv import _get_all_ids, XPTransition, gather_params
 
 log = logging.getLogger(__name__)
@@ -1087,7 +1086,12 @@ def log_metrics(config, outs, logger, metric_names: tuple):
     logger.commit()
 
     ### Log artifacts
-    savedir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
+    # OAHT-Bench: read the output directory from the config instead of Hydra's
+    # global. The benchmark drives these functions directly from a validated
+    # job config, so there is no HydraConfig to reach into, and an implicit
+    # global is the wrong place for something that determines where a released
+    # artifact lands.
+    savedir = config["run_dir"]
     # Save train run output and log to wandb as artifact
     out_savepath = save_train_run(outs, savedir, savename="saved_train_run")
     if config["logger"]["log_train_out"]:

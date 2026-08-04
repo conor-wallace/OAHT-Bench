@@ -13,7 +13,6 @@ import time
 from typing import NamedTuple
 
 from flax.training.train_state import TrainState
-import hydra
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -29,8 +28,8 @@ from oaht_bench.common.plot_utils import get_metric_names
 from oaht_bench.common.run_episodes import run_episodes
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper, LogEnvState
-from oaht_bench.marl.ippo import make_train as make_ppo_train
-from oaht_bench.marl.ppo_utils import Transition, unbatchify, _create_minibatches
+from oaht_bench.teammate_gen.marl.ippo import make_train as make_ppo_train
+from oaht_bench.teammate_gen.marl.ppo_utils import Transition, unbatchify, _create_minibatches
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -1080,7 +1079,12 @@ def run_comedi(config, wandb_logger):
     metric_names = get_metric_names(algorithm_config["ENV_NAME"])
 
     # Save FIRST so the checkpoint survives even if metric logging OOMs.
-    savedir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
+    # OAHT-Bench: read the output directory from the config instead of Hydra's
+    # global. The benchmark drives these functions directly from a validated
+    # job config, so there is no HydraConfig to reach into, and an implicit
+    # global is the wrong place for something that determines where a released
+    # artifact lands.
+    savedir = config["run_dir"]
     out_savepath = save_train_run(out, savedir, savename="saved_train_run")
     log_metrics(config, out, wandb_logger, metric_names, out_savepath)
     partner_params, partner_population = get_comedi_population(config, out, env)

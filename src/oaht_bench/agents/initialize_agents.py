@@ -5,8 +5,8 @@ from oaht_bench.agents.mlp_actor_critic_agent import MLPActorCriticPolicy, Actor
     PseudoActorWithConditionalCriticPolicy
 from oaht_bench.agents.rnn_actor_critic_agent import RNNActorCriticPolicy
 from oaht_bench.agents.s5_actor_critic_agent import S5ActorCriticPolicy
-from oaht_bench.agents.liam_agent import LIAMPolicy, initialize_liam_encoder_decoder
-from oaht_bench.agents.meliba_agent import MeLIBAPolicy, initialize_meliba_encoder_decoder
+from oaht_bench.algorithms.liam_agent import LIAMPolicy, initialize_liam_encoder_decoder
+from oaht_bench.algorithms.meliba_agent import MeLIBAPolicy, initialize_meliba_encoder_decoder
 
 def initialize_s5_agent(config, env, rng):
     """Initialize an S5 agent with the given config.

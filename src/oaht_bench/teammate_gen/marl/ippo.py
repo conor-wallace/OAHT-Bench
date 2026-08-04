@@ -7,7 +7,6 @@ python marl/run.py task=lbf/lbf_7x7_nolevels algorithm=ippo/lbf/lbf_7x7_nolevels
 '''
 import shutil
 
-import hydra
 import numpy as np
 import jax
 from tqdm import tqdm
@@ -21,7 +20,7 @@ from oaht_bench.common.plot_utils import get_stats, get_metric_names
 from oaht_bench.common.save_load_utils import save_train_run
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper
-from oaht_bench.marl.ppo_utils import Transition, batchify, unbatchify, _create_minibatches
+from oaht_bench.teammate_gen.marl.ppo_utils import Transition, batchify, unbatchify, _create_minibatches
 
 
 def initialize_agent(actor_type, algorithm_config, env, init_rng):
@@ -435,7 +434,12 @@ def log_metrics_intermediate(train_stats, logger):
 def log_artifacts(config, out, logger):
     '''Save train run output and log to wandb as artifact.'''    
     # save artifacts
-    savedir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
+    # OAHT-Bench: read the output directory from the config instead of Hydra's
+    # global. The benchmark drives these functions directly from a validated
+    # job config, so there is no HydraConfig to reach into, and an implicit
+    # global is the wrong place for something that determines where a released
+    # artifact lands.
+    savedir = config["run_dir"]
     out_savepath = save_train_run(out, savedir, savename="saved_train_run")
     if config["logger"]["log_train_out"]:
         logger.log_artifact(name="saved_train_run", path=out_savepath, type_name="train_run")
