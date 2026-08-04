@@ -25,6 +25,7 @@ from typing import Annotated, Any, Literal
 from pydantic import Field
 
 from oaht_bench.configs.base import BaseConfig
+from oaht_bench.configs.network import MlpNetwork
 
 #: Policy architectures the absorbed ``initialize_agents`` dispatches on. A plain
 #: ``str`` here would let a typo through to an ``if/elif`` chain with no ``else``,
@@ -92,6 +93,12 @@ class GeneratorBase(BaseConfig):
     train_seed: int = 20374
     num_seeds: int = Field(default=1, gt=0)
     ppo: PpoHyperparams = Field(default_factory=PpoHyperparams)
+    network: MlpNetwork = Field(
+        default_factory=MlpNetwork,
+        description="Policy architecture. Previously implicit -- the absorbed "
+        "initializers defaulted it via dict.get, so it never entered a run's "
+        "content hash.",
+    )
 
     def _base_algorithm_dict(self) -> dict[str, Any]:
         """The SCREAMING_CASE keys the absorbed training code reads."""
@@ -103,6 +110,7 @@ class GeneratorBase(BaseConfig):
             "TRAIN_SEED": self.train_seed,
             "NUM_SEEDS": self.num_seeds,
             **self.ppo.to_algorithm_dict(),
+            **self.network.to_agent_dict(),
         }
 
 

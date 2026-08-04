@@ -1,7 +1,6 @@
 '''Implementation of the Fictitious Co-Play teammate generation algorithm (Strouse et al. NeurIPS 2021)
 https://proceedings.neurips.cc/paper/2021/hash/797134c3e42371bb4979a462eb2f042a-Abstract.html
 '''
-import shutil
 import time
 import logging
 from functools import partial
@@ -15,17 +14,17 @@ from oaht_bench.envs.log_wrapper import LogWrapper
 from oaht_bench.teammate_gen.marl.ippo import make_train as make_ppo_train
 from oaht_bench.common.plot_utils import get_metric_names
 from oaht_bench.common.save_load_utils import save_train_run
+from oaht_bench.teammate_gen.runtime import PpoRuntime
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-def get_fcp_population(config, out, env):
-    '''
-    For each seeed, flatten the partner pool for for ego training.
-    '''
-    num_seeds = config["algorithm"]["NUM_SEEDS"]
-    fcp_pop_size = config["algorithm"]["PARTNER_POP_SIZE"] * config["algorithm"]["NUM_CHECKPOINTS"]
+def get_fcp_population(job, out, env):
+    '''Flatten each seed's partner pool for downstream use.'''
+    gen = job.generator
+    num_seeds = gen.num_seeds
+    fcp_pop_size = gen.population_size * gen.num_checkpoints
 
     partner_params = out['checkpoints'] # shape is (num_seeds, partner_pop_size, num_ckpts, ...)
     flattened_partner_params = jax.tree.map(lambda x: x.reshape(num_seeds, fcp_pop_size, *x.shape[3:]), partner_params)
@@ -33,7 +32,7 @@ def get_fcp_population(config, out, env):
     partner_policy = MLPActorCriticPolicy(
         action_dim=env.action_space(env.agents[1]).n,
         obs_dim=env.observation_space(env.agents[1]).shape[0],
-        activation=config["algorithm"].get("ACTIVATION", "tanh")
+        activation=gen.network.activation,
     )
 
     # Create partner population
@@ -44,32 +43,47 @@ def get_fcp_population(config, out, env):
 
     return flattened_partner_params, partner_population
 
-def train_fcp_partners(rng, env, algorithm_config, wandb_logger):
+def train_fcp_partners(rng, env, population_size, runtime, wandb_logger):
     '''Single seed of training an FCP pool.'''
-    rngs = jax.random.split(rng, algorithm_config["PARTNER_POP_SIZE"])
-    train_jit = jax.jit(jax.vmap(make_ppo_train(algorithm_config, env, logger=wandb_logger)))
+    rngs = jax.random.split(rng, population_size)
+    train_jit = jax.jit(jax.vmap(make_ppo_train(runtime, env, logger=wandb_logger)))
     out = train_jit(rngs)
     return out
 
-def run_fcp(config, wandb_logger):
-    '''
-    Train a pool of partners for FCP. Return checkpoints for all partners.
-    Returns out, a dictionary of the final train_state, metrics, and checkpoints.
-    '''
-    algorithm_config = config["algorithm"]
-    rng = jax.random.PRNGKey(algorithm_config["TRAIN_SEED"])
-    rngs = jax.random.split(rng, algorithm_config["NUM_SEEDS"])
+def run_fcp(job, wandb_logger):
+    '''Train a pool of FCP partners from a validated job config.
 
-    env = make_env(algorithm_config["ENV_NAME"], algorithm_config["ENV_KWARGS"])
+    OAHT-Bench: reads a :class:`~oaht_bench.configs.job.TeammateGenerationJob`
+    directly rather than a config dict. Parameters are reached by attribute
+    (``job.generator.population_size``), so a typo is a load-time error and every
+    value is the one recorded in the run's content hash.
+    '''
+    gen = job.generator
+    rng = jax.random.PRNGKey(gen.train_seed)
+    rngs = jax.random.split(rng, gen.num_seeds)
+
+    env = make_env(job.env.env_name, job.env.env_kwargs())
     env = LogWrapper(env)
+
+    runtime = PpoRuntime.from_config(
+        ppo=gen.ppo,
+        network=gen.network,
+        actor_type=gen.actor_type,
+        rollout_length=job.env.rollout_length,
+        num_envs=gen.num_envs,
+        total_timesteps=gen.total_timesteps,
+        num_checkpoints=gen.num_checkpoints,
+        num_agents=env.num_agents,
+    )
 
     start_time = time.time()
     with jax.disable_jit(False):
         vmapped_train_fn = jax.jit(
             jax.vmap(
-            partial(train_fcp_partners, 
-                    env=env, 
-                    algorithm_config=algorithm_config,
+            partial(train_fcp_partners,
+                    env=env,
+                    population_size=gen.population_size,
+                    runtime=runtime,
                     wandb_logger=wandb_logger)
             )
         )
@@ -77,7 +91,7 @@ def run_fcp(config, wandb_logger):
     end_time = time.time()
     log.info(f"Training FCP partners took {end_time - start_time:.2f} seconds.")
 
-    flattened_partner_params, partner_population = get_fcp_population(config, out, env)
+    flattened_partner_params, partner_population = get_fcp_population(job, out, env)
 
     # Save FIRST so the checkpoint survives even if metric logging OOMs
     # on long runs. Same pattern as teammate_generation/train_ego.py.
@@ -86,15 +100,14 @@ def run_fcp(config, wandb_logger):
     # job config, so there is no HydraConfig to reach into, and an implicit
     # global is the wrong place for something that determines where a released
     # artifact lands.
-    savedir = config["run_dir"]
-    out_savepath = save_train_run(out, savedir, savename="saved_train_run")
-    log_metrics(config, out, wandb_logger, out_savepath)
+    out_savepath = save_train_run(out, job.run_dir(), savename="saved_train_run")
+    log_metrics(job, out, wandb_logger, out_savepath)
 
     return flattened_partner_params, partner_population
 
-def log_metrics(config, out, logger, out_savepath):
-    '''Log statistics and log saved train run to wandb as artifact.'''
-    metric_names = get_metric_names(config["ENV_NAME"])
+def log_metrics(job, out, logger, out_savepath):
+    '''Log statistics and record the saved train run as an artifact.'''
+    metric_names = get_metric_names(job.env.env_name)
     # After mask_and_mean in ippo, metrics have shape
     # (num_seeds, partner_pop_size, num_partner_updates)
     partner_metrics = out["metrics"]
@@ -113,8 +126,4 @@ def log_metrics(config, out, logger, out_savepath):
 
     logger.commit()
 
-    if config["logger"]["log_train_out"]:
-        logger.log_artifact(name="saved_train_run", path=out_savepath, type_name="train_run")
-        # Cleanup locally logged out file
-    if not config["local_logger"]["save_train_out"]:
-        shutil.rmtree(out_savepath)
+    logger.log_artifact(name="saved_train_run", path=out_savepath, type_name="train_run")

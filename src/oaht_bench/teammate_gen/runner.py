@@ -57,7 +57,11 @@ def run(job: TeammateGenerationJob) -> Path:
         config=cfg,
         verbose=job.logging.verbose,
     ) as logger:
-        # The generators persist the population themselves, into cfg['run_dir'].
-        runners[alg](cfg, logger)
+        # FCP reads the typed job directly. The other three still take the
+        # nested dict until they are converted (see PROVENANCE / §7).
+        if alg == "fcp":
+            runners[alg](job, logger)
+        else:
+            runners[alg](cfg, logger)
 
     return run_dir

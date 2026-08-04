@@ -16,6 +16,12 @@
     "generator": {
       "actor_type": "mlp",
       "generator": "fcp",
+      "network": {
+        "activation": "tanh",
+        "architecture": "mlp",
+        "hidden_dim": 64,
+        "policy_input_dim": null
+      },
       "num_checkpoints": 2,
       "num_envs": 4,
       "num_seeds": 1,

@@ -328,3 +328,74 @@ def test_baseline_roster_matches_the_plan():
     assert {"random", "pct_bc", "oracle"} <= names  # floors and ceiling
     assert {"ad", "dpt", "amago_offline", "hybrid_ad"} <= names  # learning-history
     assert {"liam", "meliba", "tao", "omis", "taget"} <= names  # trajectory-view
+
+
+# --- derived runtime values ------------------------------------------------
+
+
+def test_runtime_rejects_a_budget_that_trains_nothing():
+    """Upstream computed num_updates with integer division and no check, so a
+    too-small budget silently produced zero updates and a no-op training run."""
+    from oaht_bench.configs.network import MlpNetwork
+    from oaht_bench.configs.teammate_gen import PpoHyperparams
+    from oaht_bench.teammate_gen.runtime import PpoRuntime
+
+    with pytest.raises(ValueError, match="would be a no-op"):
+        PpoRuntime.from_config(
+            ppo=PpoHyperparams(), network=MlpNetwork(), actor_type="mlp",
+            rollout_length=128, num_envs=8, total_timesteps=100,
+            num_checkpoints=2, num_agents=2,
+        )
+
+
+def test_runtime_rejects_empty_minibatches():
+    from oaht_bench.configs.network import MlpNetwork
+    from oaht_bench.configs.teammate_gen import PpoHyperparams
+    from oaht_bench.teammate_gen.runtime import PpoRuntime
+
+    with pytest.raises(ValueError, match="minibatches would be empty"):
+        PpoRuntime.from_config(
+            ppo=PpoHyperparams(num_minibatches=100_000), network=MlpNetwork(),
+            actor_type="mlp", rollout_length=4, num_envs=2,
+            total_timesteps=1e5, num_checkpoints=2, num_agents=2,
+        )
+
+
+def test_runtime_derives_the_same_values_upstream_computed():
+    from oaht_bench.configs.network import MlpNetwork
+    from oaht_bench.configs.teammate_gen import PpoHyperparams
+    from oaht_bench.teammate_gen.runtime import PpoRuntime
+
+    rt = PpoRuntime.from_config(
+        ppo=PpoHyperparams(num_minibatches=4), network=MlpNetwork(),
+        actor_type="mlp", rollout_length=128, num_envs=8,
+        total_timesteps=1e6, num_checkpoints=5, num_agents=2,
+    )
+    assert rt.num_actors == 2 * 8
+    assert rt.num_updates == int(1e6 // 128 // 8)
+    assert rt.minibatch_size == (2 * 8) * 128 // 4
+
+
+def test_runtime_is_frozen():
+    """Derived values must not drift mid-run any more than authored ones."""
+    from oaht_bench.configs.network import MlpNetwork
+    from oaht_bench.configs.teammate_gen import PpoHyperparams
+    from oaht_bench.teammate_gen.runtime import PpoRuntime
+
+    rt = PpoRuntime.from_config(
+        ppo=PpoHyperparams(), network=MlpNetwork(), actor_type="mlp",
+        rollout_length=128, num_envs=8, total_timesteps=1e6,
+        num_checkpoints=5, num_agents=2,
+    )
+    with pytest.raises(ValidationError):
+        rt.num_updates = 1  # type: ignore[misc]
+
+
+def test_network_architecture_is_now_part_of_the_hash():
+    """It was defaulted via dict.get upstream, so it never entered provenance."""
+    from oaht_bench.configs.network import MlpNetwork
+    from oaht_bench.configs.teammate_gen import FcpConfig
+
+    a = _job(generator=FcpConfig(network=MlpNetwork(hidden_dim=64)))
+    b = _job(generator=FcpConfig(network=MlpNetwork(hidden_dim=128)))
+    assert a.content_hash() != b.content_hash()

@@ -28,7 +28,9 @@ from oaht_bench.common.plot_utils import get_metric_names
 from oaht_bench.common.run_episodes import run_episodes
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper, LogEnvState
-from oaht_bench.teammate_gen.marl.ippo import make_train as make_ppo_train
+from oaht_bench.teammate_gen.marl.ippo import (
+    make_train_from_algorithm_dict as make_ppo_train,
+)
 from oaht_bench.teammate_gen.marl.ppo_utils import Transition, unbatchify, _create_minibatches
 
 log = logging.getLogger(__name__)
