@@ -53,3 +53,5 @@ include = ["oaht_bench*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# scripts/ is importable so tests can check the config generator's scaling rules
+pythonpath = ["."]

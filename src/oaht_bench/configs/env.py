@@ -20,7 +20,7 @@ from typing import Annotated, Any, Literal, Mapping
 from pydantic import Field, model_validator
 from types import MappingProxyType
 
-from oaht_bench.configs.base import VersionedConfig
+from oaht_bench.configs.base import BaseConfig, VersionedConfig
 
 Tier = Literal["tier1", "tier2", "debug"]
 
@@ -153,11 +153,41 @@ class LbfConfig(EnvConfigBase):
         return kwargs
 
 
+class RewardShapingParams(BaseConfig):
+    """Dense shaping bonuses layered on Overcooked's sparse delivery reward.
+
+    Values are jax-aht's. Without them the task is sparse-reward and materially
+    harder, so a population trained with shaping and one trained without are not
+    comparable -- which is why these are explicit fields in the run's hash rather
+    than defaults inside the environment.
+    """
+
+    PLACEMENT_IN_POT_REW: float = 0.5
+    PLATE_PICKUP_REWARD: float = 0.1
+    SOUP_PICKUP_REWARD: float = 1.0
+    ONION_PICKUP_REWARD: float = 0.1
+    COUNTER_PICKUP_REWARD: float = 0.0
+    COUNTER_DROP_REWARD: float = 0.0
+
+
 class OvercookedV1Config(EnvConfigBase):
     """Overcooked-v1 (JaxMARL), selected by layout."""
 
     env_name: Literal["overcooked-v1"] = "overcooked-v1"
     layout: OvercookedLayout
+    random_obj_state: bool = Field(
+        default=True,
+        description="Randomize initial object state (pots part-filled, agents "
+        "holding items). jax-aht's task configs enable this; the environment "
+        "itself defaults to False.",
+    )
+    do_reward_shaping: bool = Field(
+        default=True,
+        description="Add dense shaping to the sparse delivery reward. The "
+        "environment defaults this to False, so omitting it trains a different "
+        "-- and much harder -- task than jax-aht's configs describe.",
+    )
+    reward_shaping: RewardShapingParams = Field(default_factory=RewardShapingParams)
 
     @property
     def turn_based(self) -> bool:
@@ -173,7 +203,14 @@ class OvercookedV1Config(EnvConfigBase):
         return self.layout not in _ASYMMETRIC_OVERCOOKED_LAYOUTS
 
     def env_kwargs(self) -> dict[str, Any]:
-        return {"layout": self.layout}
+        kwargs: dict[str, Any] = {
+            "layout": self.layout,
+            "random_obj_state": self.random_obj_state,
+            "do_reward_shaping": self.do_reward_shaping,
+        }
+        if self.do_reward_shaping:
+            kwargs["reward_shaping_params"] = self.reward_shaping.model_dump()
+        return kwargs
 
 
 class HanabiConfig(EnvConfigBase):

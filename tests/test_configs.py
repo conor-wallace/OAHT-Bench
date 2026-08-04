@@ -566,3 +566,81 @@ def test_no_generator_reads_a_config_dict():
             if re.search(r'\b(config|algorithm_config|warmup_config)\["', line):
                 offenders.append(f"{path.name}:{i}")
     assert not offenders, f"config dict reads remain: {offenders}"
+
+
+# --- shipped teammate-generation configs ------------------------------------
+
+
+def _shipped_configs():
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1] / "configs" / "teammate_gen"
+    return sorted(root.rglob("*.json"))
+
+
+def test_shipped_configs_exist_for_every_generator_and_tier1_env():
+    from oaht_bench.configs import preset_names
+
+    paths = _shipped_configs()
+    envs = {p.parent.name for p in paths}
+    gens = {p.stem for p in paths}
+    assert envs == set(preset_names("tier1"))
+    assert gens == {"fcp", "comedi", "brdiv", "lbrdiv"}
+    assert len(paths) == 12
+
+
+@pytest.mark.parametrize("path", _shipped_configs(), ids=lambda p: f"{p.parent.name}/{p.stem}")
+def test_shipped_config_builds_a_valid_runtime(path):
+    """Every shipped config must survive runtime construction.
+
+    That is where budget and minibatch constraints are checked, so this catches a
+    config that would train nothing or fail deep inside a vmap -- before anyone
+    queues it on a cluster.
+    """
+    from oaht_bench.configs import load_job
+    from oaht_bench.teammate_gen.runtime import (
+        CoMeDiRuntime,
+        PairedDiversityRuntime,
+        PpoRuntime,
+    )
+
+    job = load_job(path)
+    gen, rl = job.generator, job.env.rollout_length
+
+    if gen.generator == "fcp":
+        rt = PpoRuntime.from_config(
+            ppo=gen.ppo, network=gen.network, actor_type=gen.actor_type,
+            rollout_length=rl, num_envs=gen.num_envs,
+            total_timesteps=gen.total_timesteps,
+            num_checkpoints=gen.num_checkpoints, num_agents=2,
+        )
+    elif gen.generator == "comedi":
+        rt = CoMeDiRuntime.from_config(gen, rollout_length=rl, num_agents=2)
+    else:
+        rt = PairedDiversityRuntime.from_config(gen, rollout_length=rl, num_agents=2)
+
+    assert rt.num_updates >= 1
+
+
+def test_overcooked_configs_enable_reward_shaping():
+    """The environment defaults it off; jax-aht's task configs turn it on.
+
+    A population trained without shaping solves a materially harder sparse-reward
+    task and is not comparable to one trained with it.
+    """
+    from oaht_bench.configs import load_job
+
+    for path in _shipped_configs():
+        if not path.parent.name.startswith("overcooked"):
+            continue
+        env = load_job(path).env
+        assert env.do_reward_shaping is True
+        assert "reward_shaping_params" in env.env_kwargs()
+
+
+def test_lagrange_lr_is_scaled_for_population_size():
+    """Upstream's 0.01 is tuned at n=3; it must scale by (3/n)^2 (§7.3)."""
+    from scripts.gen_teammate_configs import _lagrange_lr
+
+    assert _lagrange_lr(3) == pytest.approx(0.01)
+    assert _lagrange_lr(5) == pytest.approx(0.0036, abs=1e-6)
