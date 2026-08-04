@@ -24,7 +24,7 @@ from oaht_bench.agents.population_interface import AgentPopulation
 from oaht_bench.common.plot_utils import get_metric_names
 from oaht_bench.common.run_episodes import run_episodes
 from oaht_bench.common.save_load_utils import save_train_run
-from oaht_bench.common.logging import RunLogger, log_training_curves
+from oaht_bench.common.logging import RunLogger, log_update_metrics
 from oaht_bench.configs.job import TeammateGenerationJob
 from oaht_bench.envs.protocols import TrainingEnv
 from oaht_bench.teammate_gen.runtime import PairedDiversityRuntime, TrainOutput
@@ -85,6 +85,7 @@ def train_brdiv_partners(
     config: PairedDiversityRuntime,
     conf_policy,
     br_policy,
+    wandb_logger: RunLogger,
 ) -> TrainOutput:
 
 
@@ -563,6 +564,16 @@ def train_brdiv_partners(
                 mask = traj_batch_conf.info.get("returned_episode", jnp.ones_like(traj_batch_conf.reward))
                 metric = jax.tree.map(lambda x: mask_and_mean(x, mask), traj_batch_conf.info)
                 metric["update_steps"] = update_steps
+
+                # Stream episode statistics out of the jit as they are produced.
+                # Everything below runs inside one jit(vmap(...)), so without this
+                # callback a multi-hour run reports nothing until it returns.
+                # Emitted before the loss terms are attached: those carry a
+                # population axis and are logged post-hoc instead.
+                def _stream(m):
+                    log_update_metrics(m, wandb_logger)
+
+                jax.experimental.io_callback(_stream, None, dict(metric))
                 metric["value_loss_conf_agent"] = value_loss_conf.mean(axis=(0, 1))
                 metric["value_loss_br_agent"] = value_loss_br.mean(axis=(0, 1))
 
@@ -765,7 +776,8 @@ def run_brdiv(job: TeammateGenerationJob, wandb_logger: RunLogger) -> PairedPopu
     with jax.disable_jit(False):
         vmapped_train_fn = jax.jit(
             jax.vmap(
-                partial(train_brdiv_partners, env=env, config=runtime, conf_policy=conf_policy, br_policy=br_policy)
+                partial(train_brdiv_partners, env=env, config=runtime, conf_policy=conf_policy, br_policy=br_policy,
+                        wandb_logger=wandb_logger)
             )
         )
         out = vmapped_train_fn(rngs)
@@ -838,8 +850,8 @@ def log_metrics(
             title=loss_name, xname="train_step")
         )
 
-    ### Per-update episode statistics, under the same tags FCP and CoMeDi use
-    log_training_curves(logger, metrics, job.env.env_name)
+    # Per-update episode statistics are streamed from inside the training loop
+    # (see log_update_metrics), so there is nothing to emit post-hoc here.
 
     ### Log artifacts
     out_savepath = save_train_run(outs, job.run_dir(), savename="saved_train_run")

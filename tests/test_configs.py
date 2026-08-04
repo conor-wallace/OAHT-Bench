@@ -791,13 +791,221 @@ def test_log_training_curves_averages_over_seeds(tmp_path):
     assert series == [1.0, 3.0]  # means over the seed axis, one per update
 
 
-def test_all_generators_log_training_curves():
-    """Guard the parity: every generator module must emit the shared tags."""
+def test_all_generators_report_the_same_episode_statistics():
+    """Every generator must emit Train/<stat>, by whichever route.
+
+    FCP and CoMeDi inherit them from ippo's io_callback; BRDiv and L-BRDiv call
+    log_update_metrics from their own loops. A statistic present for only some
+    methods cannot be used to compare convergence.
+    """
     import pathlib
 
     src = pathlib.Path(__file__).resolve().parents[1] / "src" / "oaht_bench" / "teammate_gen"
-    # FCP and CoMeDi inherit them from ippo's callback; the other two call the
-    # helper explicitly.
-    assert "log_training_curves" in (src / "BRDiv.py").read_text()
-    assert "log_training_curves" in (src / "LBRDiv.py").read_text()
     assert 'f"Train/{stat_name}"' in (src / "marl" / "ippo.py").read_text()
+    for name in ("BRDiv.py", "LBRDiv.py"):
+        assert "log_update_metrics" in (src / name).read_text()
+
+
+def test_minimal_dump_keeps_discriminator_tags():
+    """exclude_defaults alone drops job_type, env_name and generator.
+
+    Their values equal their defaults, but the discriminated unions need them to
+    choose a model, so a plain sparse dump produces an unloadable file.
+    """
+    from oaht_bench.configs.job import JobConfig
+
+    d = JobConfig(job=_job()).minimal_dump()
+    assert d["job"]["job_type"] == "teammate_generation"
+    assert d["job"]["env"]["env_name"] == "lbf"
+    assert d["job"]["generator"]["generator"] == "fcp"
+
+
+def test_minimal_dump_omits_defaults():
+    from oaht_bench.configs.job import JobConfig
+
+    d = JobConfig(job=_job()).minimal_dump()
+    assert "seed" not in d["job"]  # default 0
+    assert "logging" not in d["job"]  # all defaults
+    assert "ppo" not in d["job"]["generator"]  # FCP's LBF PPO block is all defaults here
+
+
+def test_minimal_dump_omits_all_default_nested_models():
+    """An untouched nested model is dropped whole, tag included.
+
+    Loading reconstructs it, so emitting a lone tag for it would be noise.
+    """
+    from oaht_bench.configs.job import JobConfig
+
+    d = JobConfig(job=_job()).minimal_dump()
+    assert "network" not in d["job"]["generator"]
+
+
+def test_minimal_dump_always_states_schema_version():
+    """A file without it is indistinguishable from one written against a schema
+    this build cannot interpret."""
+    from oaht_bench.configs.job import JobConfig
+
+    assert JobConfig(job=_job()).minimal_dump()["schema_version"] == SCHEMA_VERSION
+
+
+def test_minimal_and_full_forms_are_equivalent(tmp_path):
+    """The delta file must load to the same object, and the same hash, as the
+    full one -- otherwise provenance depends on which form was written."""
+    from oaht_bench.configs.job import JobConfig
+
+    original = _job()
+    lean = JobConfig(job=original).to_json_file(tmp_path / "lean.json", minimal=True)
+    fat = JobConfig(job=original).to_json_file(tmp_path / "fat.json", minimal=False)
+
+    a, b = load_job(lean), load_job(fat)
+    assert a == b == original
+    assert a.content_hash() == b.content_hash() == original.content_hash()
+    assert lean.read_text().count("\n") < fat.read_text().count("\n")
+
+
+@pytest.mark.parametrize("path", _shipped_configs(), ids=lambda p: f"{p.parent.name}/{p.stem}")
+def test_shipped_configs_are_deltas(path):
+    """Shipped configs state what the experiment changes, not every default."""
+    import json
+
+    payload = json.loads(path.read_text())
+    gen = payload["job"]["generator"]
+    # A generator block restating all ten PPO fields means the delta broke.
+    assert len(gen.get("ppo", {})) < 10
+
+
+def test_run_directories_record_the_full_config(tmp_path):
+    """Authored configs are deltas; recorded ones are not.
+
+    A run's job.json must remain self-describing even if a default later moves,
+    otherwise a released artifact's meaning depends on the code version that
+    reads it.
+    """
+    import json
+
+    from oaht_bench.configs import save_job
+
+    p = save_job(_job(), tmp_path / "job.json", minimal=False)
+    payload = json.loads(p.read_text())
+    ppo = payload["job"]["generator"]["ppo"]
+    assert len(ppo) == 10  # every PPO field stated
+    assert "logging" in payload["job"]
+
+
+# --- cross-generator metric parity ------------------------------------------
+
+
+def test_log_training_curves_emits_the_shared_tags(tmp_path):
+    """All four generators must report the same episode statistics.
+
+    FCP and CoMeDi get these from ippo's in-training callback; BRDiv and
+    L-BRDiv have their own loops and collected but never logged them, so
+    convergence could not be compared across methods.
+    """
+    import json
+
+    import numpy as np
+
+    from oaht_bench.common.logging import RunLogger, log_training_curves
+
+    metrics = {
+        "returned_episode_returns": np.arange(6.0).reshape(2, 3),
+        "returned_episode_lengths": np.full((2, 3), 100.0),
+        "percent_eaten": np.arange(6.0).reshape(2, 3) * 2,
+        "pg_loss_conf_agent": np.zeros((2, 3, 4)),  # a loss, not an episode stat
+    }
+    with RunLogger(tmp_path / "run") as logger:
+        log_training_curves(logger, metrics, "lbf")
+
+    tags = set()
+    for line in (tmp_path / "run" / "metrics.jsonl").read_text().splitlines():
+        tags |= set(json.loads(line))
+    assert {
+        "Train/returned_episode_returns",
+        "Train/returned_episode_lengths",
+        "Train/percent_eaten",
+    } <= tags
+    assert not any(t.startswith("Train/pg_loss") for t in tags)
+
+
+def test_log_training_curves_averages_over_seeds(tmp_path):
+    """Statistics arrive as (num_seeds, num_updates); only the update axis survives."""
+    import json
+
+    import numpy as np
+
+    from oaht_bench.common.logging import RunLogger, log_training_curves
+
+    metrics = {"returned_episode_returns": np.array([[0.0, 2.0], [2.0, 4.0]])}
+    with RunLogger(tmp_path / "run") as logger:
+        log_training_curves(logger, metrics, "hanabi")
+
+    series = [
+        json.loads(l)["Train/returned_episode_returns"]
+        for l in (tmp_path / "run" / "metrics.jsonl").read_text().splitlines()
+        if "Train/returned_episode_returns" in json.loads(l)
+    ]
+    assert series == [1.0, 3.0]  # means over the seed axis, one per update
+
+
+def test_log_update_metrics_skips_non_scalars(tmp_path):
+    """Called from inside a jit via io_callback, so it must tolerate what it gets.
+
+    The paired generators' loss terms carry a population axis; a partially
+    reduced array is not meaningful plotted against an update step.
+    """
+    import json
+
+    import numpy as np
+
+    from oaht_bench.common.logging import RunLogger, log_update_metrics
+
+    with RunLogger(tmp_path / "run") as logger:
+        log_update_metrics(
+            {
+                "returned_episode_returns": np.float32(0.5),
+                "pg_loss_conf_agent": np.zeros(4),  # population axis
+                "returned_episode": np.float32(1.0),  # bookkeeping
+                "update_steps": np.int32(7),
+            },
+            logger,
+        )
+
+    tags = set()
+    for line in (tmp_path / "run" / "metrics.jsonl").read_text().splitlines():
+        rec = json.loads(line)
+        tags |= set(rec)
+        assert rec.get("train_step") == 7
+    assert "Train/returned_episode_returns" in tags
+    assert not any(t.startswith("Train/pg_loss") for t in tags)
+    assert "Train/returned_episode" not in tags
+
+
+def test_log_update_metrics_needs_a_step():
+    """Without update_steps there is nothing to plot against; do not guess."""
+    from oaht_bench.common.logging import RunLogger, log_update_metrics
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        with RunLogger(d) as logger:
+            log_update_metrics({"returned_episode_returns": 1.0}, logger)
+        import pathlib
+
+        assert pathlib.Path(d, "metrics.jsonl").read_text() == ""
+
+
+def test_paired_generators_stream_rather_than_batch():
+    """BRDiv and L-BRDiv must call back out of the jit during training.
+
+    Their whole run is one jit(vmap(...)); without a callback a multi-hour job
+    reports nothing until it returns. They must also not additionally log the
+    same curves post-hoc, which would double every point.
+    """
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "oaht_bench" / "teammate_gen"
+    for name in ("BRDiv.py", "LBRDiv.py"):
+        text = (src / name).read_text()
+        assert "io_callback" in text, f"{name} does not stream"
+        assert "log_training_curves" not in text, f"{name} would double-log"

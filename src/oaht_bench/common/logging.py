@@ -289,3 +289,34 @@ def log_training_curves(
         for name, series in curves.items():
             logger.log_item(f"{prefix}/{name}", series[step], train_step=step)
     logger.commit()
+
+
+def log_update_metrics(metrics: dict[str, Any], logger: RunLogger, *, prefix: str = "Train") -> None:
+    """Log one update step's statistics, from inside a jitted training loop.
+
+    Called through ``jax.experimental.io_callback``, so it must stay a
+    module-level function and must tolerate whatever the tracer hands it.
+
+    Exists because BRDiv and L-BRDiv run their whole training inside a single
+    ``jit(vmap(...))``: without a callback nothing escapes until the call
+    returns, so a multi-hour run showed no progress at all until it finished.
+
+    Non-scalar entries are skipped. The loss terms these generators record carry
+    a population axis, and a partially-reduced array is not a meaningful scalar
+    to plot against an update step; the per-pair losses are logged post-hoc where
+    that axis can be handled properly.
+    """
+    stats = dict(metrics)
+    step_val = stats.pop("update_steps", None)
+    if step_val is None:
+        return
+    step = int(np.asarray(step_val).reshape(-1)[0])
+
+    for name, value in stats.items():
+        if name == "returned_episode":
+            continue
+        arr = np.asarray(value)
+        if arr.size != 1:
+            continue
+        logger.log_item(f"{prefix}/{name}", float(arr.reshape(-1)[0]), train_step=step)
+    logger.commit()
