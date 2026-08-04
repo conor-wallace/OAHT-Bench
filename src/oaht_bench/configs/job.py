@@ -21,6 +21,31 @@ from oaht_bench.configs.env import EnvConfig
 from oaht_bench.configs.teammate_gen import GeneratorConfig
 
 
+#: The benchmark's baseline roster (§12.9). Thirteen entries in four groups:
+#: floors, a reference row, a ceiling, the learning-history family, and the
+#: trajectory-view family. Declaring it here means a typo fails at config load
+#: rather than after a training run dispatches to nothing.
+BaselineName = Literal[
+    # floors and reference
+    "random",
+    "pct_bc",
+    "prompt_dt",
+    # ceiling: privileged teammate model, bounds how much headroom modeling has
+    "oracle",
+    # learning-history family
+    "ad",
+    "dpt",
+    "amago_offline",
+    "hybrid_ad",
+    # trajectory-view family
+    "liam",
+    "meliba",
+    "tao",
+    "omis",
+    "taget",
+]
+
+
 class LoggingConfig(BaseConfig):
     """Where run metrics go. Weights & Biases is opt-in.
 
@@ -131,7 +156,7 @@ class TrainingJob(JobBase):
     job_type: Literal["training"] = "training"
     env: EnvConfig
     dataset_path: str
-    baseline: str = Field(description="Baseline name, e.g. 'dt', 'liam', 'taget'.")
+    baseline: BaselineName = Field(description="Which baseline to train (§6).")
     backbone: Literal["dt", "iql", "pct_bc"] = Field(
         default="dt",
         description="Shared sequence-model backbone (§3.1). 'iql' is the "

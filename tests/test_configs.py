@@ -248,3 +248,83 @@ def test_public_api_does_not_leak_the_adapter():
 
     assert "JOB_ADAPTER" not in c.__all__
     assert {"load_job", "validate_job"} <= set(c.__all__)
+
+
+# --- branching fields must be constrained ----------------------------------
+
+#: Field names whose value selects a code path. A plain ``str`` here reaches an
+#: if/elif chain with no ``else``, so a typo either crashes deep inside training
+#: or silently selects different behaviour.
+_BRANCHING_FIELD_SUFFIXES = ("_type", "_name", "baseline", "backbone", "variant", "generator")
+
+
+def _all_config_models():
+    from oaht_bench.configs import env as env_mod
+    from oaht_bench.configs import job as job_mod
+    from oaht_bench.configs import teammate_gen as tg_mod
+    from oaht_bench.configs.base import BaseConfig
+
+    seen = {}
+    for mod in (env_mod, job_mod, tg_mod):
+        for name, obj in vars(mod).items():
+            if isinstance(obj, type) and issubclass(obj, BaseConfig) and obj is not BaseConfig:
+                seen[obj.__name__] = obj
+    return list(seen.values())
+
+
+def test_branching_fields_are_not_bare_strings():
+    """Any field that selects a code path must be a Literal, not a str.
+
+    ``job_type`` was already safe, but ``actor_type`` and ``baseline`` were not:
+    both feed if/elif dispatch in the absorbed code, so 'mpl' or 'LIAM' would
+    have passed validation and failed much later, or silently done the wrong
+    thing.
+    """
+    import typing
+
+    offenders = []
+    for model in _all_config_models():
+        for name, field in model.model_fields.items():
+            if not any(name.endswith(s) or name == s for s in _BRANCHING_FIELD_SUFFIXES):
+                continue
+            ann = field.annotation
+            # Unwrap Optional[...] and other unions to look for a Literal member.
+            args = typing.get_args(ann)
+            is_literal = typing.get_origin(ann) is typing.Literal or any(
+                typing.get_origin(a) is typing.Literal for a in args
+            )
+            if ann is str and not is_literal:
+                offenders.append(f"{model.__name__}.{name}")
+    assert not offenders, (
+        "branching fields typed as bare str; use Literal so a typo fails at "
+        f"config load: {offenders}"
+    )
+
+
+def test_actor_type_typo_is_rejected():
+    from oaht_bench.configs.teammate_gen import FcpConfig
+
+    with pytest.raises(ValidationError, match="Input should be"):
+        FcpConfig(actor_type="mpl")
+
+
+def test_baseline_typo_is_rejected():
+    from oaht_bench.configs.job import TrainingJob
+
+    with pytest.raises(ValidationError, match="Input should be"):
+        TrainingJob(
+            label="t", env=get_preset("lbf_12x12"), dataset_path="d", baseline="LIAM"
+        )
+
+
+def test_baseline_roster_matches_the_plan():
+    """Thirteen baselines in four groups (§12.9)."""
+    import typing
+
+    from oaht_bench.configs.job import BaselineName
+
+    names = set(typing.get_args(BaselineName))
+    assert len(names) == 13
+    assert {"random", "pct_bc", "oracle"} <= names  # floors and ceiling
+    assert {"ad", "dpt", "amago_offline", "hybrid_ad"} <= names  # learning-history
+    assert {"liam", "meliba", "tao", "omis", "taget"} <= names  # trajectory-view

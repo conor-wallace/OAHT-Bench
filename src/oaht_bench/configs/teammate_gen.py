@@ -26,6 +26,20 @@ from pydantic import Field
 
 from oaht_bench.configs.base import BaseConfig
 
+#: Policy architectures the absorbed ``initialize_agents`` dispatches on. A plain
+#: ``str`` here would let a typo through to an ``if/elif`` chain with no ``else``,
+#: which either crashes deep inside training or silently builds a different
+#: architecture than intended.
+ActorType = Literal[
+    "mlp",
+    "rnn",
+    "s5",
+    "actor_with_double_critic",
+    "pseudo_actor_with_double_critic",
+    "actor_with_conditional_critic",
+    "pseudo_actor_with_conditional_critic",
+]
+
 
 class PpoHyperparams(BaseConfig):
     """PPO settings shared by all four generators."""
@@ -101,7 +115,7 @@ class FcpConfig(GeneratorBase):
     """
 
     generator: Literal["fcp"] = "fcp"
-    actor_type: str = "mlp"
+    actor_type: ActorType = "mlp"
     total_timesteps: float = Field(default=1e6, gt=0, description="Per member trained.")
     num_envs: int = Field(default=8, gt=0)
 
@@ -127,7 +141,7 @@ class CoMeDiConfig(GeneratorBase):
     """
 
     generator: Literal["comedi"] = "comedi"
-    actor_type: str = "actor_with_conditional_critic"
+    actor_type: ActorType = "actor_with_conditional_critic"
     total_timesteps_per_iteration: float = Field(default=1.2e7, gt=0)
     num_envs: int = Field(default=48, gt=0)
     num_argmax_rollout_episodes: int = Field(default=20, gt=0)
