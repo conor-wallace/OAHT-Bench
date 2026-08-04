@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from oaht_bench.common.logging import RunLogger
+from oaht_bench.configs import save_job
 from oaht_bench.configs.job import TeammateGenerationJob
 
 
@@ -43,7 +44,7 @@ def run(job: TeammateGenerationJob) -> Path:
     if alg not in runners:
         raise ValueError(f"No runner for generator {alg!r}. Known: {sorted(runners)}")
 
-    job.to_json_file(run_dir / "job.json")
+    save_job(job, run_dir / "job.json")
     (run_dir / "resolved_config.json").write_text(
         json.dumps(cfg, indent=2, sort_keys=True, default=str) + "\n"
     )

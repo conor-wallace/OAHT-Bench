@@ -159,9 +159,30 @@ class EvaluationJob(JobBase):
     )
 
 
-#: Discriminated union. ``job_type`` selects the model, so one JSON file with one
-#: extra key routes the entire CLI.
-JobConfig = Annotated[
+#: The union itself, for annotating anything that holds a concrete job.
+AnyJob = Annotated[
     TeammateGenerationJob | DatasetCollectionJob | TrainingJob | EvaluationJob,
     Field(discriminator="job_type"),
 ]
+
+
+class JobConfig(VersionedConfig):
+    """An experiment config file: exactly one job.
+
+    The union is a *field* rather than the model itself because
+    ``Annotated[A | B, ...]`` is a typing alias — an assignment binding a name to
+    a typing object, not a class — so it has no ``model_validate``. Wrapping it
+    gives the normal pydantic interface, with ``job_type`` still selecting which
+    member is validated::
+
+        job = JobConfig.model_validate(payload).job
+
+    Keeping the job under a named key also leaves the top level free for
+    file-scoped metadata later without colliding with any job's own fields.
+
+    Prefer :func:`~oaht_bench.configs.load_job` and
+    :func:`~oaht_bench.configs.validate_job`, which unwrap ``.job`` and turn a
+    malformed config into a message naming the file and the offending key.
+    """
+
+    job: AnyJob

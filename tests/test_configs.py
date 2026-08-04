@@ -12,9 +12,9 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from oaht_bench.configs import JOB_ADAPTER, SCHEMA_VERSION, get_preset, load_job
+from oaht_bench.configs import SCHEMA_VERSION, get_preset, load_job, save_job, validate_job
 from oaht_bench.configs.env import HanabiConfig, LbfConfig
-from oaht_bench.configs.job import TeammateGenerationJob
+from oaht_bench.configs.job import JobConfig, TeammateGenerationJob
 from oaht_bench.configs.teammate_gen import FcpConfig
 
 
@@ -116,21 +116,30 @@ def test_run_dir_is_disambiguated_by_hash():
 
 def test_job_round_trips_through_json(tmp_path):
     original = _job()
-    path = original.to_json_file(tmp_path / "job.json")
+    path = save_job(original, tmp_path / "job.json")
     loaded = load_job(path)
     assert loaded == original
     assert loaded.content_hash() == original.content_hash()
 
 
 def test_job_type_selects_the_model():
-    payload = json.loads(_job().canonical_json())
-    assert JOB_ADAPTER.validate_python(payload).job_type == "teammate_generation"
+    """JobConfig is a real class, so pydantic's usual interface works on it."""
+    payload = {"job": json.loads(_job().canonical_json())}
+    assert JobConfig.model_validate(payload).job.job_type == "teammate_generation"
+    assert validate_job(payload).job_type == "teammate_generation"
 
 
-def test_missing_job_type_is_a_clear_error(tmp_path):
+def test_flat_payload_gets_a_targeted_error():
+    """``extra="forbid"`` would otherwise report every job field as unexpected,
+    burying the actual mistake."""
+    with pytest.raises(ValueError, match='belong under a "job" key'):
+        validate_job(json.loads(_job().canonical_json()))
+
+
+def test_missing_job_key_is_a_clear_error(tmp_path):
     p = tmp_path / "j.json"
     p.write_text(json.dumps({"label": "x"}))
-    with pytest.raises(ValueError, match="missing 'job_type'"):
+    with pytest.raises(ValueError, match="missing 'job'"):
         load_job(p)
 
 
@@ -146,7 +155,7 @@ def test_malformed_json_names_the_file(tmp_path):
 
 def test_future_schema_version_is_refused(tmp_path):
     """A newer config must fail loudly rather than load with fields dropped."""
-    payload = json.loads(_job().canonical_json())
+    payload = {"job": json.loads(_job().canonical_json())}
     payload["schema_version"] = SCHEMA_VERSION + 1
     p = tmp_path / "j.json"
     p.write_text(json.dumps(payload))
@@ -181,7 +190,7 @@ def test_config_fields_are_snake_case():
     one place (``to_algorithm_dict``).
     """
     from oaht_bench.configs.env import HanabiConfig, LbfConfig, OvercookedV1Config
-    from oaht_bench.configs.job import TeammateGenerationJob
+    from oaht_bench.configs.job import JobConfig, TeammateGenerationJob
     from oaht_bench.configs.teammate_gen import (
         BrDivConfig,
         CoMeDiConfig,
@@ -221,3 +230,21 @@ def test_comedi_defaults_to_eight_minibatches():
     from oaht_bench.configs.teammate_gen import CoMeDiConfig
 
     assert CoMeDiConfig().to_algorithm_dict()["NUM_MINIBATCHES"] == 8
+
+
+def test_validate_job_shares_load_job_error_handling(tmp_path):
+    """In-memory validation gives the same message as loading from a file."""
+    with pytest.raises(ValueError, match="missing 'job'"):
+        validate_job({"label": "x"})
+
+
+def test_public_api_does_not_leak_the_adapter():
+    """The adapter is an implementation detail of load_job/validate_job.
+
+    Exposing it would let callers bypass the error handling that turns a bad
+    config into a message naming the file and field.
+    """
+    import oaht_bench.configs as c
+
+    assert "JOB_ADAPTER" not in c.__all__
+    assert {"load_job", "validate_job"} <= set(c.__all__)

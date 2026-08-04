@@ -17,7 +17,7 @@ from typing import Sequence
 from pydantic import ValidationError
 
 from oaht_bench.configs import load_job
-from oaht_bench.configs.job import JobConfig
+from oaht_bench.configs.job import AnyJob
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -43,7 +43,7 @@ def _strip_key_prefix(value: str) -> str:
     return value[len(prefix) :] if value.startswith(prefix) else value
 
 
-def _describe(job: JobConfig) -> str:
+def _describe(job: AnyJob) -> str:
     lines = [
         f"job_type   {job.job_type}",
         f"label      {job.label}",
@@ -61,7 +61,7 @@ def _describe(job: JobConfig) -> str:
     return "\n".join(lines)
 
 
-def _dispatch(job: JobConfig) -> int:
+def _dispatch(job: AnyJob) -> int:
     """Route a validated job to its runner.
 
     Runners are imported lazily so that ``--dry-run`` — and config validation

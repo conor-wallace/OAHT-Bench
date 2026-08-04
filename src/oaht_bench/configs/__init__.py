@@ -10,8 +10,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from pydantic import TypeAdapter
-
 from oaht_bench.configs.base import SCHEMA_VERSION, BaseConfig, VersionedConfig
 from oaht_bench.configs.env import (
     PRESETS,
@@ -24,6 +22,7 @@ from oaht_bench.configs.env import (
     preset_names,
 )
 from oaht_bench.configs.job import (
+    AnyJob,
     DatasetCollectionJob,
     EvaluationJob,
     JobConfig,
@@ -31,14 +30,10 @@ from oaht_bench.configs.job import (
     TrainingJob,
 )
 
-#: Validates and dispatches a raw payload to the right job model via ``job_type``.
-JOB_ADAPTER: TypeAdapter[JobConfig] = TypeAdapter(JobConfig)
-
-#: Same, for a bare environment config.
-ENV_ADAPTER: TypeAdapter[EnvConfig] = TypeAdapter(EnvConfig)
 
 
-def load_job(path: str | Path) -> JobConfig:
+
+def load_job(path: str | Path) -> AnyJob:
     """Load and validate an experiment config from a JSON file.
 
     Errors name the offending field and file rather than surfacing as a failure
@@ -53,12 +48,40 @@ def load_job(path: str | Path) -> JobConfig:
         raise ValueError(f"{path}: not valid JSON — {e}") from e
     if not isinstance(payload, dict):
         raise ValueError(f"{path}: expected a JSON object, got {type(payload).__name__}")
-    if "job_type" not in payload:
+    return validate_job(payload, source=str(path))
+
+
+def validate_job(payload: dict, *, source: str = "<dict>") -> AnyJob:
+    """Validate an in-memory payload and dispatch it to the right job model.
+
+    Separate from :func:`load_job` so callers holding a payload already — a sweep
+    generator emitting configs programmatically, for instance — get the same
+    checks and the same error messages without writing a file first.
+    """
+    if "job" not in payload:
+        if "job_type" in payload:
+            # Without this, ``extra="forbid"`` reports every job field as an
+            # unexpected key, which buries the actual mistake.
+            raise ValueError(
+                f"{source}: job fields are at the top level, but they belong under "
+                f'a "job" key: {{"job": {{"job_type": "{payload["job_type"]}", ...}}}}'
+            )
         raise ValueError(
-            f"{path}: missing 'job_type'. Expected one of: teammate_generation, "
-            f"dataset_collection, training, evaluation."
+            f"{source}: missing 'job'. A config file holds one job under that key, "
+            f"with a 'job_type' of teammate_generation, dataset_collection, "
+            f"training, or evaluation."
         )
-    return JOB_ADAPTER.validate_python(payload)
+    return JobConfig.model_validate(payload).job
+
+
+def save_job(job: AnyJob, path: str | Path, *, indent: int = 2) -> Path:
+    """Write a job as a loadable config file.
+
+    Wraps the job under the ``job`` key so the result round-trips through
+    :func:`load_job`. Writing ``job.to_json_file`` directly would emit the job's
+    own fields at the top level, which no longer loads.
+    """
+    return JobConfig(job=job).to_json_file(path, indent=indent)
 
 
 __all__ = [
@@ -74,11 +97,12 @@ __all__ = [
     "get_preset",
     "preset_names",
     "JobConfig",
+    "AnyJob",
     "TeammateGenerationJob",
     "DatasetCollectionJob",
     "TrainingJob",
     "EvaluationJob",
-    "JOB_ADAPTER",
-    "ENV_ADAPTER",
+    "validate_job",
+    "save_job",
     "load_job",
 ]
