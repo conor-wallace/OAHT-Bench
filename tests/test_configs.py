@@ -399,3 +399,48 @@ def test_network_architecture_is_now_part_of_the_hash():
     a = _job(generator=FcpConfig(network=MlpNetwork(hidden_dim=64)))
     b = _job(generator=FcpConfig(network=MlpNetwork(hidden_dim=128)))
     assert a.content_hash() != b.content_hash()
+
+
+def test_comedi_rejects_more_minibatches_than_envs():
+    """CoMeDi minibatches over environments, not actors.
+
+    Exceeding num_envs fails as an opaque reshape error many frames deep
+    ("cannot reshape array of shape (128, 4) into [128, 8, -1]").
+    """
+    from oaht_bench.configs.teammate_gen import CoMeDiConfig, PpoHyperparams
+
+    with pytest.raises(ValidationError, match="exceeds num_envs"):
+        CoMeDiConfig(num_envs=4, ppo=PpoHyperparams(num_minibatches=8))
+
+
+def test_conditional_critic_actor_requires_pop_size():
+    """Omitting it surfaces as a bare KeyError('POP_SIZE') inside policy construction."""
+    from oaht_bench.configs.network import MlpNetwork
+    from oaht_bench.configs.teammate_gen import PpoHyperparams
+    from oaht_bench.teammate_gen.runtime import PpoRuntime
+
+    with pytest.raises(ValueError, match="pop_size is required"):
+        PpoRuntime.from_config(
+            ppo=PpoHyperparams(), network=MlpNetwork(),
+            actor_type="actor_with_conditional_critic",
+            rollout_length=128, num_envs=8, total_timesteps=1e6,
+            num_checkpoints=2, num_agents=2,
+        )
+
+
+def test_logger_survives_unserializable_values(tmp_path):
+    """A metric sink must never take a training run down with it.
+
+    CoMeDi logs wandb chart objects through the same log_item used for scalars.
+    """
+    from oaht_bench.common.logging import RunLogger
+
+    class Chart:
+        pass
+
+    with RunLogger(tmp_path / "run") as logger:
+        logger.log_item("Losses/thing", Chart())
+        logger.log_item("Train/ok", 1.5)
+
+    lines = (tmp_path / "run" / "metrics.jsonl").read_text().splitlines()
+    assert any('"Train/ok": 1.5' in ln for ln in lines)

@@ -432,5 +432,6 @@ def make_train_from_algorithm_dict(algorithm_config, env, logger, progress_callb
         total_timesteps=algorithm_config["TOTAL_TIMESTEPS"],
         num_checkpoints=algorithm_config["NUM_CHECKPOINTS"],
         num_agents=env.num_agents,
+        pop_size=algorithm_config.get("POP_SIZE"),
     )
     return make_train(runtime, env, logger, progress_callback)

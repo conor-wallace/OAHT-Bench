@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from oaht_bench.configs.base import BaseConfig
 from oaht_bench.configs.network import MlpNetwork
@@ -90,6 +90,14 @@ class GeneratorBase(BaseConfig):
         "diversity adds nothing — so do not trim this to save time (§7.3).",
     )
     num_envs: int = Field(default=64, gt=0)
+    num_eval_episodes: int = Field(
+        default=20,
+        gt=0,
+        description="Episodes per in-training evaluation. CoMeDi, BRDiv and "
+        "L-BRDiv use these to estimate the cross-play returns their diversity "
+        "objectives are computed from, so it affects the population produced, "
+        "not just reporting.",
+    )
     train_seed: int = 20374
     num_seeds: int = Field(default=1, gt=0)
     ppo: PpoHyperparams = Field(default_factory=PpoHyperparams)
@@ -109,6 +117,7 @@ class GeneratorBase(BaseConfig):
             "NUM_ENVS": self.num_envs,
             "TRAIN_SEED": self.train_seed,
             "NUM_SEEDS": self.num_seeds,
+            "NUM_EVAL_EPISODES": self.num_eval_episodes,
             **self.ppo.to_algorithm_dict(),
             **self.network.to_agent_dict(),
         }
@@ -165,6 +174,24 @@ class CoMeDiConfig(GeneratorBase):
         "(§7.4).",
     )
     ppo: PpoHyperparams = Field(default_factory=_comedi_ppo)
+
+    @model_validator(mode="after")
+    def _minibatches_must_fit_the_env_axis(self) -> CoMeDiConfig:
+        """CoMeDi minibatches over environments, not over actors.
+
+        Its ``_create_minibatches`` calls pass ``NUM_ENVS`` where the other
+        generators pass ``NUM_ACTORS``, so the batch axis is ``num_envs`` wide.
+        Exceeding it fails as an opaque reshape error many frames deep
+        ("cannot reshape array of shape (128, 4) into [128, 8, -1]").
+        """
+        if self.ppo.num_minibatches > self.num_envs:
+            raise ValueError(
+                f"CoMeDi minibatches over environments: num_minibatches="
+                f"{self.ppo.num_minibatches} exceeds num_envs={self.num_envs}. "
+                f"Raise num_envs to at least {self.ppo.num_minibatches}, or lower "
+                f"num_minibatches."
+            )
+        return self
 
     def to_algorithm_dict(self) -> dict[str, Any]:
         return {

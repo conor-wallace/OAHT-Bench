@@ -43,6 +43,12 @@ class PpoRuntime(BaseConfig):
     num_envs: int = Field(gt=0)
     total_timesteps: float = Field(gt=0)
     num_checkpoints: int = Field(gt=0)
+    pop_size: int | None = Field(
+        default=None,
+        description="Population width the conditional-critic policies condition "
+        "on. Required by the *_conditional_critic actor types and unused by the "
+        "others, so it lives here rather than on MlpNetwork.",
+    )
 
     # --- derived from the above plus the environment ---
     num_actors: int = Field(gt=0, description="env.num_agents * num_envs.")
@@ -61,6 +67,7 @@ class PpoRuntime(BaseConfig):
         total_timesteps: float,
         num_checkpoints: int,
         num_agents: int,
+        pop_size: int | None = None,
     ) -> PpoRuntime:
         """Compute the derived quantities, validating that they are usable.
 
@@ -87,6 +94,13 @@ class PpoRuntime(BaseConfig):
                 f"minibatches would be empty."
             )
 
+        if "conditional_critic" in actor_type and pop_size is None:
+            raise ValueError(
+                f"actor_type={actor_type!r} conditions its critic on a population "
+                f"index, so pop_size is required. Omitting it surfaces as a bare "
+                f"KeyError('POP_SIZE') from inside policy construction."
+            )
+
         return cls(
             ppo=ppo,
             network=network,
@@ -95,14 +109,18 @@ class PpoRuntime(BaseConfig):
             num_envs=num_envs,
             total_timesteps=total_timesteps,
             num_checkpoints=num_checkpoints,
+            pop_size=pop_size,
             num_actors=num_actors,
             num_updates=num_updates,
             minibatch_size=minibatch_size,
         )
 
     def to_agent_dict(self) -> dict[str, Any]:
-        """Network keys for the absorbed agent initializers."""
-        return self.network.to_agent_dict()
+        """Keys the absorbed agent initializers read."""
+        out = self.network.to_agent_dict()
+        if self.pop_size is not None:
+            out["POP_SIZE"] = self.pop_size
+        return out
 
 
 class TrainOutput(TypedDict):

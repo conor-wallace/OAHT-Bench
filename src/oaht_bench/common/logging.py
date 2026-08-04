@@ -15,27 +15,49 @@ service. Enabling wandb is an explicit opt-in through the job config.
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+log = logging.getLogger(__name__)
+
+
+def _is_wandb_object(value: Any) -> bool:
+    """Whether a value only has meaning inside Weights & Biases.
+
+    The training code builds charts and tables with ``wandb.plot.*`` and passes
+    them through the same ``log_item`` used for scalars. They are presentation
+    objects with no local equivalent, so with wandb disabled they are dropped
+    rather than stringified into the metrics stream.
+    """
+    return type(value).__module__.split(".")[0] == "wandb"
+
 
 def _to_jsonable(value: Any) -> Any:
-    """Coerce JAX/NumPy scalars and arrays into JSON-serializable values."""
+    """Coerce a logged value into something JSON can represent.
+
+    Never raises. A metric sink that can crash is a metric sink that takes a
+    multi-hour training run down with it — which is exactly what happened when
+    CoMeDi logged a ``wandb.plot.line_series`` chart through this path.
+    """
     if isinstance(value, (bool, int, float, str)) or value is None:
         return value
-    if hasattr(value, "item") and getattr(value, "size", None) == 1:
-        return value.item()
     if isinstance(value, (list, tuple)):
         return [_to_jsonable(v) for v in value]
     if isinstance(value, dict):
         return {str(k): _to_jsonable(v) for k, v in value.items()}
-    arr = np.asarray(value)
-    if arr.ndim == 0:
-        return arr.item()
-    return arr.tolist()
+    try:
+        if hasattr(value, "item") and getattr(value, "size", None) == 1:
+            return value.item()
+        arr = np.asarray(value)
+        if arr.dtype == object:
+            raise TypeError("object array")
+        return arr.item() if arr.ndim == 0 else arr.tolist()
+    except Exception:
+        return f"<unserializable {type(value).__name__}>"
 
 
 class RunLogger:
@@ -95,7 +117,9 @@ class RunLogger:
     # --- interface used by the absorbed training code ---------------------
 
     def log(self, data: dict[str, Any], step: int | None = None, commit: bool = False) -> None:
-        self._pending.update(data)
+        # wandb charts have no local representation; keep them out of the JSONL.
+        local = {k: v for k, v in data.items() if not _is_wandb_object(v)}
+        self._pending.update(local)
         if self.run is not None:
             import wandb
 
@@ -109,15 +133,24 @@ class RunLogger:
             print(f"{tag}: {val}")
 
     def commit(self, step: int | None = None) -> None:
-        """Flush pending metrics as one JSONL record."""
+        """Flush pending metrics as one JSONL record.
+
+        Swallows serialization failures. Logging is not worth losing a training
+        run over, and ``close`` calls this from ``__exit__`` where raising would
+        mask whatever actually went wrong.
+        """
         if not self._pending:
             return
         record = {"step": self._step if step is None else step}
         record.update({k: _to_jsonable(v) for k, v in self._pending.items()})
-        self._metrics_file.write(json.dumps(record) + "\n")
-        self._metrics_file.flush()
-        self._pending.clear()
-        self._step += 1
+        try:
+            self._metrics_file.write(json.dumps(record) + "\n")
+            self._metrics_file.flush()
+        except (TypeError, ValueError, OSError) as e:  # pragma: no cover - defensive
+            log.warning("dropping a metrics record that could not be written: %s", e)
+        finally:
+            self._pending.clear()
+            self._step += 1
         if self.run is not None:
             import wandb
 
