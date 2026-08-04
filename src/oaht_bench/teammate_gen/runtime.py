@@ -17,9 +17,11 @@ environment, is itself frozen, and never appears in a config file.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TypedDict
 
 from pydantic import Field
+
+import chex
 
 from oaht_bench.configs.base import BaseConfig
 from oaht_bench.configs.network import MlpNetwork
@@ -101,3 +103,21 @@ class PpoRuntime(BaseConfig):
     def to_agent_dict(self) -> dict[str, Any]:
         """Network keys for the absorbed agent initializers."""
         return self.network.to_agent_dict()
+
+
+class TrainOutput(TypedDict):
+    """What the PPO training function returns.
+
+    Written down because three functions index into this dict and none of them
+    said what was in it. Leading axes are added by the ``vmap``\ s the callers
+    apply, so shapes are described relative to a single training run.
+    """
+
+    #: Parameters at the end of training.
+    final_params: chex.ArrayTree
+    #: Per-update statistics, keyed by metric name.
+    metrics: dict[str, chex.Array]
+    #: Snapshots taken during training; leading axis is ``num_checkpoints``.
+    checkpoints: chex.ArrayTree
+    #: Index of the checkpoint selected as each member's final policy.
+    final_ckpt_idx: chex.Array

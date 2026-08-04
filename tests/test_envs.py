@@ -138,3 +138,22 @@ def test_presets_are_immutable():
 def test_preset_names_are_unique_and_registered():
     assert len(PRESETS) == len(set(PRESETS))
     assert set(PRESETS) == set(ALL_PRESETS)
+
+
+# --- the training-facing environment interface -----------------------------
+
+
+@pytest.mark.parametrize("name", ALL_PRESETS)
+def test_envs_satisfy_the_training_protocol(name: str):
+    """Both the raw environment and the wrapped one must be usable by training.
+
+    ``LogWrapper`` inherits from JaxMARL's wrapper and shares no ancestor with
+    ``BaseEnv``, so a nominal annotation would be wrong for one of them. The
+    protocol is what the training loop actually requires.
+    """
+    from oaht_bench.envs.log_wrapper import LogWrapper
+    from oaht_bench.envs.protocols import TrainingEnv
+
+    env = make(name)
+    assert isinstance(env, TrainingEnv)
+    assert isinstance(LogWrapper(env), TrainingEnv)
