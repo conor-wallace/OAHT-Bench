@@ -13,7 +13,8 @@ import importlib
 
 import pytest
 
-COLLIDING_NAMES = ["envs", "agents", "common", "marl", "teammate_generation", "evaluation"]
+COLLIDING_NAMES = ["envs", "agents", "common", "marl", "teammate_generation", "evaluation",
+                   "ego_agent_training", "runners", "benchmarks", "teammate_wrapper"]
 
 
 @pytest.mark.parametrize("name", COLLIDING_NAMES)
@@ -34,9 +35,8 @@ def test_no_top_level_namespace_pollution(name: str):
         "oaht_bench.envs",
         "oaht_bench.agents",
         "oaht_bench.teammate_gen",
-        "oaht_bench.marl",
+        "oaht_bench.teammate_gen.marl",
         "oaht_bench.common",
-        "oaht_bench.evaluation",
         "oaht_bench.algorithms",
         "oaht_bench.offline",
         "oaht_bench.data",
@@ -62,3 +62,33 @@ def test_configs_do_not_require_jax():
     )
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+def test_baselines_live_in_algorithms_not_agents():
+    """LIAM and MeLIBA are methods under evaluation, not agent infrastructure.
+
+    Keeping them beside the actor-critic primitives conflated "a network we build
+    things from" with "a baseline we are measuring" (§6).
+    """
+    import oaht_bench.algorithms.liam_agent  # noqa: F401
+    import oaht_bench.algorithms.meliba_agent  # noqa: F401
+
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("oaht_bench.agents.liam_agent")
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("oaht_bench.agents.meliba_agent")
+
+
+def test_no_dangling_references_to_unabsorbed_upstream():
+    """Nothing may import a jax-aht subtree we chose not to absorb."""
+    import pathlib
+
+    pkg = pathlib.Path(__file__).resolve().parents[1] / "src" / "oaht_bench"
+    offenders = []
+    for path in pkg.rglob("*.py"):
+        for i, line in enumerate(path.read_text().splitlines(), 1):
+            stripped = line.strip()
+            for mod in ("ego_agent_training", "open_ended_training", "evaluation."):
+                if stripped.startswith((f"from {mod}", f"import {mod}")):
+                    offenders.append(f"{path.relative_to(pkg)}:{i}: {stripped}")
+    assert not offenders, "dangling upstream imports:\n" + "\n".join(offenders)

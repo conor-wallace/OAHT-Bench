@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 import shutil
 import subprocess
 import tempfile
@@ -42,11 +43,15 @@ PKG_ROOT = REPO_ROOT / "src" / "oaht_bench"
 
 @dataclass(frozen=True)
 class Subtree:
-    """One upstream directory and where it lands in our package."""
+    """One upstream directory (or selection of files) and where it lands."""
 
     upstream: str
     local: str
     note: str
+    #: When set, absorb only these paths (relative to ``upstream``) rather than
+    #: the whole directory. Used where a subtree mixes code we want with code we
+    #: are replacing -- e.g. jax-aht's online ego trainers.
+    only: tuple[str, ...] | None = None
 
 
 #: jax-aht subtrees we take, and the module names they become. ``teammate_generation``
@@ -54,19 +59,36 @@ class Subtree:
 #: intra-package imports consistent with the rename.
 JAX_AHT_SUBTREES = (
     Subtree("envs", "envs", "LBF, Overcooked-v1 and Hanabi wrappers over Jumanji/JaxMARL."),
-    Subtree("agents", "agents", "Policy classes, population interfaces, scripted/heuristic teammates (§7.6)."),
+    Subtree("agents", "agents", "Policy architectures, population interfaces, scripted teammates (§7.6)."),
     Subtree("teammate_generation", "teammate_gen", "FCP, CoMeDi, BRDiv, L-BRDiv (§7)."),
-    Subtree("marl", "marl", "IPPO and PPO utilities used by the generators."),
+    Subtree("marl", "teammate_gen/marl", "IPPO and PPO utilities; teammate generation is the only consumer."),
     Subtree("common", "common", "Rollout helpers, checkpoint save/load, plotting."),
-    Subtree("evaluation", "evaluation", "Held-out evaluation and cross-play matrices."),
+    Subtree(
+        "ego_agent_training",
+        "algorithms",
+        "MeLIBA network components only. The online PPO ego trainers are "
+        "deliberately excluded -- §3.1 replaces them with the shared DT backbone.",
+        only=("meliba_utils.py",),
+    ),
 )
+
+#: Deliberately NOT absorbed, with the reason, so the omissions are auditable:
+#:
+#: evaluation/            -- we are writing our own protocol (§8); jax-aht's
+#:                           held-out evaluator does not implement graded shift,
+#:                           adaptation gain, or IQM aggregation.
+#: ego_agent_training/    -- online PPO ego training, superseded by §3.1. Note
+#:                           ppo_br.py will be needed later for per-teammate best
+#:                           responses (§4.3 `expert`), which OMIS, TAO and
+#:                           BR-Prox all depend on.
+#: open_ended_training/   -- out of scope.
 
 SOURCES = {"jax-aht": JAX_AHT_SUBTREES}
 
 #: Upstream top-level module -> our dotted path. Order matters only in that longer
 #: names must not be prefixes of shorter ones; these are all distinct.
 def _rewrite_table(subtrees: tuple[Subtree, ...]) -> dict[str, str]:
-    return {s.upstream: f"oaht_bench.{s.local}" for s in subtrees}
+    return {s.upstream: "oaht_bench." + s.local.replace("/", ".") for s in subtrees}
 
 
 def rewrite_imports(text: str, table: dict[str, str]) -> tuple[str, int]:
@@ -130,17 +152,20 @@ def absorb(source: Path, subtrees: tuple[Subtree, ...], *, apply: bool) -> list[
         if not src_dir.is_dir():
             lines.append(f"  MISSING  {src_dir}")
             continue
-        py_files = [
-            p for p in src_dir.rglob("*.py") if "__pycache__" not in p.parts
-        ]
-        other = [
+        if sub.only is not None:
+            py_files = [src_dir / f for f in sub.only if (src_dir / f).is_file()]
+        else:
+            py_files = [
+                p for p in src_dir.rglob("*.py") if "__pycache__" not in p.parts
+            ]
+        other = [] if sub.only is not None else [
             p for p in src_dir.rglob("*")
             if p.is_file() and p.suffix in {".yaml", ".yml", ".json", ".npy", ".safetensors", ".sh"}
             and "__pycache__" not in p.parts
         ]
         rewrites = 0
         if apply:
-            if dst_dir.exists():
+            if sub.only is None and dst_dir.exists():
                 shutil.rmtree(dst_dir)
             for p in py_files + other:
                 rel = p.relative_to(src_dir)
@@ -208,6 +233,11 @@ def main() -> int:
     group = ap.add_mutually_exclusive_group(required=True)
     group.add_argument("--plan", action="store_true", help="Show what would happen.")
     group.add_argument("--apply", action="store_true", help="Perform the absorption.")
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="Absorb even though destinations already exist, discarding local edits.",
+    )
     args = ap.parse_args()
 
     source = Path(args.source).expanduser().resolve()
@@ -215,6 +245,25 @@ def main() -> int:
         raise SystemExit(f"error: no such source directory: {source}")
 
     subtrees = SOURCES[args.name]
+
+    # Absorption is a one-time transform. Once absorbed, the code is ours and gets
+    # modified -- re-running --apply would silently discard those modifications by
+    # re-copying whole subtrees. Refuse unless explicitly forced.
+    if args.apply and not args.force:
+        occupied = [
+            s.local for s in subtrees
+            if s.only is None and (PKG_ROOT / s.local).exists()
+        ]
+        if occupied:
+            print(
+                "refusing to absorb: these destinations already exist and would be\n"
+                "overwritten, discarding any local modifications:\n"
+                + "".join(f"  src/oaht_bench/{d}\n" for d in occupied)
+                + "\nUse --plan to preview, or --force if you really mean to re-copy\n"
+                "(commit first -- the overwrite is not recoverable from the worktree).",
+                file=sys.stderr,
+            )
+            return 1
     print(f"{'Absorbing' if args.apply else 'Plan for'} {args.name} @ {source}")
     print(f"  upstream commit: {upstream_commit(source)}")
     with clean_checkout(source) as clean:

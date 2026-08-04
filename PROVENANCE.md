@@ -17,11 +17,11 @@ the absorption script.
 | upstream path | local path | contents |
 |---|---|---|
 | `envs/` | `src/oaht_bench/envs/` | LBF, Overcooked-v1 and Hanabi wrappers over Jumanji/JaxMARL. |
-| `agents/` | `src/oaht_bench/agents/` | Policy classes, population interfaces, scripted/heuristic teammates (§7.6). |
+| `agents/` | `src/oaht_bench/agents/` | Policy architectures, population interfaces, scripted teammates (§7.6). |
 | `teammate_generation/` | `src/oaht_bench/teammate_gen/` | FCP, CoMeDi, BRDiv, L-BRDiv (§7). |
-| `marl/` | `src/oaht_bench/marl/` | IPPO and PPO utilities used by the generators. |
+| `marl/` | `src/oaht_bench/teammate_gen/marl/` | IPPO and PPO utilities; teammate generation is the only consumer. |
 | `common/` | `src/oaht_bench/common/` | Rollout helpers, checkpoint save/load, plotting. |
-| `evaluation/` | `src/oaht_bench/evaluation/` | Held-out evaluation and cross-play matrices. |
+| `ego_agent_training/` | `src/oaht_bench/algorithms/` | MeLIBA network components only. The online PPO ego trainers are deliberately excluded -- §3.1 replaces them with the shared DT backbone. |
 
 Import rewrites applied:
 
@@ -29,7 +29,7 @@ Import rewrites applied:
 envs                   -> oaht_bench.envs
 agents                 -> oaht_bench.agents
 teammate_generation    -> oaht_bench.teammate_gen
-marl                   -> oaht_bench.marl
+marl                   -> oaht_bench.teammate_gen.marl
 common                 -> oaht_bench.common
-evaluation             -> oaht_bench.evaluation
+ego_agent_training     -> oaht_bench.algorithms
 ```

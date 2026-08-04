@@ -10,7 +10,7 @@ from functools import partial
 
 from oaht_bench.agents.agent_interface import AgentPolicy
 from oaht_bench.agents.rnn_actor_critic import ScannedRNN
-from ego_agent_training.meliba_utils import DecoderScannedRNN, transform_timestep_to_k_batch, fill_to_first_true
+from oaht_bench.algorithms.meliba_utils import DecoderScannedRNN, transform_timestep_to_k_batch, fill_to_first_true
 
 def sample_gaussian(mu, logvar, prng_key):
     """
