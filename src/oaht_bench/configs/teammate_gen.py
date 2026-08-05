@@ -75,7 +75,7 @@ class GeneratorBase(BaseConfig):
     """Fields common to every generator."""
 
     population_size: int = Field(
-        default=4,
+        default=5,
         gt=0,
         description="Members trained. Growing this dilutes per-policy self-play "
         "data quadratically — partners are sampled independently, so a given "
@@ -134,7 +134,6 @@ class FcpConfig(GeneratorBase):
     generator: Literal["fcp"] = "fcp"
     actor_type: ActorType = "mlp"
     total_timesteps: float = Field(default=1e6, gt=0, description="Per member trained.")
-    num_envs: int = Field(default=8, gt=0)
 
     def to_algorithm_dict(self) -> dict[str, Any]:
         return {
@@ -160,7 +159,6 @@ class CoMeDiConfig(GeneratorBase):
     generator: Literal["comedi"] = "comedi"
     actor_type: ActorType = "actor_with_conditional_critic"
     total_timesteps_per_iteration: float = Field(default=1.2e7, gt=0)
-    num_envs: int = Field(default=48, gt=0)
     num_argmax_rollout_episodes: int = Field(default=20, gt=0)
     cross_play_weight: float = Field(
         default=1.0, description="CoMeDi's alpha: weight on cross-play minimization."

@@ -1126,15 +1126,50 @@ def test_runner_refuses_an_existing_run_directory(tmp_path):
 
     On a multi-hour job that discards the whole run, so the check belongs before
     it starts.
+
+    The path matters as much as the check: this asserted
+    ``run_dir/saved_train_run`` while the checkpoint is written to
+    ``run_dir/artifacts/saved_train_run``, so it passed against a guard that
+    could never fire on a real run.
     """
+    import pathlib
+
     from oaht_bench.teammate_gen.runner import run
 
     job = _job(output_dir=str(tmp_path))
-    stale = pathlib_path = __import__("pathlib").Path(job.run_dir()) / "saved_train_run"
+    stale = pathlib.Path(job.run_dir()) / "artifacts" / "saved_train_run"
     stale.mkdir(parents=True)
 
     with pytest.raises(FileExistsError, match="already exists"):
         run(job)
+
+
+def test_guard_watches_the_path_the_checkpoint_is_written_to(tmp_path):
+    """Pin the guarded path to where the checkpoint actually lands.
+
+    Without this the guard can drift back to a path nothing writes and still
+    look tested, which is what happened.
+    """
+    import pathlib
+
+    from oaht_bench.teammate_gen.rescore import artifact_dir
+
+    job = _job(output_dir=str(tmp_path))
+    run_dir = pathlib.Path(job.run_dir())
+    written = run_dir / "artifacts" / "saved_train_run"
+    written.mkdir(parents=True)
+
+    # The locator the re-scorer uses and the path the guard watches must agree.
+    assert artifact_dir(run_dir) == written.resolve()
+
+
+def test_evaluation_defaults_to_sampled_actions():
+    """Greedy deadlocks symmetric coordination tasks; sampling is the default.
+
+    Argmax also erases the policy entropy, so a sweep over ``entropy_coef``
+    cannot observe what it varies.
+    """
+    assert _job().evaluation_greedy is False
 
 
 # --- hyperparameter sweeps ---------------------------------------------------

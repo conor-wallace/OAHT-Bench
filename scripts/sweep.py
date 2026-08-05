@@ -251,6 +251,18 @@ def main() -> int:
     )
     g.add_argument("--out", type=Path, default=REPO_ROOT / "configs" / "sweeps")
 
+    r = sub.add_parser(
+        "rescore",
+        help="Recompute population_crossplay.csv from saved checkpoints, no retraining.",
+    )
+    r.add_argument("runs", nargs="+", type=Path, help="Run directories.")
+    r.add_argument("--episodes", type=int, default=None,
+                   help="Override evaluation_episodes for this pass.")
+    r.add_argument("--greedy", action="store_true", default=None,
+                   help="Argmax actions. Diagnostic only -- deadlocks symmetric "
+                        "coordination tasks; see TeammateGenerationJob.evaluation_greedy.")
+    r.add_argument("--dry-run", action="store_true", help="Print without writing.")
+
     c = sub.add_parser("collect", help="Tabulate finished runs.")
     c.add_argument("--sweep", required=True, type=Path)
     c.add_argument("--results", type=Path, default=REPO_ROOT)
@@ -281,6 +293,27 @@ def main() -> int:
         print(f"\n{len(paths)} cells -> {(args.out / args.name)}")
         print(f"total sequential updates across the sweep: {total:,}")
         return 0
+
+    if args.mode == "rescore":
+        from oaht_bench.teammate_gen.rescore import rescore_run
+
+        print(f"{'run':64s} {'SP':>9s} {'XP':>9s} {'SP-XP':>9s}")
+        failed = 0
+        for run in args.runs:
+            try:
+                s = rescore_run(run, episodes=args.episodes, greedy=args.greedy,
+                                write=not args.dry_run)
+            except Exception as e:  # one unscorable run must not abort the batch
+                failed += 1
+                print(f"{run.name[:64]:64s}  {type(e).__name__}: {str(e).splitlines()[0][:60]}")
+                continue
+            print(f"{run.name[:64]:64s} {s.self_play:9.4f} {s.cross_play:9.4f} "
+                  f"{s.separation:9.4f}")
+        if args.dry_run:
+            print("\ndry run: no population_crossplay.csv was written.")
+        if failed:
+            print(f"\n{failed} run(s) could not be scored.")
+        return 1 if failed else 0
 
     collect(args.sweep, args.results, args.competence_tol)
     return 0

@@ -83,6 +83,7 @@ def evaluate_population(
     seed_index: int = 0,
     partner_params=None,
     member_indices: Sequence[int] | None = None,
+    greedy: bool = False,
 ) -> CrossPlayScores:
     """Pair every row member with every column member and score the result.
 
@@ -103,6 +104,14 @@ def evaluate_population(
         member_indices: Score only these members. FCP passes its *converged*
             checkpoints here; see :func:`scored_members` for why. ``None`` scores
             the whole population.
+        greedy: Take argmax actions rather than sampling. Off by default, and it
+            should stay off for anything reported. Argmax makes two members of a
+            symmetric population perfectly correlated, and in a coordination task
+            that is a deadlock rather than a strong pairing -- on LBF 12x12 it
+            held every episode to the time limit at 25% of the food collected,
+            scoring 0.11 where sampling scored 0.37 and training read 0.40. It
+            also erases the policy entropy, so a sweep over ``entropy_coef``
+            cannot see what it is tuning.
 
     Returns:
         Scores whose ``matrix[i, j]`` is the mean return with row member ``i`` in
@@ -126,7 +135,7 @@ def evaluate_population(
                 agent_1_param=member(cols, j), agent_1_policy=policy,
                 max_episode_steps=max_episode_steps,
                 num_eps=num_episodes,
-                agent_0_test_mode=True, agent_1_test_mode=True,
+                agent_0_test_mode=greedy, agent_1_test_mode=greedy,
             )
             returns = np.asarray(out["returned_episode_returns"])
             matrix[a, b] = float(returns.mean())

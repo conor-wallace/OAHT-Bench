@@ -1,0 +1,59 @@
+{
+  "job": {
+    "env": {
+      "different_levels": true,
+      "env_name": "lbf",
+      "fov": null,
+      "grid_size": 12,
+      "name": "lbf_12x12",
+      "notes": "Gridworld. Matches the existing checkpoints/lbf/lbf_12x12 populations.",
+      "num_agents": 2,
+      "num_food": 6,
+      "rollout_length": 128,
+      "schema_version": 1,
+      "tier": "tier1"
+    },
+    "evaluation_episodes": 20,
+    "generator": {
+      "actor_type": "mlp",
+      "generator": "fcp",
+      "network": {
+        "activation": "tanh",
+        "architecture": "mlp",
+        "hidden_dim": 64,
+        "policy_input_dim": null
+      },
+      "num_checkpoints": 5,
+      "num_envs": 8,
+      "num_eval_episodes": 20,
+      "num_seeds": 1,
+      "population_size": 5,
+      "ppo": {
+        "anneal_lr": false,
+        "clip_eps": 0.03,
+        "entropy_coef": 0.01,
+        "gae_lambda": 0.95,
+        "gamma": 0.99,
+        "learning_rate": 0.001,
+        "max_grad_norm": 1.0,
+        "num_minibatches": 4,
+        "update_epochs": 15,
+        "value_coef": 0.5
+      },
+      "total_timesteps": 1000000.0,
+      "train_seed": 20374
+    },
+    "job_type": "teammate_generation",
+    "label": "fcp_lbf_stage1__learning_rate=0.001_entropy_coef=0.01_total_timesteps=1000000.0",
+    "logging": {
+      "use_wandb": true,
+      "verbose": false,
+      "wandb_entity": "bhd445",
+      "wandb_project": "oaht-bench"
+    },
+    "output_dir": "results",
+    "schema_version": 1,
+    "seed": 0
+  },
+  "schema_version": 1
+}

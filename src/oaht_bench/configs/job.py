@@ -99,6 +99,18 @@ class TeammateGenerationJob(JobBase):
         "evaluation. Cost is population_size^2 x this, so it is the dial for the "
         "accuracy/time trade-off when scoring a sweep.",
     )
+    evaluation_greedy: bool = Field(
+        default=False,
+        description="Take argmax actions in the cross-play evaluation instead of "
+        "sampling. Defaults to sampling, which is both how training measures "
+        "returns and how the released population is used downstream. Greedy is "
+        "kept for diagnostics but is not the benchmark's measurement: in a "
+        "symmetric coordination task two argmax policies are perfectly "
+        "correlated and deadlock. On LBF 12x12 that held every episode to the "
+        "100-step limit and cut food collected from 75% to 25%, reporting 0.11 "
+        "for a population whose training curve read 0.40. It also discards the "
+        "policy entropy, which makes entropy_coef unmeasurable in a sweep.",
+    )
 
     def to_jax_aht_cfg(self) -> dict[str, Any]:
         """Build the nested dict the absorbed training code expects.

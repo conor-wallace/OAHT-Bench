@@ -42,7 +42,9 @@ def run(job: TeammateGenerationJob) -> Path:
     # Orbax refuses to overwrite an existing checkpoint directory, and it only
     # finds out at the *save*, which is after training. On a multi-hour job that
     # discards the entire run. Fail in the first second instead.
-    existing = run_dir / "saved_train_run"
+    # The checkpoint lands under artifacts/; checking run_dir/saved_train_run
+    # tested a path nothing ever writes, so the guard never fired.
+    existing = run_dir / "artifacts" / "saved_train_run"
     if existing.exists():
         raise FileExistsError(
             f"{existing} already exists, and the checkpoint writer will not "
@@ -94,9 +96,12 @@ def _best_response_params(job: TeammateGenerationJob):
     would change a contract three of them do not need.
     """
     from oaht_bench.common.save_load_utils import load_train_run
+    from oaht_bench.teammate_gen.rescore import artifact_dir
 
-    out = load_train_run(str(Path(job.run_dir()) / "saved_train_run"))
-    return out.get("final_params_br")
+    # Absolute, and located rather than assumed: load_train_run resolves a
+    # relative path against REPO_PATH, which points at src/oaht_bench and not
+    # the repo root, so a hand-built relative path silently reads the wrong tree.
+    return load_train_run(str(artifact_dir(Path(job.run_dir())))).get("final_params_br")
 
 
 def _evaluate_population(
@@ -136,6 +141,7 @@ def _evaluate_population(
         num_episodes=job.evaluation_episodes,
         partner_params=partner_params,
         member_indices=members,
+        greedy=job.evaluation_greedy,
     )
     write_scores(scores, Path(job.run_dir()))
     logger.log_item("Population/SelfPlay", scores.self_play)
