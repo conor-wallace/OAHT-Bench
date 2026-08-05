@@ -29,7 +29,7 @@ from oaht_bench.common.run_episodes import run_episodes
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper, LogEnvState
 from oaht_bench.teammate_gen.marl.ippo import make_train as make_ppo_train
-from oaht_bench.common.logging import RunLogger
+from oaht_bench.common.logging import RunLogger, log_update_metrics
 from oaht_bench.configs.job import TeammateGenerationJob
 from oaht_bench.envs.protocols import TrainingEnv
 from oaht_bench.teammate_gen.runtime import CoMeDiRuntime, TrainOutput
@@ -58,6 +58,10 @@ def train_comedi_partners(
     env: TrainingEnv,
     config: CoMeDiRuntime,
 ) -> TrainOutput:
+    # Static: how many updates the self-play warmup runs for, used to offset the
+    # streamed step so the outer iterations continue the same series.
+    _warmup_updates = config.warmup().num_updates
+
     def make_comedi_agents(config):
         def linear_schedule(count):
             frac = 1.0 - (count // (config.ppo.num_minibatches * config.ppo.update_epochs)) / config.num_updates
@@ -866,6 +870,34 @@ def train_comedi_partners(
                     mask = traj_batch_xp.info.get("returned_episode", jnp.ones_like(traj_batch_xp.reward))
                     metric = jax.tree.map(lambda x: mask_and_mean(x, mask), traj_batch_xp.info)
                     metric["update_steps"] = update_steps
+
+                    # Stream self-play episode statistics out of the jit.
+                    #
+                    # Taken from the *self-play* batch rather than the cross-play
+                    # one this metric dict uses, so the series is continuous with
+                    # the warmup -- which logs self-play through ippo's callback --
+                    # and comparable with FCP. Splicing a cross-play measurement
+                    # onto a self-play prefix would look like a regression at the
+                    # hand-off that is really just a change of what is measured.
+                    #
+                    # The step is offset past the warmup and previous outer
+                    # iterations so one continuous train_step spans the whole run.
+                    sp_mask = traj_batch_sp_agent0.info.get(
+                        "returned_episode", jnp.ones_like(traj_batch_sp_agent0.reward)
+                    )
+                    sp_metric = jax.tree.map(
+                        lambda x: mask_and_mean(x, sp_mask), traj_batch_sp_agent0.info
+                    )
+                    sp_metric["update_steps"] = (
+                        _warmup_updates
+                        + (num_existing_agents - 1) * config.num_updates
+                        + update_steps
+                    )
+
+                    def _stream(m):
+                        log_update_metrics(m, wandb_logger)
+
+                    jax.experimental.io_callback(_stream, None, sp_metric)
                     metric["value_loss_conf_xp"] = conf_value_loss_xp.mean()
                     metric["value_loss_conf_sp"] = conf_value_loss_sp.mean()
                     metric["value_loss_conf_mp"] = conf_value_loss_mp.mean()

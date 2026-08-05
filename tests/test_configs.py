@@ -1069,3 +1069,34 @@ def test_shipped_configs_have_a_computable_plan(path):
     from oaht_bench.teammate_gen.plan import training_plan
 
     assert training_plan(load_job(path)).sequential_updates >= 1
+
+
+def test_comedi_streams_its_outer_loop_not_only_the_warmup():
+    """CoMeDi's Train/ curve must cover the whole run.
+
+    Before this, only the self-play warmup streamed -- through ippo's callback --
+    so the phase that actually builds the diverse population was invisible. A
+    2,416-update job showed 976 points and looked identical in length to FCP.
+    """
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "oaht_bench" / "teammate_gen"
+    text = (src / "CoMeDi.py").read_text()
+    assert "io_callback" in text, "CoMeDi does not stream its outer loop"
+    # The streamed step must continue past the warmup rather than restart at 0.
+    assert "_warmup_updates" in text
+
+
+def test_comedi_streams_self_play_for_continuity():
+    """The streamed series must stay self-play across the warmup boundary.
+
+    The outer loop's own metric dict is built from cross-play trajectories;
+    splicing those onto a self-play prefix would read as a regression at the
+    hand-off that is really a change of what is being measured.
+    """
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "oaht_bench" / "teammate_gen"
+    text = (src / "CoMeDi.py").read_text()
+    stream_block = text[text.index("sp_metric = jax.tree.map") : text.index("jax.experimental.io_callback(_stream")]
+    assert "traj_batch_sp_agent0" in stream_block

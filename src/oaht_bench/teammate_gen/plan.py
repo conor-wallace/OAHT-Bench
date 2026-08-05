@@ -14,8 +14,9 @@ cluster job:
 * **BRDiv / L-BRDiv** train all confederate/best-response pairs jointly, so
   ``num_updates`` really is the total.
 
-``sequential_updates`` is what the streamed ``train_step`` counter will climb to,
-so it is the number to compare against a progress log.
+``sequential_updates`` is how many streamed points to expect, so it is the number
+to compare a progress log against. ``train_step`` is 0-indexed, so its highest
+value is one less.
 """
 
 from __future__ import annotations
@@ -47,7 +48,11 @@ class TrainingPlan:
 
     @property
     def sequential_updates(self) -> int:
-        """Depth of the training loop — what ``train_step`` counts up to."""
+        """Depth of the training loop: how many streamed points to expect.
+
+        ``train_step`` is 0-indexed, so the highest value logged is one less than
+        this.
+        """
         return self.warmup_updates + self.updates_per_unit * self.sequential_units
 
     @property
@@ -66,7 +71,8 @@ class TrainingPlan:
         if self.parallel_members > 1:
             lines.append(f"parallel members     {self.parallel_members:,}  (vmapped)")
         lines += [
-            f"sequential updates   {self.sequential_updates:,}   <- train_step counts to this",
+            f"sequential updates   {self.sequential_updates:,}   <- streamed points "
+            f"(train_step 0..{self.sequential_updates - 1:,})",
             f"total updates        {self.total_updates:,}",
         ]
         return "\n".join(lines)
