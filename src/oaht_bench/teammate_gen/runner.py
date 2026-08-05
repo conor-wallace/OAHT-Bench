@@ -86,6 +86,19 @@ def run(job: TeammateGenerationJob) -> Path:
     return run_dir
 
 
+def _best_response_params(job: TeammateGenerationJob):
+    """The saved best-response set, for the generators that train one.
+
+    Read back from the checkpoint the generator has already written rather than
+    threading a second return value through all four training functions, which
+    would change a contract three of them do not need.
+    """
+    from oaht_bench.common.save_load_utils import load_train_run
+
+    out = load_train_run(str(Path(job.run_dir()) / "saved_train_run"))
+    return out.get("final_params_br")
+
+
 def _evaluate_population(
     job: TeammateGenerationJob, params: Any, population: Any, logger: RunLogger
 ) -> None:
@@ -97,6 +110,15 @@ def _evaluate_population(
     from oaht_bench.teammate_gen.crossplay import evaluate_population, write_scores
 
     env = LogWrapper(make_env(job.env.env_name, job.env.env_kwargs()))
+
+    # BRDiv and L-BRDiv train confederate/best-response *pairs* and save both
+    # sets; their designed-optimal pairing is conf_i with br_i, so the matrix
+    # must be conf x br. Pairing a confederate with a copy of itself would be an
+    # out-of-distribution pairing that under-reports competence -- confederates
+    # are never trained to play with themselves. FCP and CoMeDi release a single
+    # set of self-play policies, so their column population is the row one.
+    partner_params = _best_response_params(job)
+
     scores = evaluate_population(
         env,
         params,
@@ -104,6 +126,7 @@ def _evaluate_population(
         rng=jax.random.PRNGKey(job.seed),
         max_episode_steps=job.env.rollout_length,
         num_episodes=job.evaluation_episodes,
+        partner_params=partner_params,
     )
     write_scores(scores, Path(job.run_dir()))
     logger.log_item("Population/SelfPlay", scores.self_play)

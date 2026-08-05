@@ -1281,3 +1281,71 @@ def test_evaluation_episodes_is_configurable():
     job = _job()
     assert job.evaluation_episodes > 0
     assert _job(evaluation_episodes=5).evaluation_episodes == 5
+
+
+def test_crossplay_uses_the_partner_population_when_given():
+    """BRDiv and L-BRDiv must be scored conf_i vs br_j, not conf_i vs conf_j.
+
+    Their designed-optimal pairing is a confederate with *its own* best response.
+    Pairing a confederate with a copy of itself is out-of-distribution -- they are
+    never trained to play with themselves -- and under-reports competence.
+    """
+    import jax
+    import numpy as np
+
+    import oaht_bench.teammate_gen.crossplay as mod
+
+    rows = {"w": np.array([[[0.0], [1.0]]])}   # (seed, member, dim)
+    cols = {"w": np.array([[[10.0], [11.0]]])}
+    seen = []
+
+    def fake_run_episodes(rng, env, *, agent_0_param, agent_0_policy,
+                          agent_1_param, agent_1_policy, **kw):
+        seen.append((float(agent_0_param["w"][0]), float(agent_1_param["w"][0])))
+        return {"returned_episode_returns": np.array([0.0])}
+
+    class _Pop:
+        pop_size = 2
+        policy_cls = None
+
+    original, mod.run_episodes = mod.run_episodes, fake_run_episodes
+    try:
+        mod.evaluate_population(
+            env=None, params=rows, population=_Pop(), rng=jax.random.PRNGKey(0),
+            max_episode_steps=4, num_episodes=1, partner_params=cols,
+        )
+    finally:
+        mod.run_episodes = original
+
+    # Seat 0 always a row member, seat 1 always a column member.
+    assert seen == [(0.0, 10.0), (0.0, 11.0), (1.0, 10.0), (1.0, 11.0)]
+
+
+def test_crossplay_self_pairs_when_no_partner_given():
+    """FCP and CoMeDi release one set of self-play policies; the diagonal is i vs i."""
+    import jax
+    import numpy as np
+
+    import oaht_bench.teammate_gen.crossplay as mod
+
+    rows = {"w": np.array([[[0.0], [1.0]]])}
+    seen = []
+
+    def fake_run_episodes(rng, env, *, agent_0_param, agent_1_param, **kw):
+        seen.append((float(agent_0_param["w"][0]), float(agent_1_param["w"][0])))
+        return {"returned_episode_returns": np.array([0.0])}
+
+    class _Pop:
+        pop_size = 2
+        policy_cls = None
+
+    original, mod.run_episodes = mod.run_episodes, fake_run_episodes
+    try:
+        mod.evaluate_population(
+            env=None, params=rows, population=_Pop(), rng=jax.random.PRNGKey(0),
+            max_episode_steps=4, num_episodes=1,
+        )
+    finally:
+        mod.run_episodes = original
+
+    assert seen == [(0.0, 0.0), (0.0, 1.0), (1.0, 0.0), (1.0, 1.0)]

@@ -9,31 +9,32 @@ and the three that do measure it *differently* and *during* training:
 * BRDiv and L-BRDiv report a confederate against its *best response*.
 
 That makes the numbers incomparable across generators, and leaves FCP with
-nothing. This module evaluates the released population against itself, after
-training, in one way for all four: pair member ``i`` with member ``j`` for every
-``(i, j)`` and record the mean episode return.
+nothing. This module scores every trained population after training, one way for
+all four: pair member ``i`` with member ``j`` for every ``(i, j)`` and record the
+mean episode return.
 
-The diagonal is a member paired with a copy of itself and the off-diagonal is
-mismatched members, so:
-
-* **SP** (diagonal mean) — competence. A population whose members cannot score
-  when paired with themselves is not useful as training data regardless of how
-  distinct they are.
+* **SP** (diagonal mean) — competence with the *designed* partner. A population
+  whose members cannot score with the partner they were trained for is not
+  useful as training data regardless of how distinct they are.
 * **XP** (off-diagonal mean) — overlap. Low means members require different
   responses.
 * **separation** ``SP - XP`` — diversity that is not bought by incompetence.
 
-.. warning::
+The **diagonal is each generator's own designed pairing**, which differs by
+population structure:
 
-   The diagonal means slightly different things per generator, and this is worth
-   stating rather than smoothing over. FCP and CoMeDi members are trained *by*
-   self-play, so ``i`` vs ``i`` is their designed pairing. BRDiv and L-BRDiv
-   release only the confederate set, whose designed partner is a separately
-   trained best response, not another copy of itself — so their diagonal here
-   under-reports the competence their own ``Eval/AvgSPReturnCurve`` measures.
-   Use this matrix to compare *within* a generator across hyperparameters, which
-   is what tuning needs; treat cross-generator comparison of the absolute
-   diagonal with care.
+* *Homogeneous* populations — FCP's checkpoints and CoMeDi's ``final_params_conf``
+  are sets of self-play-trained policies, so the matrix is ``pop x pop`` and the
+  diagonal is member ``i`` with a copy of itself.
+* *Paired* populations — BRDiv and L-BRDiv save ``final_params_conf`` **and**
+  ``final_params_br``, and their designed-optimal pairing is confederate ``i``
+  with best response ``i``. The matrix is ``conf x br`` and the diagonal is that
+  pairing, matching what their own ``Eval/AvgSPReturnCurve`` reports.
+
+Pairing a confederate with a *copy of itself* would be an out-of-distribution
+pairing that under-reports competence, since confederates are never trained to
+play with themselves. Using each generator's intended pairing is what makes the
+self-play column mean one thing across all four.
 """
 
 from __future__ import annotations
@@ -79,27 +80,35 @@ def evaluate_population(
     max_episode_steps: int,
     num_episodes: int = 20,
     seed_index: int = 0,
+    partner_params=None,
 ) -> CrossPlayScores:
-    """Pair every population member with every other and score the result.
+    """Pair every row member with every column member and score the result.
 
     Args:
-        params: Stacked population parameters, leading axes
-            ``(num_seeds, pop_size, ...)``.
+        params: Stacked row-population parameters, leading axes
+            ``(num_seeds, pop_size, ...)``. For a paired generator these are the
+            confederates.
         population: The :class:`AgentPopulation` describing how to read them.
-        num_episodes: Episodes per ordered pair. The estimate is noisy at small
-            values and the cost is ``pop_size**2 * num_episodes`` episodes, so
-            this is the dial for the accuracy/time trade-off.
+        partner_params: Column population, when it differs from the row one —
+            BRDiv and L-BRDiv pass their ``final_params_br`` here so the diagonal
+            is confederate ``i`` with *its own* best response. Omit for the
+            homogeneous generators, where the column population is the row one
+            and the diagonal is genuine self-play.
+        num_episodes: Episodes per ordered pair. Cost is
+            ``pop_size**2 * num_episodes`` episodes, so this is the dial for the
+            accuracy/time trade-off.
         seed_index: Which training seed's population to evaluate.
 
     Returns:
-        Scores whose ``matrix[i, j]`` is the mean return of member ``i`` in seat 0
-        with member ``j`` in seat 1.
+        Scores whose ``matrix[i, j]`` is the mean return with row member ``i`` in
+        seat 0 and column member ``j`` in seat 1.
     """
     pop_size = population.pop_size
     policy = population.policy_cls
+    cols = params if partner_params is None else partner_params
 
-    def member(idx: int):
-        return jax.tree.map(lambda leaf: leaf[seed_index][idx], params)
+    def member(source, idx: int):
+        return jax.tree.map(lambda leaf: leaf[seed_index][idx], source)
 
     matrix = np.zeros((pop_size, pop_size), dtype=float)
     for i in range(pop_size):
@@ -107,8 +116,8 @@ def evaluate_population(
             rng, pair_rng = jax.random.split(rng)
             out = run_episodes(
                 pair_rng, env,
-                agent_0_param=member(i), agent_0_policy=policy,
-                agent_1_param=member(j), agent_1_policy=policy,
+                agent_0_param=member(params, i), agent_0_policy=policy,
+                agent_1_param=member(cols, j), agent_1_policy=policy,
                 max_episode_steps=max_episode_steps,
                 num_eps=num_episodes,
                 agent_0_test_mode=True, agent_1_test_mode=True,
