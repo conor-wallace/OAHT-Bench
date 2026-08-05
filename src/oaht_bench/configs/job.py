@@ -92,6 +92,13 @@ class TeammateGenerationJob(JobBase):
     job_type: Literal["teammate_generation"] = "teammate_generation"
     env: EnvConfig
     generator: GeneratorConfig
+    evaluation_episodes: int = Field(
+        default=20,
+        gt=0,
+        description="Episodes per ordered pair in the post-training cross-play "
+        "evaluation. Cost is population_size^2 x this, so it is the dial for the "
+        "accuracy/time trade-off when scoring a sweep.",
+    )
 
     def to_jax_aht_cfg(self) -> dict[str, Any]:
         """Build the nested dict the absorbed training code expects.

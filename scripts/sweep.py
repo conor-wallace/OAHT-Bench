@@ -156,14 +156,15 @@ def _final_curve_value(metrics_path: Path, tag: str) -> float | None:
     return value
 
 
-def _xp_matrix_scores(run_dir: Path) -> tuple[float | None, float | None]:
-    """Mean of the diagonal and the off-diagonal of the final cross-play matrix.
+def _population_scores(run_dir: Path) -> tuple[float | None, float | None]:
+    """Self-play and cross-play from the post-training population evaluation.
 
-    The diagonal is each member paired with its intended partner (competence);
-    the off-diagonal is mismatched pairings (what the diversity objectives push
-    down).
+    This is the one measurement computed identically for all four generators
+    (see ``teammate_gen.crossplay``), so it is what a cross-generator sweep
+    should rank on. The per-generator ``Eval/`` curves are reported alongside but
+    are not comparable between methods.
     """
-    csv = run_dir / "Eval_LastXPMatrix.csv"
+    csv = run_dir / "population_crossplay.csv"
     if not csv.exists():
         return None, None
     m = np.loadtxt(csv, delimiter=",", ndmin=2)
@@ -174,36 +175,66 @@ def _xp_matrix_scores(run_dir: Path) -> tuple[float | None, float | None]:
     return diag, off
 
 
-def collect(sweep_dir: Path, results_root: Path) -> None:
+def collect(sweep_dir: Path, results_root: Path, competence_tol: float) -> None:
+    """Rank cells by competence first, then by separation.
+
+    The ordering is the one that matches what a teammate population is *for*:
+    members must be individually competent before their diversity means anything.
+    Ranking on separation alone selects populations that are merely bad in
+    different ways, since cross-play also falls when members cannot score at all.
+
+    Competence is a band rather than a strict sort: cells within ``competence_tol``
+    of the best self-play score are treated as equally competent and ordered by
+    separation. A strict lexicographic sort on floats would let a 0.001 difference
+    in self-play override a large difference in diversity.
+    """
     manifest = json.loads((sweep_dir / "sweep.json").read_text())
+    keys = list(manifest["axes"])
+
     rows = []
     for cell in manifest["cells"]:
         job = load_job(sweep_dir / cell["config"])
         run_dir = Path(job.run_dir())
         if not run_dir.is_absolute():
             run_dir = results_root / run_dir
-        metrics = run_dir / "metrics.jsonl"
-        if not metrics.exists():
-            rows.append((cell["settings"], None, None, None, None, "not run"))
-            continue
-        sp_curve = _final_curve_value(metrics, "Eval/AvgSPReturnCurve")
-        xp_curve = _final_curve_value(metrics, "Eval/AvgXPReturnCurve")
-        diag, off = _xp_matrix_scores(run_dir)
-        rows.append((cell["settings"], sp_curve, xp_curve, diag, off, "ok"))
+        sp, xp = _population_scores(run_dir)
+        rows.append({"settings": cell["settings"], "sp": sp, "xp": xp})
 
-    keys = list(manifest["axes"])
+    scored = [r for r in rows if r["sp"] is not None and r["xp"] is not None]
+    for r in scored:
+        r["sep"] = r["sp"] - r["xp"]
+
+    best_sp = max((r["sp"] for r in scored), default=None)
+    if best_sp is not None and best_sp > 0:
+        floor = best_sp * (1.0 - competence_tol)
+        band = [r for r in scored if r["sp"] >= floor]
+    else:
+        floor, band = None, []
+    band.sort(key=lambda r: r["sep"], reverse=True)
+    winner = band[0] if band else None
+
     header = " ".join(f"{k.split('.')[-1]:>16s}" for k in keys)
-    print(f"{header} {'SP':>9s} {'XP':>9s} {'diag':>9s} {'offdiag':>9s}  status")
-    for settings, sp, xp, diag, off, status in rows:
-        vals = " ".join(f"{str(settings[k]):>16s}" for k in keys)
-        def f(x):
-            return f"{x:9.4f}" if isinstance(x, (int, float)) else f"{'-':>9s}"
-        print(f"{vals} {f(sp)} {f(xp)} {f(diag)} {f(off)}  {status}")
+    print(f"{header} {'SP':>9s} {'XP':>9s} {'SP-XP':>9s}  status")
+    order = band + [r for r in scored if r not in band]
+    for r in order:
+        vals = " ".join(f"{str(r['settings'][k]):>16s}" for k in keys)
+        mark = "  <- best" if r is winner else ("" if r in band else "  (below competence floor)")
+        print(f"{vals} {r['sp']:9.4f} {r['xp']:9.4f} {r['sep']:9.4f}{mark}")
+    for r in rows:
+        if r["sp"] is None:
+            vals = " ".join(f"{str(r['settings'][k]):>16s}" for k in keys)
+            print(f"{vals} {'-':>9s} {'-':>9s} {'-':>9s}  not run")
 
+    if winner is None:
+        print("\nNo cell has a scored population yet.")
+        return
     print(
-        "\nSP/diag is competence (member with its intended partner); XP/offdiag is\n"
-        "what the diversity objectives push down. Read them together: a cell with\n"
-        "low XP and low SP is a collapsed population, not a diverse one."
+        f"\nRanked by separation among cells within {competence_tol:.0%} of the best "
+        f"self-play score ({best_sp:.4f}, floor {floor:.4f}).\n"
+        f"Competence first: a population whose members cannot score when paired "
+        f"with themselves\nis not useful training data however distinct they are, "
+        f"and cross-play falls for that\nreason too -- so separation alone would "
+        f"rank a collapsed population first."
     )
 
 
@@ -223,6 +254,11 @@ def main() -> int:
     c = sub.add_parser("collect", help="Tabulate finished runs.")
     c.add_argument("--sweep", required=True, type=Path)
     c.add_argument("--results", type=Path, default=REPO_ROOT)
+    c.add_argument(
+        "--competence-tol", type=float, default=0.05,
+        help="Cells within this fraction of the best self-play score are treated "
+             "as equally competent and ranked by separation (default 0.05).",
+    )
 
     args = ap.parse_args()
 
@@ -246,7 +282,7 @@ def main() -> int:
         print(f"total sequential updates across the sweep: {total:,}")
         return 0
 
-    collect(args.sweep, args.results)
+    collect(args.sweep, args.results, args.competence_tol)
     return 0
 
 

@@ -1187,3 +1187,97 @@ def test_sweep_manifest_records_cost_per_cell(tmp_path):
     for cell in manifest["cells"]:
         assert cell["sequential_updates"] >= 1
         assert cell["config_hash"]
+
+
+# --- population cross-play and sweep ranking --------------------------------
+
+
+def test_crossplay_separation_is_sp_minus_xp():
+    import numpy as np
+
+    from oaht_bench.teammate_gen.crossplay import CrossPlayScores
+
+    s = CrossPlayScores(matrix=np.eye(3), self_play=0.6, cross_play=0.1)
+    assert s.separation == pytest.approx(0.5)
+
+
+def test_crossplay_single_member_has_no_cross_play():
+    """Reporting 0 would read as perfect separation for a population of one."""
+    import math
+
+    import jax
+    import numpy as np
+
+    from oaht_bench.teammate_gen.crossplay import evaluate_population
+
+    class _Pop:
+        pop_size = 1
+        policy_cls = None
+
+    calls = {}
+
+    def fake_run_episodes(*a, **k):
+        calls["n"] = calls.get("n", 0) + 1
+        return {"returned_episode_returns": np.array([0.5])}
+
+    import oaht_bench.teammate_gen.crossplay as mod
+
+    original, mod.run_episodes = mod.run_episodes, fake_run_episodes
+    try:
+        scores = evaluate_population(
+            env=None, params={"w": np.zeros((1, 1, 2))}, population=_Pop(),
+            rng=jax.random.PRNGKey(0), max_episode_steps=8, num_episodes=1,
+        )
+    finally:
+        mod.run_episodes = original
+
+    assert scores.self_play == pytest.approx(0.5)
+    assert math.isnan(scores.cross_play)
+
+
+def test_sweep_ranks_competence_before_separation(tmp_path):
+    """Separation alone would select a collapsed population.
+
+    Cross-play falls both when members are genuinely distinct and when they
+    cannot score at all, so competence has to gate the ranking.
+    """
+    import json
+
+    import numpy as np
+
+    import scripts.sweep as sw
+
+    cases = {
+        "good": (0.60, 0.10),      # competent and diverse
+        "similar": (0.62, 0.55),   # competent, low separation
+        "collapsed": (0.02, 0.00),  # incompetent, huge apparent separation
+    }
+    cells = []
+    for name, (sp, xp) in cases.items():
+        run = tmp_path / name
+        run.mkdir()
+        m = np.full((3, 3), xp)
+        np.fill_diagonal(m, sp)
+        np.savetxt(run / "population_crossplay.csv", m, delimiter=",")
+        cells.append({"config": f"{name}.json", "settings": {"x": name}})
+    (tmp_path / "sweep.json").write_text(
+        json.dumps({"name": "t", "axes": {"x": []}, "cells": cells})
+    )
+
+    sp_scores = {
+        n: sw._population_scores(tmp_path / n) for n in cases
+    }
+    assert sp_scores["collapsed"][0] < sp_scores["good"][0]
+    # 'collapsed' has the largest separation but must not be selected.
+    seps = {n: s - x for n, (s, x) in sp_scores.items()}
+    best_sp = max(s for s, _ in sp_scores.values())
+    band = [n for n, (s, _) in sp_scores.items() if s >= best_sp * 0.95]
+    assert "collapsed" not in band
+    assert max(band, key=lambda n: seps[n]) == "good"
+
+
+def test_evaluation_episodes_is_configurable():
+    """Cost is population_size^2 x this, so it must not be a magic number."""
+    job = _job()
+    assert job.evaluation_episodes > 0
+    assert _job(evaluation_episodes=5).evaluation_episodes == 5

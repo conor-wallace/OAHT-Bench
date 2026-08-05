@@ -9,12 +9,15 @@ Hydra, YAML, or a subprocess.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, Callable
 
 from oaht_bench.common.logging import RunLogger
 from oaht_bench.configs import save_job
 from oaht_bench.configs.job import TeammateGenerationJob
+
+log = logging.getLogger(__name__)
 
 
 def _generators() -> dict[str, Callable[..., Any]]:
@@ -73,6 +76,38 @@ def run(job: TeammateGenerationJob) -> Path:
         verbose=job.logging.verbose,
     ) as logger:
         # All four generators read the typed job directly.
-        runners[alg](job, logger)
+        params, population = runners[alg](job, logger)
+
+        # One cross-play evaluation for every generator, computed the same way,
+        # so FCP -- which has no notion of cross-play during training -- is
+        # measurable alongside the others.
+        _evaluate_population(job, params, population, logger)
 
     return run_dir
+
+
+def _evaluate_population(
+    job: TeammateGenerationJob, params: Any, population: Any, logger: RunLogger
+) -> None:
+    """Score the trained population against itself and record the result."""
+    import jax
+
+    from oaht_bench.envs import make_env
+    from oaht_bench.envs.log_wrapper import LogWrapper
+    from oaht_bench.teammate_gen.crossplay import evaluate_population, write_scores
+
+    env = LogWrapper(make_env(job.env.env_name, job.env.env_kwargs()))
+    scores = evaluate_population(
+        env,
+        params,
+        population,
+        rng=jax.random.PRNGKey(job.seed),
+        max_episode_steps=job.env.rollout_length,
+        num_episodes=job.evaluation_episodes,
+    )
+    write_scores(scores, Path(job.run_dir()))
+    logger.log_item("Population/SelfPlay", scores.self_play)
+    logger.log_item("Population/CrossPlay", scores.cross_play)
+    logger.log_item("Population/Separation", scores.separation)
+    logger.commit()
+    log.info("Population cross-play:\n%s", scores.describe())
