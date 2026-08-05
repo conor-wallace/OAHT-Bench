@@ -226,3 +226,6 @@ papers/
 
 # Local Claude Code settings (machine-specific permissions)
 .claude/settings.local.json
+
+# Sweep outputs are generated; regenerate with scripts/sweep.py
+configs/sweeps/

@@ -1135,3 +1135,55 @@ def test_runner_refuses_an_existing_run_directory(tmp_path):
 
     with pytest.raises(FileExistsError, match="already exists"):
         run(job)
+
+
+# --- hyperparameter sweeps ---------------------------------------------------
+
+
+def test_sweep_expands_the_grid_and_hashes_each_cell(tmp_path):
+    """Every cell is a distinct config, so a single one can be re-run or cited."""
+    from scripts.sweep import generate
+
+    base = tmp_path / "base.json"
+    save_job(_job(), base)
+    out = generate(
+        base, "s",
+        {"generator.population_size": [3, 4], "generator.num_envs": [8, 16]},
+        tmp_path / "sweeps",
+    )
+    assert len(out) == 4
+    hashes = {load_job(p).content_hash() for p, _ in out}
+    assert len(hashes) == 4
+
+
+def test_sweep_rejects_an_unrunnable_cell_before_writing(tmp_path):
+    """A cell that cannot train must fail at generation.
+
+    Queueing it would burn a scheduler slot and report nothing -- and a partial
+    sweep left on disk looks complete.
+    """
+    from oaht_bench.configs.teammate_gen import BrDivConfig
+    from scripts.sweep import generate
+
+    base = tmp_path / "base.json"
+    save_job(_job(generator=BrDivConfig(population_size=3, num_envs=16,
+                                        total_timesteps=1e6)), base)
+    with pytest.raises(SystemExit, match="not runnable"):
+        generate(base, "s", {"generator.total_timesteps": [1e6, 10]}, tmp_path / "sweeps")
+    assert not (tmp_path / "sweeps" / "s").exists()
+
+
+def test_sweep_manifest_records_cost_per_cell(tmp_path):
+    """Sizing a sweep needs the update count, not just the cell count."""
+    import json
+
+    from scripts.sweep import generate
+
+    base = tmp_path / "base.json"
+    save_job(_job(), base)
+    generate(base, "s", {"generator.population_size": [3, 4]}, tmp_path / "sweeps")
+    manifest = json.loads((tmp_path / "sweeps" / "s" / "sweep.json").read_text())
+    assert len(manifest["cells"]) == 2
+    for cell in manifest["cells"]:
+        assert cell["sequential_updates"] >= 1
+        assert cell["config_hash"]

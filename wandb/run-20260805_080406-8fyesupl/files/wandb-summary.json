@@ -1,0 +1,1 @@
+{"_runtime":21,"Train/percent_eaten":16.666667938232422,"Eval/AvgSPReturnCurve":0.06000000238418579,"_timestamp":1.7859350685319092e+09,"_wandb":{"runtime":21},"_step":79,"train_step":7,"Train/returned_episode_lengths":100,"Train/returned_episode_returns":0.05000000074505806,"Eval/AvgXPReturnCurve":0.061250001192092896}

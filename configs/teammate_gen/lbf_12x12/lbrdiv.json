@@ -11,7 +11,7 @@
     },
     "generator": {
       "generator": "lbrdiv",
-      "population_size": 3,
+      "population_size": 5,
       "ppo": {
         "learning_rate": 0.0005
       }

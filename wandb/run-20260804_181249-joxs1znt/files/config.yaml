@@ -1,0 +1,408 @@
+_wandb:
+    value:
+        cli_version: 0.28.1
+        e:
+            a0ya90dwrkp8y8h8bgyxo9wqo4b5ngus:
+                apple:
+                    ecpuCores: 4
+                    gpuCores: 8
+                    macModel: MacBookAir10,1
+                    memoryGb: 16
+                    name: Apple M1
+                    pcpuCores: 4
+                    ramTotalBytes: "17179869184"
+                    swapTotalBytes: "18253611008"
+                args:
+                    - config=configs/teammate_gen/lbf_12x12/lbrdiv.json
+                codePath: .venv/bin/oaht-bench
+                codePathLocal: .venv/bin/oaht-bench
+                cpu_count: 8
+                cpu_count_logical: 8
+                disk:
+                    /:
+                        total: "994662584320"
+                        used: "742492983296"
+                email: conorw8@gmail.com
+                executable: /Users/conorwallace/Documents/Personal/Projects/OAHT-Bench/.venv/bin/python3
+                git:
+                    commit: 5ddd02c4eb99900648443a49a3b7ff732fe0dee7
+                    remote: https://github.com/conor-wallace/OAHT-Bench.git
+                host: Conors-MacBook-Air.local
+                memory:
+                    total: "17179869184"
+                os: macOS-15.1.1-arm64-arm-64bit
+                program: /Users/conorwallace/Documents/Personal/Projects/OAHT-Bench/.venv/bin/oaht-bench
+                python: CPython 3.11.14
+                root: /Users/conorwallace/Documents/Personal/Projects/OAHT-Bench
+                startedAt: "2026-08-04T23:12:49.477383Z"
+                writerId: a0ya90dwrkp8y8h8bgyxo9wqo4b5ngus
+        m:
+            - "1": checkpoint
+              "6":
+                - 3
+              "7": []
+            - "1": train_step
+              "6":
+                - 3
+              "7": []
+            - "2": Losses/*
+              "5": 2
+              "6":
+                - 1
+              "7": []
+            - "2": Eval/*
+              "5": 2
+              "6":
+                - 1
+              "7": []
+            - "2": Returns/*
+              "5": 2
+              "6":
+                - 1
+              "7": []
+            - "2": Train/*
+              "5": 2
+              "6":
+                - 1
+              "7": []
+        python_version: 3.11.14
+        t:
+            "1":
+                - 12
+                - 45
+                - 49
+            "2":
+                - 12
+                - 45
+                - 49
+            "3":
+                - 2
+                - 7
+                - 16
+            "4": 3.11.14
+            "5": 0.28.1
+            "10":
+                - 20
+            "12": 0.28.1
+            "13": darwin-arm64
+        visualize:
+            Losses/BREntropy:
+                panel_config:
+                    fieldSettings:
+                        lineKey: lineKey
+                        lineVal: lineVal
+                        step: step
+                    panelDefId: wandb/lineseries/v0
+                    stringSettings:
+                        title: BREntropy
+                        xname: train_step
+                    transform:
+                        name: tableWithLeafColNames
+                    userQuery:
+                        queryFields:
+                            - args:
+                                - name: runSets
+                                  value: ${runSets}
+                              fields:
+                                - fields: []
+                                  name: id
+                                - fields: []
+                                  name: name
+                                - fields: []
+                                  name: _defaultColorIndex
+                                - args:
+                                    - name: tableKey
+                                      value: Losses/BREntropy_table
+                                  fields: []
+                                  name: summaryTable
+                              name: runSets
+                panel_type: Vega2
+            Losses/BRPGLoss:
+                panel_config:
+                    fieldSettings:
+                        lineKey: lineKey
+                        lineVal: lineVal
+                        step: step
+                    panelDefId: wandb/lineseries/v0
+                    stringSettings:
+                        title: BRPGLoss
+                        xname: train_step
+                    transform:
+                        name: tableWithLeafColNames
+                    userQuery:
+                        queryFields:
+                            - args:
+                                - name: runSets
+                                  value: ${runSets}
+                              fields:
+                                - fields: []
+                                  name: id
+                                - fields: []
+                                  name: name
+                                - fields: []
+                                  name: _defaultColorIndex
+                                - args:
+                                    - name: tableKey
+                                      value: Losses/BRPGLoss_table
+                                  fields: []
+                                  name: summaryTable
+                              name: runSets
+                panel_type: Vega2
+            Losses/BRValLoss:
+                panel_config:
+                    fieldSettings:
+                        lineKey: lineKey
+                        lineVal: lineVal
+                        step: step
+                    panelDefId: wandb/lineseries/v0
+                    stringSettings:
+                        title: BRValLoss
+                        xname: train_step
+                    transform:
+                        name: tableWithLeafColNames
+                    userQuery:
+                        queryFields:
+                            - args:
+                                - name: runSets
+                                  value: ${runSets}
+                              fields:
+                                - fields: []
+                                  name: id
+                                - fields: []
+                                  name: name
+                                - fields: []
+                                  name: _defaultColorIndex
+                                - args:
+                                    - name: tableKey
+                                      value: Losses/BRValLoss_table
+                                  fields: []
+                                  name: summaryTable
+                              name: runSets
+                panel_type: Vega2
+            Losses/ConfEntropy:
+                panel_config:
+                    fieldSettings:
+                        lineKey: lineKey
+                        lineVal: lineVal
+                        step: step
+                    panelDefId: wandb/lineseries/v0
+                    stringSettings:
+                        title: ConfEntropy
+                        xname: train_step
+                    transform:
+                        name: tableWithLeafColNames
+                    userQuery:
+                        queryFields:
+                            - args:
+                                - name: runSets
+                                  value: ${runSets}
+                              fields:
+                                - fields: []
+                                  name: id
+                                - fields: []
+                                  name: name
+                                - fields: []
+                                  name: _defaultColorIndex
+                                - args:
+                                    - name: tableKey
+                                      value: Losses/ConfEntropy_table
+                                  fields: []
+                                  name: summaryTable
+                              name: runSets
+                panel_type: Vega2
+            Losses/ConfPGLoss:
+                panel_config:
+                    fieldSettings:
+                        lineKey: lineKey
+                        lineVal: lineVal
+                        step: step
+                    panelDefId: wandb/lineseries/v0
+                    stringSettings:
+                        title: ConfPGLoss
+                        xname: train_step
+                    transform:
+                        name: tableWithLeafColNames
+                    userQuery:
+                        queryFields:
+                            - args:
+                                - name: runSets
+                                  value: ${runSets}
+                              fields:
+                                - fields: []
+                                  name: id
+                                - fields: []
+                                  name: name
+                                - fields: []
+                                  name: _defaultColorIndex
+                                - args:
+                                    - name: tableKey
+                                      value: Losses/ConfPGLoss_table
+                                  fields: []
+                                  name: summaryTable
+                              name: runSets
+                panel_type: Vega2
+            Losses/ConfValLoss:
+                panel_config:
+                    fieldSettings:
+                        lineKey: lineKey
+                        lineVal: lineVal
+                        step: step
+                    panelDefId: wandb/lineseries/v0
+                    stringSettings:
+                        title: ConfValLoss
+                        xname: train_step
+                    transform:
+                        name: tableWithLeafColNames
+                    userQuery:
+                        queryFields:
+                            - args:
+                                - name: runSets
+                                  value: ${runSets}
+                              fields:
+                                - fields: []
+                                  name: id
+                                - fields: []
+                                  name: name
+                                - fields: []
+                                  name: _defaultColorIndex
+                                - args:
+                                    - name: tableKey
+                                      value: Losses/ConfValLoss_table
+                                  fields: []
+                                  name: summaryTable
+                              name: runSets
+                panel_type: Vega2
+            Losses/LMs_Horizontal:
+                panel_config:
+                    fieldSettings:
+                        lineKey: lineKey
+                        lineVal: lineVal
+                        step: step
+                    panelDefId: wandb/lineseries/v0
+                    stringSettings:
+                        title: LMs_Horizontal
+                        xname: train_step
+                    transform:
+                        name: tableWithLeafColNames
+                    userQuery:
+                        queryFields:
+                            - args:
+                                - name: runSets
+                                  value: ${runSets}
+                              fields:
+                                - fields: []
+                                  name: id
+                                - fields: []
+                                  name: name
+                                - fields: []
+                                  name: _defaultColorIndex
+                                - args:
+                                    - name: tableKey
+                                      value: Losses/LMs_Horizontal_table
+                                  fields: []
+                                  name: summaryTable
+                              name: runSets
+                panel_type: Vega2
+            Losses/LMs_Vertical:
+                panel_config:
+                    fieldSettings:
+                        lineKey: lineKey
+                        lineVal: lineVal
+                        step: step
+                    panelDefId: wandb/lineseries/v0
+                    stringSettings:
+                        title: LMs_Vertical
+                        xname: train_step
+                    transform:
+                        name: tableWithLeafColNames
+                    userQuery:
+                        queryFields:
+                            - args:
+                                - name: runSets
+                                  value: ${runSets}
+                              fields:
+                                - fields: []
+                                  name: id
+                                - fields: []
+                                  name: name
+                                - fields: []
+                                  name: _defaultColorIndex
+                                - args:
+                                    - name: tableKey
+                                      value: Losses/LMs_Vertical_table
+                                  fields: []
+                                  name: summaryTable
+                              name: runSets
+                panel_type: Vega2
+ENV_KWARGS:
+    value:
+        different_levels: true
+        grid_size: 12
+        num_agents: 2
+        num_food: 6
+ENV_NAME:
+    value: lbf
+ROLLOUT_LENGTH:
+    value: 128
+TASK_NAME:
+    value: lbf_12x12
+algorithm:
+    value:
+        ACTIVATION: tanh
+        ALG: lbrdiv
+        ANNEAL_LR: false
+        CLIP_EPS: 0.05
+        ENT_COEF: 0.01
+        ENV_KWARGS:
+            different_levels: true
+            grid_size: 12
+            num_agents: 2
+            num_food: 6
+        ENV_NAME: lbf
+        FC_HIDDEN_DIM: 64
+        GAE_LAMBDA: 0.95
+        GAMMA: 0.99
+        LAGRANGE_LR: 0.01
+        LR: 0.0005
+        MAX_GRAD_NORM: 1
+        NUM_CHECKPOINTS: 5
+        NUM_ENVS: 64
+        NUM_EVAL_EPISODES: 20
+        NUM_MINIBATCHES: 4
+        NUM_SEEDS: 1
+        PARTNER_POP_SIZE: 3
+        ROLLOUT_LENGTH: 128
+        TOLERANCE_FACTOR: 0.1
+        TOTAL_TIMESTEPS: 4.5e+07
+        TRAIN_SEED: 20374
+        UPDATE_EPOCHS: 15
+        VF_COEF: 0.5
+label:
+    value: lbrdiv_lbf_12x12
+local_logger:
+    value:
+        save_eval_out: true
+        save_train_out: true
+logger:
+    value:
+        log_eval_out: true
+        log_train_out: true
+        verbose: false
+name:
+    value: lbf_12x12/lbrdiv/lbrdiv_lbf_12x12
+run_dir:
+    value: results/teammate_generation/lbrdiv_lbf_12x12-f01b5d2cf34f
+run_heldout_eval:
+    value: false
+task:
+    value:
+        ENV_KWARGS:
+            different_levels: true
+            grid_size: 12
+            num_agents: 2
+            num_food: 6
+        ENV_NAME: lbf
+        ROLLOUT_LENGTH: 128
+        TASK_NAME: lbf_12x12
+train_ego:
+    value: false

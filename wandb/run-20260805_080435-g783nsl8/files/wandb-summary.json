@@ -1,0 +1,1 @@
+{"_wandb":{"runtime":21},"_timestamp":1.7859350971153731e+09,"_step":79,"Train/returned_episode_lengths":100,"Eval/AvgSPReturnCurve":0.06000000238418579,"Train/percent_eaten":20.833335876464844,"Train/returned_episode_returns":0.06666667014360428,"_runtime":21,"Eval/AvgXPReturnCurve":0.05374999716877937,"train_step":7}

@@ -1,0 +1,68 @@
+{
+  "ENV_KWARGS": {
+    "different_levels": true,
+    "grid_size": 12,
+    "num_agents": 2,
+    "num_food": 6
+  },
+  "ENV_NAME": "lbf",
+  "ROLLOUT_LENGTH": 128,
+  "TASK_NAME": "lbf_12x12",
+  "algorithm": {
+    "ACTIVATION": "tanh",
+    "ALG": "lbrdiv",
+    "ANNEAL_LR": false,
+    "CLIP_EPS": 0.05,
+    "ENT_COEF": 0.01,
+    "ENV_KWARGS": {
+      "different_levels": true,
+      "grid_size": 12,
+      "num_agents": 2,
+      "num_food": 6
+    },
+    "ENV_NAME": "lbf",
+    "FC_HIDDEN_DIM": 64,
+    "GAE_LAMBDA": 0.95,
+    "GAMMA": 0.99,
+    "LAGRANGE_LR": 0.01,
+    "LR": 0.0005,
+    "MAX_GRAD_NORM": 1.0,
+    "NUM_CHECKPOINTS": 5,
+    "NUM_ENVS": 64,
+    "NUM_EVAL_EPISODES": 20,
+    "NUM_MINIBATCHES": 4,
+    "NUM_SEEDS": 1,
+    "PARTNER_POP_SIZE": 5,
+    "ROLLOUT_LENGTH": 128,
+    "TOLERANCE_FACTOR": 0.1,
+    "TOTAL_TIMESTEPS": 45000000.0,
+    "TRAIN_SEED": 20374,
+    "UPDATE_EPOCHS": 15,
+    "VF_COEF": 0.5
+  },
+  "label": "lbrdiv_lbf_12x12",
+  "local_logger": {
+    "save_eval_out": true,
+    "save_train_out": true
+  },
+  "logger": {
+    "log_eval_out": true,
+    "log_train_out": true,
+    "verbose": false
+  },
+  "name": "lbf_12x12/lbrdiv/lbrdiv_lbf_12x12",
+  "run_dir": "results/teammate_generation/lbrdiv_lbf_12x12-a2a064c22782",
+  "run_heldout_eval": false,
+  "task": {
+    "ENV_KWARGS": {
+      "different_levels": true,
+      "grid_size": 12,
+      "num_agents": 2,
+      "num_food": 6
+    },
+    "ENV_NAME": "lbf",
+    "ROLLOUT_LENGTH": 128,
+    "TASK_NAME": "lbf_12x12"
+  },
+  "train_ego": false
+}

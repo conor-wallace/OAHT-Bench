@@ -12,7 +12,7 @@
     "generator": {
       "cross_play_weight": 0.05,
       "generator": "brdiv",
-      "population_size": 3,
+      "population_size": 5,
       "ppo": {
         "learning_rate": 0.0005,
         "num_minibatches": 2
