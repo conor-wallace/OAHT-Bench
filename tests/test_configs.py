@@ -1100,3 +1100,38 @@ def test_comedi_streams_self_play_for_continuity():
     text = (src / "CoMeDi.py").read_text()
     stream_block = text[text.index("sp_metric = jax.tree.map") : text.index("jax.experimental.io_callback(_stream")]
     assert "traj_batch_sp_agent0" in stream_block
+
+
+def test_paired_generators_log_the_intended_pairing_only():
+    """BRDiv and L-BRDiv must restrict the streamed metric to conf_i vs br_i.
+
+    conf_ids and br_ids are sampled independently and uniformly, so only 1/n of
+    rollout episodes are the designed-optimal pairing; the rest are cross-play,
+    which these objectives actively minimize. Logging the raw mixture under the
+    same tag FCP and CoMeDi use would make a successful run trend downwards while
+    they trend up.
+    """
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "oaht_bench" / "teammate_gen"
+    for name in ("BRDiv.py", "LBRDiv.py"):
+        text = (src / name).read_text()
+        block = text[text.index("_paired = (") : text.index("jax.experimental.io_callback(_stream")]
+        assert "self_onehot_id" in block and "oppo_onehot_id" in block
+        assert "_sp_mask" in block
+
+
+def test_runner_refuses_an_existing_run_directory(tmp_path):
+    """Orbax only refuses to overwrite at the save, which is after training.
+
+    On a multi-hour job that discards the whole run, so the check belongs before
+    it starts.
+    """
+    from oaht_bench.teammate_gen.runner import run
+
+    job = _job(output_dir=str(tmp_path))
+    stale = pathlib_path = __import__("pathlib").Path(job.run_dir()) / "saved_train_run"
+    stale.mkdir(parents=True)
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        run(job)

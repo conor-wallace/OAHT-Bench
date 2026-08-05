@@ -35,6 +35,19 @@ def run(job: TeammateGenerationJob) -> Path:
     the provenance §7.1 requires for released checkpoints.
     """
     run_dir = Path(job.run_dir())
+
+    # Orbax refuses to overwrite an existing checkpoint directory, and it only
+    # finds out at the *save*, which is after training. On a multi-hour job that
+    # discards the entire run. Fail in the first second instead.
+    existing = run_dir / "saved_train_run"
+    if existing.exists():
+        raise FileExistsError(
+            f"{existing} already exists, and the checkpoint writer will not "
+            f"overwrite it -- the run would fail after training rather than now. "
+            f"Delete {run_dir} to re-run, or change the job's label. (The "
+            f"directory name includes the config hash, so an identical config "
+            f"always resolves here.)"
+        )
     run_dir.mkdir(parents=True, exist_ok=True)
 
     cfg = job.to_jax_aht_cfg()

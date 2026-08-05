@@ -13,7 +13,7 @@
       "cross_play_weight": 0.2,
       "generator": "comedi",
       "mixed_play_weight": 0.4,
-      "population_size": 10,
+      "population_size": 5,
       "ppo": {
         "entropy_coef": 0.001,
         "learning_rate": 0.0005,

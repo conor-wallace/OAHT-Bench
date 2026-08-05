@@ -568,12 +568,31 @@ def train_brdiv_partners(
                 # Stream episode statistics out of the jit as they are produced.
                 # Everything below runs inside one jit(vmap(...)), so without this
                 # callback a multi-hour run reports nothing until it returns.
-                # Emitted before the loss terms are attached: those carry a
-                # population axis and are logged post-hoc instead.
+                #
+                # Restricted to the *designed-optimal pairing* -- confederate i
+                # with its own best response i -- so the series measures the same
+                # thing FCP and CoMeDi report, namely return when an agent plays
+                # with its intended partner.
+                #
+                # The unmasked rollout is not comparable: conf_ids and br_ids are
+                # sampled independently and uniformly, so only 1/n of episodes are
+                # the intended pairing and the rest are cross-play, which this
+                # objective actively minimizes. Logging that mixture under the
+                # same tag would make a *successful* run trend downwards while
+                # FCP and CoMeDi trend up.
+                _paired = (
+                    traj_batch_conf.self_onehot_id * traj_batch_conf.oppo_onehot_id
+                ).sum(-1)
+                _sp_mask = mask * _paired
+                sp_metric = jax.tree.map(
+                    lambda x: mask_and_mean(x, _sp_mask), traj_batch_conf.info
+                )
+                sp_metric["update_steps"] = update_steps
+
                 def _stream(m):
                     log_update_metrics(m, wandb_logger)
 
-                jax.experimental.io_callback(_stream, None, dict(metric))
+                jax.experimental.io_callback(_stream, None, sp_metric)
                 metric["value_loss_conf_agent"] = value_loss_conf.mean(axis=(0, 1))
                 metric["value_loss_br_agent"] = value_loss_br.mean(axis=(0, 1))
 
