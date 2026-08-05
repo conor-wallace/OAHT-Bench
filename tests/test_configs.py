@@ -1349,3 +1349,76 @@ def test_crossplay_self_pairs_when_no_partner_given():
         mod.run_episodes = original
 
     assert seen == [(0.0, 0.0), (0.0, 1.0), (1.0, 0.0), (1.0, 1.0)]
+
+
+# --- FCP is scored on converged checkpoints ---------------------------------
+
+
+def test_fcp_scores_only_converged_checkpoints():
+    """One member per run: the convention that run arrived at.
+
+    FCP's flattening is (seeds, runs, ckpts, ...) -> (seeds, runs*ckpts, ...) in
+    C order, so the converged member of run r is at r*num_checkpoints + ckpts-1.
+    """
+    from oaht_bench.configs.teammate_gen import FcpConfig
+    from oaht_bench.teammate_gen.crossplay import scored_members
+
+    job = _job(generator=FcpConfig(population_size=4, num_checkpoints=3))
+    assert scored_members(job) == [2, 5, 8, 11]
+
+
+def test_other_generators_score_every_member():
+    """They release one member per convention already."""
+    from oaht_bench.configs.teammate_gen import BrDivConfig, CoMeDiConfig, LBrDivConfig
+    from oaht_bench.teammate_gen.crossplay import scored_members
+
+    for gen in (CoMeDiConfig(), BrDivConfig(), LBrDivConfig()):
+        assert scored_members(_job(generator=gen)) is None
+
+
+def test_fcp_scoring_does_not_reward_dropping_checkpoints():
+    """The regression this guards against.
+
+    Averaging self-play over all members makes num_checkpoints look harmful,
+    because early checkpoints are deliberately weak -- so a sweep would drive it
+    to 1 and reproduce the FCP-T ablation the paper shows is significantly worse.
+    Scoring converged members only makes the count of scored members depend on
+    population_size alone.
+    """
+    from oaht_bench.configs.teammate_gen import FcpConfig
+    from oaht_bench.teammate_gen.crossplay import scored_members
+
+    few = scored_members(_job(generator=FcpConfig(population_size=5, num_checkpoints=2)))
+    many = scored_members(_job(generator=FcpConfig(population_size=5, num_checkpoints=8)))
+    assert len(few) == len(many) == 5
+
+
+def test_member_indices_selects_the_submatrix():
+    """Only the requested members are evaluated, and in the requested order."""
+    import jax
+    import numpy as np
+
+    import oaht_bench.teammate_gen.crossplay as mod
+
+    params = {"w": np.array([[[0.0], [1.0], [2.0], [3.0]]])}
+    seen = []
+
+    def fake_run_episodes(rng, env, *, agent_0_param, agent_1_param, **kw):
+        seen.append((float(agent_0_param["w"][0]), float(agent_1_param["w"][0])))
+        return {"returned_episode_returns": np.array([0.0])}
+
+    class _Pop:
+        pop_size = 4
+        policy_cls = None
+
+    original, mod.run_episodes = mod.run_episodes, fake_run_episodes
+    try:
+        scores = mod.evaluate_population(
+            env=None, params=params, population=_Pop(), rng=jax.random.PRNGKey(0),
+            max_episode_steps=4, num_episodes=1, member_indices=[1, 3],
+        )
+    finally:
+        mod.run_episodes = original
+
+    assert scores.matrix.shape == (2, 2)
+    assert seen == [(1.0, 1.0), (1.0, 3.0), (3.0, 1.0), (3.0, 3.0)]

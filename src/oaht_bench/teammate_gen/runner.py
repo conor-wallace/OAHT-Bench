@@ -107,7 +107,11 @@ def _evaluate_population(
 
     from oaht_bench.envs import make_env
     from oaht_bench.envs.log_wrapper import LogWrapper
-    from oaht_bench.teammate_gen.crossplay import evaluate_population, write_scores
+    from oaht_bench.teammate_gen.crossplay import (
+        evaluate_population,
+        scored_members,
+        write_scores,
+    )
 
     env = LogWrapper(make_env(job.env.env_name, job.env.env_kwargs()))
 
@@ -119,6 +123,10 @@ def _evaluate_population(
     # set of self-play policies, so their column population is the row one.
     partner_params = _best_response_params(job)
 
+    # FCP's population spans competence by design, so it is scored on the
+    # converged checkpoint of each run rather than on every member.
+    members = scored_members(job)
+
     scores = evaluate_population(
         env,
         params,
@@ -127,6 +135,7 @@ def _evaluate_population(
         max_episode_steps=job.env.rollout_length,
         num_episodes=job.evaluation_episodes,
         partner_params=partner_params,
+        member_indices=members,
     )
     write_scores(scores, Path(job.run_dir()))
     logger.log_item("Population/SelfPlay", scores.self_play)

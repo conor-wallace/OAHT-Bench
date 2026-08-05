@@ -39,6 +39,7 @@ self-play column mean one thing across all four.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -81,6 +82,7 @@ def evaluate_population(
     num_episodes: int = 20,
     seed_index: int = 0,
     partner_params=None,
+    member_indices: Sequence[int] | None = None,
 ) -> CrossPlayScores:
     """Pair every row member with every column member and score the result.
 
@@ -98,21 +100,25 @@ def evaluate_population(
             ``pop_size**2 * num_episodes`` episodes, so this is the dial for the
             accuracy/time trade-off.
         seed_index: Which training seed's population to evaluate.
+        member_indices: Score only these members. FCP passes its *converged*
+            checkpoints here; see :func:`scored_members` for why. ``None`` scores
+            the whole population.
 
     Returns:
         Scores whose ``matrix[i, j]`` is the mean return with row member ``i`` in
         seat 0 and column member ``j`` in seat 1.
     """
-    pop_size = population.pop_size
     policy = population.policy_cls
     cols = params if partner_params is None else partner_params
+    idx = list(range(population.pop_size)) if member_indices is None else list(member_indices)
+    pop_size = len(idx)
 
-    def member(source, idx: int):
-        return jax.tree.map(lambda leaf: leaf[seed_index][idx], source)
+    def member(source, i: int):
+        return jax.tree.map(lambda leaf: leaf[seed_index][i], source)
 
     matrix = np.zeros((pop_size, pop_size), dtype=float)
-    for i in range(pop_size):
-        for j in range(pop_size):
+    for a, i in enumerate(idx):
+        for b, j in enumerate(idx):
             rng, pair_rng = jax.random.split(rng)
             out = run_episodes(
                 pair_rng, env,
@@ -123,7 +129,7 @@ def evaluate_population(
                 agent_0_test_mode=True, agent_1_test_mode=True,
             )
             returns = np.asarray(out["returned_episode_returns"])
-            matrix[i, j] = float(returns.mean())
+            matrix[a, b] = float(returns.mean())
 
     diag = float(np.mean(np.diag(matrix)))
     if pop_size > 1:
@@ -140,3 +146,35 @@ def write_scores(scores: CrossPlayScores, run_dir: Path) -> Path:
     path = Path(run_dir) / "population_crossplay.csv"
     np.savetxt(path, scores.matrix, delimiter=",")
     return path
+
+
+def scored_members(job) -> list[int] | None:
+    """Which population members the SP/XP scores should be computed over.
+
+    FCP is the exception, and getting it wrong inverts the tuning signal. Its
+    population deliberately spans *competence*: ``ippo`` stores checkpoints at
+    ``num_updates // (num_checkpoints - 1)`` intervals from step 1 onward, so
+    members range from barely-trained to converged. Averaging self-play across
+    all of them penalises exactly what makes the method work — and the paper's
+    own ``FCP-T`` ablation, which keeps only converged checkpoints, is
+    *significantly worse* downstream. Ranking a sweep on that mean would push
+    ``num_checkpoints`` toward 1 and reproduce the ablation.
+
+    So FCP is scored on the converged checkpoint of each independent run: one
+    member per training seed, which is the "convention" that run arrived at. The
+    competence spread is retained in the population and is not a defect to
+    optimize away.
+
+    The other three release one member per convention already, so all of their
+    members are scored.
+
+    Returns:
+        Flat member indices, or ``None`` to score everything.
+    """
+    gen = job.generator
+    if gen.generator != "fcp":
+        return None
+    # get_fcp_population reshapes (seeds, runs, ckpts, ...) -> (seeds, runs*ckpts, ...)
+    # in C order, so flat index == run * num_checkpoints + checkpoint.
+    ckpts = gen.num_checkpoints
+    return [run * ckpts + (ckpts - 1) for run in range(gen.population_size)]
