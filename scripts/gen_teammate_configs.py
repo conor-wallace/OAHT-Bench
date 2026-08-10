@@ -105,16 +105,37 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         "hanabi": dict(total_timesteps=1e9, num_envs=32, pop=3),
     },
     "comedi": {
-        "lbf": dict(total_timesteps_per_iteration=6e6, num_envs=48, pop=10),
+        # Raised, and still short. total_timesteps_per_iteration is per *member*,
+        # and 6e6 at 48 envs bought each of the 9 only 160 updates -- FCP needed
+        # 2,929 to reach the task ceiling. That is the whole explanation for
+        # CoMeDi stopping at ~80% of the food with its curve still climbing
+        # steeply. 2.4e7 at 64 envs gives 526/member; parity with FCP would take
+        # ~1.2e8 and 38k sequential updates, which needs a real GPU because
+        # CoMeDi builds its population one member at a time. See
+        # docs/tuning_record.md.
+        "lbf": dict(total_timesteps_per_iteration=2.4e7, num_envs=64, pop=10),
         "overcooked": dict(total_timesteps_per_iteration=1e7, num_envs=48, pop=10),
         "hanabi": dict(total_timesteps_per_iteration=2e7, num_envs=48, pop=5),
     },
     "brdiv": {
+        # Deliberately unchanged by the FCP tuning round. BRDiv already gets
+        # 5,493 updates -- nearly twice FCP's tuned 2,929 -- and its return curve
+        # is flat over the last quarter (+0.002/1k). It is converged at ~40% of
+        # the food, not starved, so raising the budget would only cost time. Its
+        # constraint is the diversity objective trading away competence, which
+        # cross_play_weight controls; that needs its own sweep.
         "lbf": dict(total_timesteps=4.5e7, num_envs=64, pop=3),
         "overcooked": dict(total_timesteps=9e7, num_envs=128, pop=3),
         "hanabi": dict(total_timesteps=5e8, num_envs=128, pop=3),
     },
     "lbrdiv": {
+        # Also unchanged, and for a subtler reason than BRDiv. L-BRDiv is flat
+        # over its last quarter too (slope ~0 at 5,493 updates), so it is not
+        # starved either -- but it reaches only ~22% of the food while producing
+        # the best separation of any generator here (SP 0.212, XP 0.019). Low
+        # competence may be what its Minimum-Coverage-Set objective is buying
+        # rather than a defect, so "fix" is not yet well defined. Sweep
+        # tolerance_factor before touching anything else.
         "lbf": dict(total_timesteps=4.5e7, num_envs=64, pop=3),
         "overcooked": dict(total_timesteps=9e7, num_envs=128, pop=3),
         "hanabi": dict(total_timesteps=5e8, num_envs=128, pop=3),

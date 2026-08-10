@@ -134,10 +134,56 @@ have invalidated it:
 
 ---
 
+## Carrying the FCP result across to the other three (LBF 12×12)
+
+No sweep was run for these. What transferred is the *diagnostic* — measure the
+population against the task ceiling (~97% of the food) and check whether the
+return curve is still climbing — not the tuned numbers. Applying FCP's budget
+uniformly would have been wrong for two of the three.
+
+Baseline, from one run of each at the inherited settings:
+
+| generator | updates | % food | final return | last-quarter slope /1k | verdict |
+|---|---:|---:|---:|---:|---|
+| FCP *(tuned)* | 2,929 | **96.8** | 0.483 | — | at ceiling |
+| CoMeDi | 2,416 | 80.2 | 0.393 | **+0.232** | starved |
+| BRDiv | 5,493 | 40.6 | 0.182 | +0.002 | converged |
+| L-BRDiv | 5,493 | 21.9 | 0.096 | ~0 | converged |
+
+**CoMeDi — budget raised.** `6e6 → 2.4e7`, `num_envs 48 → 64`. Its
+`total_timesteps_per_iteration` is spent *per member*, and at the old setting
+each of the 9 members got **160 updates** against FCP's 2,929. That single fact
+explains the 80% plateau and the steeply-climbing curve. The new setting gives
+526/member, which is a step and not a fix: parity would need ~1.2e8 and ~38k
+sequential updates, and CoMeDi builds its population one member at a time, so
+that is a GPU-scale run rather than a laptop one.
+
+**BRDiv — unchanged.** It already receives 5,493 updates, nearly double tuned
+FCP, and its curve is flat over the final quarter (+0.002/1k). It is converged
+at 40% of the food, not starved. More budget buys time and nothing else. The
+open knob is `cross_play_weight`, which sets how much competence the diversity
+term is allowed to trade away — a grid for it already exists at
+`configs/sweeps/brdiv_lbf_xpw` and has never been run.
+
+**L-BRDiv — unchanged, and the least understood.** Flat as well, so also not
+starved, but it reaches only 22% of the food *while producing the best
+separation of any generator measured here* (SP 0.212, XP 0.019, separation
+0.193). Low absolute competence may be what the Minimum Coverage Set objective
+is buying rather than a defect, so it is not yet clear what "fixing" it would
+even mean. `tolerance_factor` is the knob; it needs a sweep and a downstream
+check before anyone concludes the number is too low.
+
+The general lesson, worth restating because it nearly went the other way here:
+**a low return does not imply a small budget.** Three generators all well short
+of the ceiling had three different causes, separable in about a minute by
+looking at the slope of the last quarter of training.
+
+---
+
 ## Not yet tuned
 
-CoMeDi, BRDiv and L-BRDiv on LBF, and all four on Overcooked and Hanabi, still
-run at hyperparameters ported from jax-aht's per-environment Hydra configs.
-Those encode real tuning and are a reasonable starting point, but the FCP result
-above shows what inheriting them can cost: upstream's LBF budget left the
-population at 74% of the achievable food.
+All four on Overcooked and Hanabi still run at hyperparameters ported from
+jax-aht's per-environment Hydra configs. Those encode real tuning and are a
+reasonable starting point, but the FCP result above shows what inheriting them
+can cost: upstream's LBF budget left the population at 74% of the achievable
+food, and CoMeDi's left each member with 160 updates.
