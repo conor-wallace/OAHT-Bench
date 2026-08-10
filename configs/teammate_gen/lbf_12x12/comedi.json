@@ -13,7 +13,8 @@
       "cross_play_weight": 0.2,
       "generator": "comedi",
       "mixed_play_weight": 0.4,
-      "population_size": 5,
+      "num_envs": 48,
+      "population_size": 10,
       "ppo": {
         "entropy_coef": 0.001,
         "learning_rate": 0.0005,
@@ -22,13 +23,7 @@
       "total_timesteps_per_iteration": 6000000.0
     },
     "job_type": "teammate_generation",
-    "label": "comedi_lbf_12x12",
-    "logging": {
-      "use_wandb": true,
-      "verbose": false,
-      "wandb_entity": "bhd445",
-      "wandb_project": "oaht-bench"
-    }
+    "label": "comedi_lbf_12x12"
   },
   "schema_version": 1
 }

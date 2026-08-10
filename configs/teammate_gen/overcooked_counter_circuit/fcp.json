@@ -10,7 +10,7 @@
     },
     "generator": {
       "generator": "fcp",
-      "population_size": 5,
+      "num_envs": 8,
       "ppo": {
         "clip_eps": 0.1,
         "entropy_coef": 0.05,

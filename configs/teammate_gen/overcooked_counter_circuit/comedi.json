@@ -10,6 +10,7 @@
     },
     "generator": {
       "generator": "comedi",
+      "num_envs": 48,
       "population_size": 10,
       "ppo": {
         "clip_eps": 0.01,

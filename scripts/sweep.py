@@ -238,6 +238,99 @@ def collect(sweep_dir: Path, results_root: Path, competence_tol: float) -> None:
     )
 
 
+# --------------------------------------------------------------------------
+# run
+# --------------------------------------------------------------------------
+
+
+def _expand(paths: list[Path]) -> list[Path]:
+    """Accept config files or directories holding them.
+
+    ``sweep.json`` is a manifest, not a job, so a naive ``dir/*.json`` loop fails
+    validation on it. Filtering here means the obvious invocation works.
+    """
+    out: list[Path] = []
+    for p in paths:
+        if p.is_dir():
+            out += sorted(c for c in p.glob("*.json") if c.name != "sweep.json")
+        else:
+            out.append(p)
+    return out
+
+
+def _is_finished(job) -> bool:
+    """Whether this config already has a trained population on disk.
+
+    Checks the checkpoint rather than the run directory: the directory is created
+    before training starts, so its presence only means a run was *attempted*.
+    """
+    return (Path(job.run_dir()) / "artifacts" / "saved_train_run").exists()
+
+
+def run_batch(paths: list[Path], *, jobs: int = 1, dry_run: bool = False) -> int:
+    """Train each config, skipping finished ones and surviving failures.
+
+    Runs are separate processes rather than sequential calls in one interpreter.
+    A generator that dies — OOM, a bad shape — takes its process down without
+    touching the others, and JAX does not have to share one device context
+    between populations of different sizes.
+    """
+    import subprocess
+    import sys
+    from concurrent.futures import ThreadPoolExecutor
+
+    configs = _expand(paths)
+    todo, done = [], []
+    for c in configs:
+        job = load_job(c)
+        (done if _is_finished(job) else todo).append((c, job))
+
+    for c, _ in done:
+        print(f"  skip     {c.name}  (already trained)")
+    if not todo:
+        print(f"\nnothing to run: all {len(configs)} config(s) already have a population.")
+        return 0
+
+    print(f"\n{'config':52s} {'seq updates':>12s}")
+    total = 0
+    for c, job in todo:
+        try:
+            u = training_plan(job).sequential_updates
+        except Exception:
+            u = -1
+        total += max(u, 0)
+        print(f"  {c.name:50s} {u:12,d}")
+    print(f"\n{len(todo)} to run, {len(done)} already done, "
+          f"{total:,} sequential updates total")
+    if dry_run:
+        return 0
+
+    def one(item):
+        c, _ = item
+        proc = subprocess.run(
+            [sys.executable, "-m", "oaht_bench.cli", f"config={c}"],
+            capture_output=True, text=True,
+        )
+        return c, proc.returncode, proc.stderr
+
+    print()
+    failed = []
+    with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+        for c, code, err in pool.map(one, todo):
+            if code == 0:
+                print(f"  ok       {c.name}")
+            else:
+                failed.append(c)
+                tail = (err.strip().splitlines() or ["(no stderr)"])[-1][:90]
+                print(f"  FAILED   {c.name}\n             {tail}")
+
+    print(f"\n{len(todo) - len(failed)}/{len(todo)} succeeded.")
+    if failed:
+        print("Re-run just the failures by passing their configs again; "
+              "finished runs are skipped.")
+    return 1 if failed else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="mode", required=True)
@@ -250,6 +343,17 @@ def main() -> int:
         help="Dotted config path and comma-separated values. Repeatable.",
     )
     g.add_argument("--out", type=Path, default=REPO_ROOT / "configs" / "sweeps")
+
+    rn = sub.add_parser(
+        "run", help="Train every config given, skipping ones already finished."
+    )
+    rn.add_argument("configs", nargs="+", type=Path,
+                    help="Config files, or sweep directories to expand.")
+    rn.add_argument("--jobs", type=int, default=1,
+                    help="Concurrent runs. Each is a separate process; at small "
+                         "num_envs one run does not saturate a device.")
+    rn.add_argument("--dry-run", action="store_true",
+                    help="List what would run, with update counts, and stop.")
 
     r = sub.add_parser(
         "rescore",
@@ -293,6 +397,9 @@ def main() -> int:
         print(f"\n{len(paths)} cells -> {(args.out / args.name)}")
         print(f"total sequential updates across the sweep: {total:,}")
         return 0
+
+    if args.mode == "run":
+        return run_batch(args.configs, jobs=args.jobs, dry_run=args.dry_run)
 
     if args.mode == "rescore":
         from oaht_bench.teammate_gen.rescore import rescore_run

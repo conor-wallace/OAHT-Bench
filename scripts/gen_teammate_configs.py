@@ -51,8 +51,10 @@ def _family(preset_name: str) -> str:
 # --------------------------------------------------------------------------
 PPO: dict[str, dict[str, dict[str, Any]]] = {
     "fcp": {
-        "lbf": dict(learning_rate=1e-4, update_epochs=15, num_minibatches=4,
-                    clip_eps=0.03, entropy_coef=0.01),
+        # Tuned, not inherited — see docs/tuning_record.md. Upstream's 1e-4/0.01
+        # left the population well short of the task ceiling.
+        "lbf": dict(learning_rate=1e-3, update_epochs=15, num_minibatches=4,
+                    clip_eps=0.03, entropy_coef=0.003),
         "overcooked": dict(learning_rate=1e-3, update_epochs=15, num_minibatches=16,
                            clip_eps=0.1, entropy_coef=0.05),
         "hanabi": dict(learning_rate=5e-4, update_epochs=4, num_minibatches=4,
@@ -94,7 +96,11 @@ PPO: dict[str, dict[str, dict[str, Any]]] = {
 #: because it snapshots during training — see the README.
 SCALE: dict[str, dict[str, dict[str, Any]]] = {
     "fcp": {
-        "lbf": dict(total_timesteps=1e6, num_envs=8, pop=5),
+        # Tuned. 1e6 at num_envs=8 is 976 updates and stops at ~74% of the food
+        # collected; 24e6 at num_envs=64 reaches ~97%, which is the task ceiling.
+        # Both the budget and the batch mattered independently — see
+        # docs/tuning_record.md.
+        "lbf": dict(total_timesteps=24e6, num_envs=64, pop=5),
         "overcooked": dict(total_timesteps=4e6, num_envs=8, pop=5),
         "hanabi": dict(total_timesteps=1e9, num_envs=32, pop=3),
     },

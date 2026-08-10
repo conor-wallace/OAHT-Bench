@@ -22,7 +22,7 @@
     "generator": {
       "cross_play_weight": 0.2,
       "generator": "comedi",
-      "population_size": 5,
+      "num_envs": 48,
       "ppo": {
         "anneal_lr": true,
         "clip_eps": 0.2,
