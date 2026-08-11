@@ -11,7 +11,6 @@
     "generator": {
       "generator": "comedi",
       "num_envs": 48,
-      "population_size": 10,
       "ppo": {
         "clip_eps": 0.01,
         "entropy_coef": 0.05,
@@ -21,7 +20,11 @@
       "total_timesteps_per_iteration": 10000000.0
     },
     "job_type": "teammate_generation",
-    "label": "comedi_overcooked_counter_circuit"
+    "label": "comedi_overcooked_counter_circuit",
+    "logging": {
+      "use_wandb": true,
+      "wandb_project": "oaht-bench"
+    }
   },
   "schema_version": 1
 }

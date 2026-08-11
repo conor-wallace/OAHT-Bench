@@ -23,7 +23,6 @@
       "cross_play_weight": 0.05,
       "generator": "brdiv",
       "num_envs": 128,
-      "population_size": 3,
       "ppo": {
         "anneal_lr": true,
         "clip_eps": 0.2,
@@ -34,7 +33,11 @@
       "total_timesteps": 500000000.0
     },
     "job_type": "teammate_generation",
-    "label": "brdiv_hanabi"
+    "label": "brdiv_hanabi",
+    "logging": {
+      "use_wandb": true,
+      "wandb_project": "oaht-bench"
+    }
   },
   "schema_version": 1
 }

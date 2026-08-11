@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from oaht_bench.configs import get_preset, preset_names, save_job
-from oaht_bench.configs.job import TeammateGenerationJob
+from oaht_bench.configs.job import LoggingConfig, TeammateGenerationJob
 from oaht_bench.configs.network import MlpNetwork
 from oaht_bench.configs.teammate_gen import (
     BrDivConfig,
@@ -94,15 +94,30 @@ PPO: dict[str, dict[str, dict[str, Any]]] = {
 #: ``pop`` is the authored PARTNER_POP_SIZE. Note it is *not* the resulting
 #: population size for FCP, which yields ``pop * num_checkpoints`` members
 #: because it snapshots during training — see the README.
+#:
+#: Held equal across every generator and environment so that population size is
+#: not a free variable when methods are compared. Upstream used 5 for FCP, 10 for
+#: CoMeDi and 3 for BRDiv/L-BRDiv, which meant a difference in downstream results
+#: could always be attributed to how many teammates a method happened to produce.
+#:
+#: This equalizes the number of *scored* members and the number a dataset is
+#: collected against. It does not equalize the *released* population: FCP
+#: snapshots during training, so it still yields ``POPULATION_SIZE ×
+#: num_checkpoints`` = 25 members where the others yield 5. Cutting
+#: ``num_checkpoints`` to 1 would equalize that too, but it is precisely the
+#: ``FCP₋T`` ablation the paper reports as significantly worse — FCP's diversity
+#: *is* the checkpoint spread. §7.3 of the plan tracks this as open.
+POPULATION_SIZE = 5
+
 SCALE: dict[str, dict[str, dict[str, Any]]] = {
     "fcp": {
         # Tuned. 1e6 at num_envs=8 is 976 updates and stops at ~74% of the food
         # collected; 24e6 at num_envs=64 reaches ~97%, which is the task ceiling.
         # Both the budget and the batch mattered independently — see
         # docs/tuning_record.md.
-        "lbf": dict(total_timesteps=24e6, num_envs=64, pop=5),
-        "overcooked": dict(total_timesteps=4e6, num_envs=8, pop=5),
-        "hanabi": dict(total_timesteps=1e9, num_envs=32, pop=3),
+        "lbf": dict(total_timesteps=24e6, num_envs=64, pop=POPULATION_SIZE),
+        "overcooked": dict(total_timesteps=4e6, num_envs=8, pop=POPULATION_SIZE),
+        "hanabi": dict(total_timesteps=1e9, num_envs=32, pop=POPULATION_SIZE),
     },
     "comedi": {
         # Raised, and still short. total_timesteps_per_iteration is per *member*,
@@ -113,9 +128,9 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # ~1.2e8 and 38k sequential updates, which needs a real GPU because
         # CoMeDi builds its population one member at a time. See
         # docs/tuning_record.md.
-        "lbf": dict(total_timesteps_per_iteration=2.4e7, num_envs=64, pop=10),
-        "overcooked": dict(total_timesteps_per_iteration=1e7, num_envs=48, pop=10),
-        "hanabi": dict(total_timesteps_per_iteration=2e7, num_envs=48, pop=5),
+        "lbf": dict(total_timesteps_per_iteration=2.4e7, num_envs=64, pop=POPULATION_SIZE),
+        "overcooked": dict(total_timesteps_per_iteration=1e7, num_envs=48, pop=POPULATION_SIZE),
+        "hanabi": dict(total_timesteps_per_iteration=2e7, num_envs=48, pop=POPULATION_SIZE),
     },
     "brdiv": {
         # Deliberately unchanged by the FCP tuning round. BRDiv already gets
@@ -124,9 +139,9 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # the food, not starved, so raising the budget would only cost time. Its
         # constraint is the diversity objective trading away competence, which
         # cross_play_weight controls; that needs its own sweep.
-        "lbf": dict(total_timesteps=4.5e7, num_envs=64, pop=3),
-        "overcooked": dict(total_timesteps=9e7, num_envs=128, pop=3),
-        "hanabi": dict(total_timesteps=5e8, num_envs=128, pop=3),
+        "lbf": dict(total_timesteps=4.5e7, num_envs=64, pop=POPULATION_SIZE),
+        "overcooked": dict(total_timesteps=9e7, num_envs=128, pop=POPULATION_SIZE),
+        "hanabi": dict(total_timesteps=5e8, num_envs=128, pop=POPULATION_SIZE),
     },
     "lbrdiv": {
         # Also unchanged, and for a subtler reason than BRDiv. L-BRDiv is flat
@@ -136,9 +151,9 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # competence may be what its Minimum-Coverage-Set objective is buying
         # rather than a defect, so "fix" is not yet well defined. Sweep
         # tolerance_factor before touching anything else.
-        "lbf": dict(total_timesteps=4.5e7, num_envs=64, pop=3),
-        "overcooked": dict(total_timesteps=9e7, num_envs=128, pop=3),
-        "hanabi": dict(total_timesteps=5e8, num_envs=128, pop=3),
+        "lbf": dict(total_timesteps=4.5e7, num_envs=64, pop=POPULATION_SIZE),
+        "overcooked": dict(total_timesteps=9e7, num_envs=128, pop=POPULATION_SIZE),
+        "hanabi": dict(total_timesteps=5e8, num_envs=128, pop=POPULATION_SIZE),
     },
 }
 
@@ -202,6 +217,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--all-envs", action="store_true",
                     help="Emit for all seven results configurations, not just tier 1.")
+    ap.add_argument(
+        "--wandb", metavar="PROJECT", nargs="?", const="oaht-bench", default=None,
+        help="Enable wandb logging in the emitted configs, under PROJECT "
+             "(default 'oaht-bench'). The entity is deliberately never written: "
+             "wandb takes it from WANDB_ENTITY or your login, so a config that "
+             "someone else runs does not publish into your account.",
+    )
     args = ap.parse_args()
 
     envs = preset_names() if args.all_envs else preset_names("tier1")
@@ -212,8 +234,13 @@ def main() -> int:
         env = get_preset(env_name)
         for generator in ("fcp", "comedi", "brdiv", "lbrdiv"):
             gen = build(generator, env_name)
+            kwargs: dict[str, Any] = {}
+            if args.wandb:
+                kwargs["logging"] = LoggingConfig(
+                    use_wandb=True, wandb_project=args.wandb
+                )
             job = TeammateGenerationJob(
-                label=f"{generator}_{env_name}", env=env, generator=gen
+                label=f"{generator}_{env_name}", env=env, generator=gen, **kwargs
             )
             path = OUT_ROOT / env_name / f"{generator}.json"
             save_job(job, path, minimal=True)

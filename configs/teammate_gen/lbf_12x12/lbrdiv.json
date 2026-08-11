@@ -11,13 +11,17 @@
     },
     "generator": {
       "generator": "lbrdiv",
-      "population_size": 3,
+      "lagrange_learning_rate": 0.0036,
       "ppo": {
         "learning_rate": 0.0005
       }
     },
     "job_type": "teammate_generation",
-    "label": "lbrdiv_lbf_12x12"
+    "label": "lbrdiv_lbf_12x12",
+    "logging": {
+      "use_wandb": true,
+      "wandb_project": "oaht-bench"
+    }
   },
   "schema_version": 1
 }

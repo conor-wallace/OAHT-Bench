@@ -20,7 +20,11 @@
       "total_timesteps": 4000000.0
     },
     "job_type": "teammate_generation",
-    "label": "fcp_overcooked_counter_circuit"
+    "label": "fcp_overcooked_counter_circuit",
+    "logging": {
+      "use_wandb": true,
+      "wandb_project": "oaht-bench"
+    }
   },
   "schema_version": 1
 }

@@ -10,8 +10,8 @@
     },
     "generator": {
       "generator": "lbrdiv",
+      "lagrange_learning_rate": 0.0036,
       "num_envs": 128,
-      "population_size": 3,
       "ppo": {
         "clip_eps": 0.01,
         "entropy_coef": 0.05,
@@ -22,7 +22,11 @@
       "total_timesteps": 90000000.0
     },
     "job_type": "teammate_generation",
-    "label": "lbrdiv_overcooked_counter_circuit"
+    "label": "lbrdiv_overcooked_counter_circuit",
+    "logging": {
+      "use_wandb": true,
+      "wandb_project": "oaht-bench"
+    }
   },
   "schema_version": 1
 }

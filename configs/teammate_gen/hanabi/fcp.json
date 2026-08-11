@@ -22,7 +22,6 @@
     "generator": {
       "generator": "fcp",
       "num_envs": 32,
-      "population_size": 3,
       "ppo": {
         "anneal_lr": true,
         "clip_eps": 0.2,
@@ -33,7 +32,11 @@
       "total_timesteps": 1000000000.0
     },
     "job_type": "teammate_generation",
-    "label": "fcp_hanabi"
+    "label": "fcp_hanabi",
+    "logging": {
+      "use_wandb": true,
+      "wandb_project": "oaht-bench"
+    }
   },
   "schema_version": 1
 }
