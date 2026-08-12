@@ -18,7 +18,7 @@ from oaht_bench.envs.log_wrapper import LogWrapper
 from oaht_bench.teammate_gen.marl.ippo import make_train as make_ppo_train
 from oaht_bench.common.plot_utils import get_metric_names
 from oaht_bench.common.save_load_utils import save_train_run
-from oaht_bench.common.logging import RunLogger
+from oaht_bench.common.logging import RunLogger, nonfatal
 from oaht_bench.configs.job import TeammateGenerationJob
 from oaht_bench.envs.protocols import TrainingEnv
 from oaht_bench.teammate_gen.runtime import PpoRuntime, TrainOutput
@@ -120,7 +120,8 @@ def run_fcp(job: TeammateGenerationJob, wandb_logger: RunLogger) -> FcpPopulatio
     # global is the wrong place for something that determines where a released
     # artifact lands.
     out_savepath = save_train_run(out, job.run_dir(), savename="saved_train_run")
-    log_metrics(job, out, wandb_logger, out_savepath)
+    with nonfatal("FCP post-training metrics"):
+        log_metrics(job, out, wandb_logger, out_savepath)
 
     return flattened_partner_params, partner_population
 

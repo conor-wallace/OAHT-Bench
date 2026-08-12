@@ -29,7 +29,7 @@ from oaht_bench.common.run_episodes import run_episodes
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper, LogEnvState
 from oaht_bench.teammate_gen.marl.ippo import make_train as make_ppo_train
-from oaht_bench.common.logging import RunLogger, log_update_metrics
+from oaht_bench.common.logging import RunLogger, log_update_metrics, nonfatal
 from oaht_bench.configs.job import TeammateGenerationJob
 from oaht_bench.envs.protocols import TrainingEnv
 from oaht_bench.teammate_gen.runtime import CoMeDiRuntime, TrainOutput
@@ -1109,7 +1109,8 @@ def run_comedi(job: TeammateGenerationJob, wandb_logger: RunLogger) -> CoMeDiPop
     # global is the wrong place for something that determines where a released
     # artifact lands.
     out_savepath = save_train_run(out, job.run_dir(), savename="saved_train_run")
-    log_metrics(job, out, wandb_logger, metric_names, out_savepath)
+    with nonfatal("CoMeDi post-training metrics"):
+        log_metrics(job, out, wandb_logger, metric_names, out_savepath)
     partner_params, partner_population = get_comedi_population(job, out, env)
     return partner_params, partner_population
 

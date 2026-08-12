@@ -17,12 +17,35 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 log = logging.getLogger(__name__)
+
+
+@contextmanager
+def nonfatal(what: str):
+    """Run reporting code that must not be able to destroy a finished run.
+
+    Post-training logging is the last thing a generator does, after hours of
+    training, and it is the least important thing it does. A charting call that
+    rejects a matrix width, or a NaN assertion in a loss curve, should surface as
+    an error to read — not as a lost checkpoint.
+
+    Callers must have already written their artifacts before entering this.
+    """
+    try:
+        yield
+    except Exception:
+        log.exception(
+            "%s failed. Training finished and the checkpoint is already written, "
+            "so the run is intact and can be re-scored with `sweep.py rescore`; "
+            "only this reporting step was lost.",
+            what,
+        )
 
 
 def _is_wandb_object(value: Any) -> bool:
@@ -177,11 +200,24 @@ class RunLogger:
         path = self.run_dir / f"{safe_tag}.csv"
         header = ",".join(columns) if columns else ""
         np.savetxt(path, arr, delimiter=",", header=header, comments="")
-        if self.run is not None:
-            import wandb
+        if self.run is None:
+            return
 
-            wandb.log({tag: wandb.Table(columns=columns, data=arr.tolist(), rows=rows)},
-                      step=step, commit=commit, **kwargs)
+        import wandb
+
+        # wandb.Table defaults columns to ["Input", "Output", "Expected"] when
+        # none are given, so a matrix of any width other than 3 is rejected. That
+        # made this silently correct while populations were size 3 and a hard
+        # failure the moment they were not. Derive them from the matrix instead.
+        n_cols = arr.shape[1] if arr.ndim > 1 else arr.shape[0]
+        cols = list(columns) if columns else [f"col {i}" for i in range(n_cols)]
+        data = arr.tolist()
+        if rows:
+            # Row labels have to be a column; wandb.Table has no row index.
+            cols = ["row", *cols]
+            data = [[label, *row] for label, row in zip(rows, data)]
+        wandb.log({tag: wandb.Table(columns=cols, data=data)},
+                  step=step, commit=commit, **kwargs)
 
     def log_artifact(self, name: str, path: str | Path, type_name: str) -> None:
         """Record an artifact. Locally this copies it under the run directory."""

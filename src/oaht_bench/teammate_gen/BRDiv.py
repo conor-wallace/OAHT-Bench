@@ -24,7 +24,7 @@ from oaht_bench.agents.population_interface import AgentPopulation
 from oaht_bench.common.plot_utils import get_metric_names
 from oaht_bench.common.run_episodes import run_episodes
 from oaht_bench.common.save_load_utils import save_train_run
-from oaht_bench.common.logging import RunLogger, log_update_metrics
+from oaht_bench.common.logging import RunLogger, log_update_metrics, nonfatal
 from oaht_bench.configs.job import TeammateGenerationJob
 from oaht_bench.envs.protocols import TrainingEnv
 from oaht_bench.teammate_gen.runtime import PairedDiversityRuntime, TrainOutput
@@ -804,8 +804,14 @@ def run_brdiv(job: TeammateGenerationJob, wandb_logger: RunLogger) -> PairedPopu
     end = time.time()
     log.info(f"BRDiv training complete in {end - start} seconds")
 
+    # Save before reporting, matching fcp and CoMeDi. This used to be the last
+    # statement of log_metrics, so any charting failure after hours of training
+    # discarded the run entirely.
+    out_savepath = save_train_run(out, job.run_dir(), savename="saved_train_run")
+
     metric_names = get_metric_names(job.env.env_name)
-    log_metrics(job, out, wandb_logger, metric_names)
+    with nonfatal("BRDiv post-training metrics"):
+        log_metrics(job, out, wandb_logger, metric_names, out_savepath)
 
     partner_params, partner_population = get_brdiv_population(job, out, env)
 
@@ -817,6 +823,7 @@ def log_metrics(
     outs: TrainOutput,
     logger: RunLogger,
     metric_names: tuple,
+    out_savepath: str,
 ) -> None:
     metrics = outs["metrics"]
     # metrics now has shape (num_seeds, num_updates, pop_size)
@@ -872,6 +879,6 @@ def log_metrics(
     # Per-update episode statistics are streamed from inside the training loop
     # (see log_update_metrics), so there is nothing to emit post-hoc here.
 
-    ### Log artifacts
-    out_savepath = save_train_run(outs, job.run_dir(), savename="saved_train_run")
+    ### Log artifacts. The checkpoint itself is written by the caller, before
+    ### any of the reporting above, so that none of it can lose the run.
     logger.log_artifact(name="saved_train_run", path=out_savepath, type_name="train_run")

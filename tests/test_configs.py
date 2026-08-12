@@ -1457,3 +1457,84 @@ def test_member_indices_selects_the_submatrix():
 
     assert scores.matrix.shape == (2, 2)
     assert seen == [(1.0, 1.0), (1.0, 3.0), (3.0, 1.0), (3.0, 3.0)]
+
+
+# --- post-training reporting must not be able to destroy a finished run ------
+
+
+def test_xp_matrix_columns_follow_the_matrix_width(tmp_path):
+    """wandb.Table defaults to 3 columns, so any other width was rejected.
+
+    This passed silently while populations were size 3 and became a hard failure
+    the moment population_size moved to 5 -- after training had completed.
+    """
+    import numpy as np
+
+    from oaht_bench.common.logging import RunLogger
+
+    captured = {}
+
+    class _FakeWandb:
+        def Table(self, columns, data):  # noqa: N802 - mirrors wandb's API
+            if len(data) and len(columns) != len(data[0]):
+                raise ValueError(
+                    f"This table expects {len(columns)} columns, found {len(data[0])}"
+                )
+            captured["columns"] = columns
+            return object()
+
+        def log(self, *a, **k):
+            pass
+
+    with RunLogger(tmp_path, use_wandb=False) as logger:
+        logger.run = object()  # pretend wandb is active
+        import sys
+
+        sys.modules["wandb"] = _FakeWandb()
+        try:
+            for n in (3, 5, 8):
+                logger.log_xp_matrix(f"Eval/M{n}", np.zeros((n, n)))
+                assert len(captured["columns"]) == n
+        finally:
+            del sys.modules["wandb"]
+
+
+def test_nonfatal_lets_a_finished_run_survive_a_reporting_failure():
+    """A charting bug after hours of training must not lose the checkpoint."""
+    from oaht_bench.common.logging import nonfatal
+
+    reached = []
+    with nonfatal("test reporting"):
+        raise ValueError("this table expects 3 columns")
+    reached.append("after")
+    assert reached == ["after"]
+
+
+def test_every_generator_saves_before_it_reports():
+    """The checkpoint write must precede post-training logging in all four.
+
+    BRDiv and L-BRDiv had save_train_run as the last statement of log_metrics, so
+    a failure in any chart above it discarded a completed run. Pin the ordering.
+    """
+    import inspect
+
+    from oaht_bench.teammate_gen import BRDiv, CoMeDi, LBRDiv, fcp
+
+    for mod, runner in (
+        (fcp, "run_fcp"),
+        (CoMeDi, "run_comedi"),
+        (BRDiv, "run_brdiv"),
+        (LBRDiv, "run_lbrdiv"),
+    ):
+        src = inspect.getsource(getattr(mod, runner))
+        assert "save_train_run(" in src, f"{runner} must save its own checkpoint"
+        assert src.index("save_train_run(") < src.index("log_metrics("), (
+            f"{runner} reports before it saves; a charting failure would lose the run"
+        )
+        assert "nonfatal(" in src, f"{runner} must not let reporting raise"
+
+    # And log_metrics must no longer do the saving itself.
+    for mod in (fcp, CoMeDi, BRDiv, LBRDiv):
+        assert "save_train_run(" not in inspect.getsource(mod.log_metrics), (
+            f"{mod.__name__}.log_metrics still writes the checkpoint"
+        )
