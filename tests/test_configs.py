@@ -1538,3 +1538,52 @@ def test_every_generator_saves_before_it_reports():
         assert "save_train_run(" not in inspect.getsource(mod.log_metrics), (
             f"{mod.__name__}.log_metrics still writes the checkpoint"
         )
+
+
+def test_paired_generators_scale_envs_with_population_squared():
+    """BRDiv/L-BRDiv sample conf and br ids independently, so a specific
+    ``(conf_i, br_j)`` pairing gets ``num_envs / n**2`` samples per rollout.
+
+    Upstream tuned at n=3 with 64 envs, i.e. 7.1 environments per pairing. Moving
+    to n=5 while leaving num_envs alone gave 2.6 and BRDiv collapsed: the final
+    cross-play matrix was uniform to within noise and self-play fell *below*
+    cross-play, inverting the quantity the method maximizes.
+
+    The loss weighting genuinely is population-size invariant, which is what made
+    this easy to miss -- it is the data behind each pairing that binds.
+    """
+    from oaht_bench.configs import load_job
+
+    reference = 64 / 3**2  # the n=3 setting that produced a working population
+    for env in ("lbf_12x12", "overcooked_counter_circuit", "hanabi"):
+        for name in ("brdiv", "lbrdiv"):
+            gen = load_job(f"configs/teammate_gen/{env}/{name}.json").generator
+            per_pairing = gen.num_envs / gen.population_size**2
+            assert per_pairing >= reference, (
+                f"{env}/{name}: {per_pairing:.1f} envs per (conf, br) pairing is "
+                f"below the {reference:.1f} that worked at n=3; raise num_envs "
+                f"with the square of population_size"
+            )
+
+
+def test_paired_env_scaling_does_not_cost_gradient_steps():
+    """Scaling num_envs without the budget would trade one failure for another.
+
+    num_updates = total_timesteps // rollout_length // num_envs, so tripling the
+    environments at a fixed budget cuts the update count to a third -- which is
+    separately known to wreck these populations (see docs/tuning_record.md).
+    """
+    import importlib.util
+    import pathlib
+
+    spec = importlib.util.spec_from_file_location(
+        "gen_cfgs", pathlib.Path("scripts/gen_teammate_configs.py")
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    base_envs, base_ts = 64, 4.5e7
+    scaled = mod._paired_scale(base_envs, base_ts)
+    # updates ~ timesteps / envs, so the ratio must be preserved exactly
+    assert scaled["total_timesteps"] / scaled["num_envs"] == base_ts / base_envs
+    assert scaled["pop"] == mod.POPULATION_SIZE

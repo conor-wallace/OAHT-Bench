@@ -180,6 +180,51 @@ looking at the slope of the last quarter of training.
 
 ---
 
+## Scaling law: BRDiv and L-BRDiv need `num_envs` ∝ n²
+
+Found by raising `population_size` from 3 to 5 for comparability and watching
+BRDiv collapse.
+
+Both paired generators draw `conf_id` and `br_id` **independently per
+environment**, so a specific `(conf_i, br_j)` pairing receives `num_envs / n²`
+samples per rollout — not `num_envs / n`.
+
+| n | num_envs | pairings | envs per pairing | outcome |
+|---:|---:|---:|---:|---|
+| 3 | 64 | 9 | 7.1 | SP 0.237, separation 0.080 |
+| 5 | 64 | 25 | **2.6** | SP 0.067, separation **−0.006** |
+| 5 | 192 | 25 | 7.7 | adopted |
+
+At 2.6 environments per pairing no best response could specialize against its
+confederate. The final cross-play matrix was uniform to within noise (every
+entry between 0.047 and 0.096) and **self-play fell below cross-play**, which
+inverts the quantity BRDiv maximizes.
+
+**The loss weighting is genuinely population-size invariant, which is what made
+this easy to miss.** `BRDiv.py` reweights by `sp_weight = (1 + 2α)(n/2)` and
+`xp_weight = α·n/(2(n−1))` against sampling probabilities `P(SP) = 1/n`,
+`P(XP) = (n−1)/n`, giving `E[SP weight] = 0.55` and `E[XP weight] = 0.025` at
+every n. That invariance is real and was verified. It is simply not the binding
+quantity — the *data* behind each pairing is.
+
+`total_timesteps` scales with `num_envs` too, holding the update count at 5,493.
+Without that, tripling the environments would cut gradient steps to a third,
+trading this failure for the one the FCP entry documents.
+
+Encoded as `_paired_scale()` in `gen_teammate_configs.py` so it is derived from
+`POPULATION_SIZE` rather than restated, and pinned by a test asserting envs per
+pairing never drops below the n=3 reference.
+
+**Cost:** 3× on both paired generators. LBF goes to `num_envs=192`,
+`total_timesteps=1.35e8` — roughly 50 hr each on an M1 CPU.
+
+**Not yet confirmed.** The mechanism is clear and the evidence fits, but the
+hypothesis is only verified once a BRDiv run at `num_envs=192` shows structure
+returning to the cross-play matrix. Check `Eval/AvgSPReturnCurve` exceeds
+`Eval/AvgXPReturnCurve` before trusting the population.
+
+---
+
 ## Not yet tuned
 
 All four on Overcooked and Hanabi still run at hyperparameters ported from

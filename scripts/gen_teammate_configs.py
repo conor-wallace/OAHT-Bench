@@ -20,6 +20,7 @@ Regenerate with::
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 from typing import Any
 
@@ -109,6 +110,38 @@ PPO: dict[str, dict[str, dict[str, Any]]] = {
 #: *is* the checkpoint spread. §7.3 of the plan tracks this as open.
 POPULATION_SIZE = 5
 
+#: Population size BRDiv and L-BRDiv's upstream settings were tuned at.
+PAIRED_REFERENCE_POP = 3
+
+
+def _paired_scale(base_envs: int, base_timesteps: float) -> dict[str, Any]:
+    """Scale a paired generator's environments with the square of the population.
+
+    BRDiv and L-BRDiv draw ``conf_id`` and ``br_id`` independently for each
+    environment, so a *specific* ``(conf_i, br_j)`` pairing receives only
+    ``num_envs / n²`` samples per rollout. The loss weighting is population-size
+    invariant — ``E[SP weight]`` is 0.55 and ``E[XP weight]`` 0.025 at every n —
+    but the data behind each pairing is not, and that is what actually binds.
+
+    Upstream tuned these at n=3, where ``num_envs=64`` gives 7.1 environments per
+    pairing. Moving to n=5 without scaling gave 2.6, and BRDiv collapsed: no
+    pairing specialized, the final cross-play matrix was uniform to within noise,
+    and self-play fell *below* cross-play — the opposite of what the method
+    maximizes. A best response cannot be learned against a confederate it meets
+    in two environments per rollout.
+
+    ``total_timesteps`` scales with ``num_envs`` so the update count is
+    unchanged; without that, more environments would buy fewer gradient steps and
+    trade one failure for another.
+    """
+    mult = math.ceil((POPULATION_SIZE / PAIRED_REFERENCE_POP) ** 2)
+    return dict(
+        total_timesteps=base_timesteps * mult,
+        num_envs=base_envs * mult,
+        pop=POPULATION_SIZE,
+    )
+
+
 SCALE: dict[str, dict[str, dict[str, Any]]] = {
     "fcp": {
         # Tuned. 1e6 at num_envs=8 is 976 updates and stops at ~74% of the food
@@ -139,9 +172,9 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # the food, not starved, so raising the budget would only cost time. Its
         # constraint is the diversity objective trading away competence, which
         # cross_play_weight controls; that needs its own sweep.
-        "lbf": dict(total_timesteps=4.5e7, num_envs=64, pop=POPULATION_SIZE),
-        "overcooked": dict(total_timesteps=9e7, num_envs=128, pop=POPULATION_SIZE),
-        "hanabi": dict(total_timesteps=5e8, num_envs=128, pop=POPULATION_SIZE),
+        "lbf": _paired_scale(64, 4.5e7),
+        "overcooked": _paired_scale(128, 9e7),
+        "hanabi": _paired_scale(128, 5e8),
     },
     "lbrdiv": {
         # Also unchanged, and for a subtler reason than BRDiv. L-BRDiv is flat
@@ -151,9 +184,9 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # competence may be what its Minimum-Coverage-Set objective is buying
         # rather than a defect, so "fix" is not yet well defined. Sweep
         # tolerance_factor before touching anything else.
-        "lbf": dict(total_timesteps=4.5e7, num_envs=64, pop=POPULATION_SIZE),
-        "overcooked": dict(total_timesteps=9e7, num_envs=128, pop=POPULATION_SIZE),
-        "hanabi": dict(total_timesteps=5e8, num_envs=128, pop=POPULATION_SIZE),
+        "lbf": _paired_scale(64, 4.5e7),
+        "overcooked": _paired_scale(128, 9e7),
+        "hanabi": _paired_scale(128, 5e8),
     },
 }
 
