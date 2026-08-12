@@ -150,7 +150,9 @@ class RunLogger:
         if commit:
             self.commit(step=step)
 
-    def log_item(self, tag: str, val: Any, step: int | None = None, commit: bool = True, **kwargs) -> None:
+    def log_item(
+        self, tag: str, val: Any, step: int | None = None, commit: bool = True, **kwargs
+    ) -> None:
         self.log({tag: val, **kwargs}, step=step, commit=commit)
         if self.verbose:
             print(f"{tag}: {val}")
@@ -215,9 +217,10 @@ class RunLogger:
         if rows:
             # Row labels have to be a column; wandb.Table has no row index.
             cols = ["row", *cols]
-            data = [[label, *row] for label, row in zip(rows, data)]
-        wandb.log({tag: wandb.Table(columns=cols, data=data)},
-                  step=step, commit=commit, **kwargs)
+            # strict: caller-supplied labels and matrix rows can genuinely
+            # disagree, and silently truncating would mislabel the matrix.
+            data = [[label, *row] for label, row in zip(rows, data, strict=True)]
+        wandb.log({tag: wandb.Table(columns=cols, data=data)}, step=step, commit=commit, **kwargs)
 
     def log_artifact(self, name: str, path: str | Path, type_name: str) -> None:
         """Record an artifact. Locally this copies it under the run directory."""
@@ -327,7 +330,9 @@ def log_training_curves(
     logger.commit()
 
 
-def log_update_metrics(metrics: dict[str, Any], logger: RunLogger, *, prefix: str = "Train") -> None:
+def log_update_metrics(
+    metrics: dict[str, Any], logger: RunLogger, *, prefix: str = "Train"
+) -> None:
     """Log one update step's statistics, from inside a jitted training loop.
 
     Called through ``jax.experimental.io_callback``, so it must stay a

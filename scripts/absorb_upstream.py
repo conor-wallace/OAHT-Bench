@@ -29,9 +29,9 @@ from __future__ import annotations
 
 import argparse
 import re
-import sys
 import shutil
 import subprocess
+import sys
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -59,9 +59,17 @@ class Subtree:
 #: intra-package imports consistent with the rename.
 JAX_AHT_SUBTREES = (
     Subtree("envs", "envs", "LBF, Overcooked-v1 and Hanabi wrappers over Jumanji/JaxMARL."),
-    Subtree("agents", "agents", "Policy architectures, population interfaces, scripted teammates (§7.6)."),
+    Subtree(
+        "agents",
+        "agents",
+        "Policy architectures, population interfaces, scripted teammates (§7.6).",
+    ),
     Subtree("teammate_generation", "teammate_gen", "FCP, CoMeDi, BRDiv, L-BRDiv (§7)."),
-    Subtree("marl", "teammate_gen/marl", "IPPO and PPO utilities; teammate generation is the only consumer."),
+    Subtree(
+        "marl",
+        "teammate_gen/marl",
+        "IPPO and PPO utilities; teammate generation is the only consumer.",
+    ),
     Subtree("common", "common", "Rollout helpers, checkpoint save/load, plotting."),
     Subtree(
         "ego_agent_training",
@@ -84,6 +92,7 @@ JAX_AHT_SUBTREES = (
 #: open_ended_training/   -- out of scope.
 
 SOURCES = {"jax-aht": JAX_AHT_SUBTREES}
+
 
 #: Upstream top-level module -> our dotted path. Order matters only in that longer
 #: names must not be prefixes of shorter ones; these are all distinct.
@@ -115,7 +124,9 @@ def upstream_commit(source: Path) -> str:
     try:
         return subprocess.run(
             ["git", "-C", str(source), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         return "unknown (not a git checkout)"
@@ -137,7 +148,8 @@ def clean_checkout(source: Path):
         tmpdir = Path(tmp)
         archive = subprocess.run(
             ["git", "-C", str(source), "archive", "HEAD"],
-            capture_output=True, check=True,
+            capture_output=True,
+            check=True,
         ).stdout
         subprocess.run(["tar", "-x", "-C", str(tmpdir)], input=archive, check=True)
         yield tmpdir
@@ -155,14 +167,18 @@ def absorb(source: Path, subtrees: tuple[Subtree, ...], *, apply: bool) -> list[
         if sub.only is not None:
             py_files = [src_dir / f for f in sub.only if (src_dir / f).is_file()]
         else:
-            py_files = [
-                p for p in src_dir.rglob("*.py") if "__pycache__" not in p.parts
+            py_files = [p for p in src_dir.rglob("*.py") if "__pycache__" not in p.parts]
+        other = (
+            []
+            if sub.only is not None
+            else [
+                p
+                for p in src_dir.rglob("*")
+                if p.is_file()
+                and p.suffix in {".yaml", ".yml", ".json", ".npy", ".safetensors", ".sh"}
+                and "__pycache__" not in p.parts
             ]
-        other = [] if sub.only is not None else [
-            p for p in src_dir.rglob("*")
-            if p.is_file() and p.suffix in {".yaml", ".yml", ".json", ".npy", ".safetensors", ".sh"}
-            and "__pycache__" not in p.parts
-        ]
+        )
         rewrites = 0
         if apply:
             if sub.only is None and dst_dir.exists():
@@ -205,7 +221,7 @@ def write_provenance(source: Path, name: str, subtrees: tuple[Subtree, ...]) -> 
         "",
         f"## {name}",
         "",
-        f"- Upstream: `https://github.com/LARG/jax-aht`",
+        "- Upstream: `https://github.com/LARG/jax-aht`",
         f"- Commit: `{sha}`",
         "- License: MIT (see `LICENSES/jax-aht-LICENSE`)",
         "",
@@ -250,10 +266,7 @@ def main() -> int:
     # modified -- re-running --apply would silently discard those modifications by
     # re-copying whole subtrees. Refuse unless explicitly forced.
     if args.apply and not args.force:
-        occupied = [
-            s.local for s in subtrees
-            if s.only is None and (PKG_ROOT / s.local).exists()
-        ]
+        occupied = [s.local for s in subtrees if s.only is None and (PKG_ROOT / s.local).exists()]
         if occupied:
             print(
                 "refusing to absorb: these destinations already exist and would be\n"

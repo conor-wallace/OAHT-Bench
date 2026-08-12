@@ -38,6 +38,7 @@ from oaht_bench.configs.teammate_gen import (
 REPO_ROOT = Path(__file__).resolve().parents[1]
 OUT_ROOT = REPO_ROOT / "configs" / "teammate_gen"
 
+
 #: Which environment family a preset belongs to, for looking up tuning below.
 def _family(preset_name: str) -> str:
     if preset_name.startswith("overcooked"):
@@ -54,40 +55,109 @@ PPO: dict[str, dict[str, dict[str, Any]]] = {
     "fcp": {
         # Tuned, not inherited — see docs/tuning_record.md. Upstream's 1e-4/0.01
         # left the population well short of the task ceiling.
-        "lbf": dict(learning_rate=1e-3, update_epochs=15, num_minibatches=4,
-                    clip_eps=0.03, entropy_coef=0.003),
-        "overcooked": dict(learning_rate=1e-3, update_epochs=15, num_minibatches=16,
-                           clip_eps=0.1, entropy_coef=0.05),
-        "hanabi": dict(learning_rate=5e-4, update_epochs=4, num_minibatches=4,
-                       clip_eps=0.2, entropy_coef=0.01, anneal_lr=True,
-                       gamma=0.999, gae_lambda=0.95),
+        "lbf": dict(
+            learning_rate=1e-3,
+            update_epochs=15,
+            num_minibatches=4,
+            clip_eps=0.03,
+            entropy_coef=0.003,
+        ),
+        "overcooked": dict(
+            learning_rate=1e-3,
+            update_epochs=15,
+            num_minibatches=16,
+            clip_eps=0.1,
+            entropy_coef=0.05,
+        ),
+        "hanabi": dict(
+            learning_rate=5e-4,
+            update_epochs=4,
+            num_minibatches=4,
+            clip_eps=0.2,
+            entropy_coef=0.01,
+            anneal_lr=True,
+            gamma=0.999,
+            gae_lambda=0.95,
+        ),
     },
     "comedi": {
-        "lbf": dict(learning_rate=5e-4, update_epochs=15, num_minibatches=8,
-                    clip_eps=0.05, entropy_coef=0.001),
-        "overcooked": dict(learning_rate=1e-3, update_epochs=15, num_minibatches=8,
-                           clip_eps=0.01, entropy_coef=0.05),
-        "hanabi": dict(learning_rate=5e-4, update_epochs=4, num_minibatches=8,
-                       clip_eps=0.2, entropy_coef=0.01, anneal_lr=True,
-                       gamma=0.999, gae_lambda=0.95, max_grad_norm=0.5),
+        "lbf": dict(
+            learning_rate=5e-4,
+            update_epochs=15,
+            num_minibatches=8,
+            clip_eps=0.05,
+            entropy_coef=0.001,
+        ),
+        "overcooked": dict(
+            learning_rate=1e-3,
+            update_epochs=15,
+            num_minibatches=8,
+            clip_eps=0.01,
+            entropy_coef=0.05,
+        ),
+        "hanabi": dict(
+            learning_rate=5e-4,
+            update_epochs=4,
+            num_minibatches=8,
+            clip_eps=0.2,
+            entropy_coef=0.01,
+            anneal_lr=True,
+            gamma=0.999,
+            gae_lambda=0.95,
+            max_grad_norm=0.5,
+        ),
     },
     "brdiv": {
-        "lbf": dict(learning_rate=5e-4, update_epochs=15, num_minibatches=2,
-                    clip_eps=0.05, entropy_coef=0.01),
-        "overcooked": dict(learning_rate=1e-3, update_epochs=15, num_minibatches=8,
-                           clip_eps=0.01, entropy_coef=0.05),
-        "hanabi": dict(learning_rate=5e-4, update_epochs=4, num_minibatches=4,
-                       clip_eps=0.2, entropy_coef=0.01, anneal_lr=True,
-                       gamma=0.999, gae_lambda=0.95),
+        "lbf": dict(
+            learning_rate=5e-4,
+            update_epochs=15,
+            num_minibatches=2,
+            clip_eps=0.05,
+            entropy_coef=0.01,
+        ),
+        "overcooked": dict(
+            learning_rate=1e-3,
+            update_epochs=15,
+            num_minibatches=8,
+            clip_eps=0.01,
+            entropy_coef=0.05,
+        ),
+        "hanabi": dict(
+            learning_rate=5e-4,
+            update_epochs=4,
+            num_minibatches=4,
+            clip_eps=0.2,
+            entropy_coef=0.01,
+            anneal_lr=True,
+            gamma=0.999,
+            gae_lambda=0.95,
+        ),
     },
     "lbrdiv": {
-        "lbf": dict(learning_rate=5e-4, update_epochs=15, num_minibatches=4,
-                    clip_eps=0.05, entropy_coef=0.01),
-        "overcooked": dict(learning_rate=1e-3, update_epochs=15, num_minibatches=8,
-                           clip_eps=0.01, entropy_coef=0.05),
-        "hanabi": dict(learning_rate=5e-4, update_epochs=4, num_minibatches=4,
-                       clip_eps=0.2, entropy_coef=0.01, anneal_lr=True,
-                       gamma=0.999, gae_lambda=0.95),
+        "lbf": dict(
+            learning_rate=5e-4,
+            update_epochs=15,
+            num_minibatches=4,
+            clip_eps=0.05,
+            entropy_coef=0.01,
+        ),
+        "overcooked": dict(
+            learning_rate=1e-3,
+            update_epochs=15,
+            num_minibatches=8,
+            clip_eps=0.01,
+            entropy_coef=0.05,
+        ),
+        "hanabi": dict(
+            learning_rate=5e-4,
+            update_epochs=4,
+            num_minibatches=4,
+            clip_eps=0.2,
+            entropy_coef=0.01,
+            anneal_lr=True,
+            gamma=0.999,
+            gae_lambda=0.95,
+        ),
     },
 }
 
@@ -248,14 +318,21 @@ def build(generator: str, preset_name: str, num_checkpoints: int = 5):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--all-envs", action="store_true",
-                    help="Emit for all seven results configurations, not just tier 1.")
     ap.add_argument(
-        "--wandb", metavar="PROJECT", nargs="?", const="oaht-bench", default=None,
+        "--all-envs",
+        action="store_true",
+        help="Emit for all seven results configurations, not just tier 1.",
+    )
+    ap.add_argument(
+        "--wandb",
+        metavar="PROJECT",
+        nargs="?",
+        const="oaht-bench",
+        default=None,
         help="Enable wandb logging in the emitted configs, under PROJECT "
-             "(default 'oaht-bench'). The entity is deliberately never written: "
-             "wandb takes it from WANDB_ENTITY or your login, so a config that "
-             "someone else runs does not publish into your account.",
+        "(default 'oaht-bench'). The entity is deliberately never written: "
+        "wandb takes it from WANDB_ENTITY or your login, so a config that "
+        "someone else runs does not publish into your account.",
     )
     args = ap.parse_args()
 
@@ -269,9 +346,7 @@ def main() -> int:
             gen = build(generator, env_name)
             kwargs: dict[str, Any] = {}
             if args.wandb:
-                kwargs["logging"] = LoggingConfig(
-                    use_wandb=True, wandb_project=args.wandb
-                )
+                kwargs["logging"] = LoggingConfig(use_wandb=True, wandb_project=args.wandb)
             job = TeammateGenerationJob(
                 label=f"{generator}_{env_name}", env=env, generator=gen, **kwargs
             )
@@ -282,8 +357,10 @@ def main() -> int:
     print(f"{'environment':30s} {'gen':8s} {'pop':>4s} {'envs':>5s} {'budget':>10s}  hash")
     for env_name, generator, gen, job in written:
         budget = getattr(gen, "total_timesteps", None) or gen.total_timesteps_per_iteration
-        print(f"{env_name:30s} {generator:8s} {gen.population_size:4d} "
-              f"{gen.num_envs:5d} {budget:10.1e}  {job.short_hash()}")
+        print(
+            f"{env_name:30s} {generator:8s} {gen.population_size:4d} "
+            f"{gen.num_envs:5d} {budget:10.1e}  {job.short_hash()}"
+        )
     print(f"\n{len(written)} configs -> {OUT_ROOT.relative_to(REPO_ROOT)}/")
     return 0
 

@@ -89,10 +89,14 @@ def training_plan(job: TeammateGenerationJob, *, num_agents: int = 2) -> Trainin
 
     if gen.generator == "fcp":
         rt = PpoRuntime.from_config(
-            ppo=gen.ppo, network=gen.network, actor_type=gen.actor_type,
-            rollout_length=rollout, num_envs=gen.num_envs,
+            ppo=gen.ppo,
+            network=gen.network,
+            actor_type=gen.actor_type,
+            rollout_length=rollout,
+            num_envs=gen.num_envs,
             total_timesteps=gen.total_timesteps,
-            num_checkpoints=gen.num_checkpoints, num_agents=num_agents,
+            num_checkpoints=gen.num_checkpoints,
+            num_agents=num_agents,
         )
         return TrainingPlan(
             generator="fcp",

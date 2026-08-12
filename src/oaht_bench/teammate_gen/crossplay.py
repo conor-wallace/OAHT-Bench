@@ -130,12 +130,16 @@ def evaluate_population(
         for b, j in enumerate(idx):
             rng, pair_rng = jax.random.split(rng)
             out = run_episodes(
-                pair_rng, env,
-                agent_0_param=member(params, i), agent_0_policy=policy,
-                agent_1_param=member(cols, j), agent_1_policy=policy,
+                pair_rng,
+                env,
+                agent_0_param=member(params, i),
+                agent_0_policy=policy,
+                agent_1_param=member(cols, j),
+                agent_1_policy=policy,
                 max_episode_steps=max_episode_steps,
                 num_eps=num_episodes,
-                agent_0_test_mode=greedy, agent_1_test_mode=greedy,
+                agent_0_test_mode=greedy,
+                agent_1_test_mode=greedy,
             )
             returns = np.asarray(out["returned_episode_returns"])
             matrix[a, b] = float(returns.mean())

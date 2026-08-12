@@ -40,17 +40,13 @@ def test_unknown_fields_are_rejected():
     config, with no error anywhere.
     """
     with pytest.raises(ValidationError, match="grid_sise"):
-        LbfConfig(
-            name="typo", grid_size=12, num_food=6, rollout_length=128, grid_sise=12
-        )
+        LbfConfig(name="typo", grid_size=12, num_food=6, rollout_length=128, grid_sise=12)
 
 
 def test_hanabi_kwargs_rejected_on_lbf():
     """The discriminated union keeps each environment's parameters separate."""
     with pytest.raises(ValidationError):
-        LbfConfig(
-            name="x", grid_size=12, num_food=6, rollout_length=128, num_colors=5
-        )
+        LbfConfig(name="x", grid_size=12, num_food=6, rollout_length=128, num_colors=5)
 
 
 def test_lbf_food_capacity_is_checked_at_config_load():
@@ -190,7 +186,7 @@ def test_config_fields_are_snake_case():
     one place (``to_algorithm_dict``).
     """
     from oaht_bench.configs.env import HanabiConfig, LbfConfig, OvercookedV1Config
-    from oaht_bench.configs.job import JobConfig, TeammateGenerationJob
+    from oaht_bench.configs.job import TeammateGenerationJob
     from oaht_bench.configs.teammate_gen import (
         BrDivConfig,
         CoMeDiConfig,
@@ -200,14 +196,18 @@ def test_config_fields_are_snake_case():
     )
 
     models = [
-        LbfConfig, HanabiConfig, OvercookedV1Config, TeammateGenerationJob,
-        PpoHyperparams, FcpConfig, CoMeDiConfig, BrDivConfig, LBrDivConfig,
+        LbfConfig,
+        HanabiConfig,
+        OvercookedV1Config,
+        TeammateGenerationJob,
+        PpoHyperparams,
+        FcpConfig,
+        CoMeDiConfig,
+        BrDivConfig,
+        LBrDivConfig,
     ]
     offenders = [
-        f"{m.__name__}.{name}"
-        for m in models
-        for name in m.model_fields
-        if name != name.lower()
+        f"{m.__name__}.{name}" for m in models for name in m.model_fields if name != name.lower()
     ]
     assert not offenders, f"non-snake_case config fields: {offenders}"
 
@@ -266,7 +266,7 @@ def _all_config_models():
 
     seen = {}
     for mod in (env_mod, job_mod, tg_mod):
-        for name, obj in vars(mod).items():
+        for _name, obj in vars(mod).items():
             if isinstance(obj, type) and issubclass(obj, BaseConfig) and obj is not BaseConfig:
                 seen[obj.__name__] = obj
     return list(seen.values())
@@ -312,9 +312,7 @@ def test_baseline_typo_is_rejected():
     from oaht_bench.configs.job import TrainingJob
 
     with pytest.raises(ValidationError, match="Input should be"):
-        TrainingJob(
-            label="t", env=get_preset("lbf_12x12"), dataset_path="d", baseline="LIAM"
-        )
+        TrainingJob(label="t", env=get_preset("lbf_12x12"), dataset_path="d", baseline="LIAM")
 
 
 def test_baseline_roster_matches_the_plan():
@@ -342,9 +340,14 @@ def test_runtime_rejects_a_budget_that_trains_nothing():
 
     with pytest.raises(ValueError, match="would be a no-op"):
         PpoRuntime.from_config(
-            ppo=PpoHyperparams(), network=MlpNetwork(), actor_type="mlp",
-            rollout_length=128, num_envs=8, total_timesteps=100,
-            num_checkpoints=2, num_agents=2,
+            ppo=PpoHyperparams(),
+            network=MlpNetwork(),
+            actor_type="mlp",
+            rollout_length=128,
+            num_envs=8,
+            total_timesteps=100,
+            num_checkpoints=2,
+            num_agents=2,
         )
 
 
@@ -355,9 +358,14 @@ def test_runtime_rejects_empty_minibatches():
 
     with pytest.raises(ValueError, match="minibatches would be empty"):
         PpoRuntime.from_config(
-            ppo=PpoHyperparams(num_minibatches=100_000), network=MlpNetwork(),
-            actor_type="mlp", rollout_length=4, num_envs=2,
-            total_timesteps=1e5, num_checkpoints=2, num_agents=2,
+            ppo=PpoHyperparams(num_minibatches=100_000),
+            network=MlpNetwork(),
+            actor_type="mlp",
+            rollout_length=4,
+            num_envs=2,
+            total_timesteps=1e5,
+            num_checkpoints=2,
+            num_agents=2,
         )
 
 
@@ -367,9 +375,14 @@ def test_runtime_derives_the_same_values_upstream_computed():
     from oaht_bench.teammate_gen.runtime import PpoRuntime
 
     rt = PpoRuntime.from_config(
-        ppo=PpoHyperparams(num_minibatches=4), network=MlpNetwork(),
-        actor_type="mlp", rollout_length=128, num_envs=8,
-        total_timesteps=1e6, num_checkpoints=5, num_agents=2,
+        ppo=PpoHyperparams(num_minibatches=4),
+        network=MlpNetwork(),
+        actor_type="mlp",
+        rollout_length=128,
+        num_envs=8,
+        total_timesteps=1e6,
+        num_checkpoints=5,
+        num_agents=2,
     )
     assert rt.num_actors == 2 * 8
     assert rt.num_updates == int(1e6 // 128 // 8)
@@ -383,9 +396,14 @@ def test_runtime_is_frozen():
     from oaht_bench.teammate_gen.runtime import PpoRuntime
 
     rt = PpoRuntime.from_config(
-        ppo=PpoHyperparams(), network=MlpNetwork(), actor_type="mlp",
-        rollout_length=128, num_envs=8, total_timesteps=1e6,
-        num_checkpoints=5, num_agents=2,
+        ppo=PpoHyperparams(),
+        network=MlpNetwork(),
+        actor_type="mlp",
+        rollout_length=128,
+        num_envs=8,
+        total_timesteps=1e6,
+        num_checkpoints=5,
+        num_agents=2,
     )
     with pytest.raises(ValidationError):
         rt.num_updates = 1  # type: ignore[misc]
@@ -421,10 +439,14 @@ def test_conditional_critic_actor_requires_pop_size():
 
     with pytest.raises(ValueError, match="pop_size is required"):
         PpoRuntime.from_config(
-            ppo=PpoHyperparams(), network=MlpNetwork(),
+            ppo=PpoHyperparams(),
+            network=MlpNetwork(),
             actor_type="actor_with_conditional_critic",
-            rollout_length=128, num_envs=8, total_timesteps=1e6,
-            num_checkpoints=2, num_agents=2,
+            rollout_length=128,
+            num_envs=8,
+            total_timesteps=1e6,
+            num_checkpoints=2,
+            num_agents=2,
         )
 
 
@@ -457,7 +479,9 @@ def test_comedi_runtime_accounts_for_selection_rollouts():
     from oaht_bench.teammate_gen.runtime import CoMeDiRuntime
 
     gen = CoMeDiConfig(
-        population_size=2, num_envs=8, num_argmax_rollout_episodes=2,
+        population_size=2,
+        num_envs=8,
+        num_argmax_rollout_episodes=2,
         total_timesteps_per_iteration=8192,
     )
     rt = CoMeDiRuntime.from_config(gen, rollout_length=128, num_agents=2)
@@ -512,15 +536,15 @@ def test_paired_runtime_serves_both_brdiv_and_lbrdiv():
     from oaht_bench.teammate_gen.runtime import PairedDiversityRuntime
 
     shared = dict(population_size=2, num_envs=8, total_timesteps=8192)
-    br = PairedDiversityRuntime.from_config(
-        BrDivConfig(**shared), rollout_length=128, num_agents=2
-    )
+    br = PairedDiversityRuntime.from_config(BrDivConfig(**shared), rollout_length=128, num_agents=2)
     lbr = PairedDiversityRuntime.from_config(
         LBrDivConfig(**shared), rollout_length=128, num_agents=2
     )
 
     assert (br.num_updates, br.num_conf_actors, br.num_br_actors) == (
-        lbr.num_updates, lbr.num_conf_actors, lbr.num_br_actors
+        lbr.num_updates,
+        lbr.num_conf_actors,
+        lbr.num_br_actors,
     )
     assert br.cross_play_weight is not None and br.lagrange_learning_rate is None
     assert lbr.lagrange_learning_rate is not None and lbr.cross_play_weight is None
@@ -533,7 +557,8 @@ def test_paired_runtime_rejects_a_no_op_budget():
     with pytest.raises(ValueError, match="would be a no-op"):
         PairedDiversityRuntime.from_config(
             BrDivConfig(population_size=2, num_envs=8, total_timesteps=100),
-            rollout_length=128, num_agents=2,
+            rollout_length=128,
+            num_agents=2,
         )
 
 
@@ -544,7 +569,8 @@ def test_paired_runtime_requires_two_agents():
     with pytest.raises(ValueError, match="exactly 2 agents"):
         PairedDiversityRuntime.from_config(
             LBrDivConfig(population_size=2, num_envs=8, total_timesteps=1e5),
-            rollout_length=128, num_agents=3,
+            rollout_length=128,
+            num_agents=3,
         )
 
 
@@ -609,10 +635,14 @@ def test_shipped_config_builds_a_valid_runtime(path):
 
     if gen.generator == "fcp":
         rt = PpoRuntime.from_config(
-            ppo=gen.ppo, network=gen.network, actor_type=gen.actor_type,
-            rollout_length=rl, num_envs=gen.num_envs,
+            ppo=gen.ppo,
+            network=gen.network,
+            actor_type=gen.actor_type,
+            rollout_length=rl,
+            num_envs=gen.num_envs,
             total_timesteps=gen.total_timesteps,
-            num_checkpoints=gen.num_checkpoints, num_agents=2,
+            num_checkpoints=gen.num_checkpoints,
+            num_agents=2,
         )
     elif gen.generator == "comedi":
         rt = CoMeDiRuntime.from_config(gen, rollout_length=rl, num_agents=2)
@@ -784,9 +814,9 @@ def test_log_training_curves_averages_over_seeds(tmp_path):
         log_training_curves(logger, metrics, "hanabi")
 
     series = [
-        json.loads(l)["Train/returned_episode_returns"]
-        for l in (tmp_path / "run" / "metrics.jsonl").read_text().splitlines()
-        if "Train/returned_episode_returns" in json.loads(l)
+        json.loads(line)["Train/returned_episode_returns"]
+        for line in (tmp_path / "run" / "metrics.jsonl").read_text().splitlines()
+        if "Train/returned_episode_returns" in json.loads(line)
     ]
     assert series == [1.0, 3.0]  # means over the seed axis, one per update
 
@@ -804,148 +834,6 @@ def test_all_generators_report_the_same_episode_statistics():
     assert 'f"Train/{stat_name}"' in (src / "marl" / "ippo.py").read_text()
     for name in ("BRDiv.py", "LBRDiv.py"):
         assert "log_update_metrics" in (src / name).read_text()
-
-
-def test_minimal_dump_keeps_discriminator_tags():
-    """exclude_defaults alone drops job_type, env_name and generator.
-
-    Their values equal their defaults, but the discriminated unions need them to
-    choose a model, so a plain sparse dump produces an unloadable file.
-    """
-    from oaht_bench.configs.job import JobConfig
-
-    d = JobConfig(job=_job()).minimal_dump()
-    assert d["job"]["job_type"] == "teammate_generation"
-    assert d["job"]["env"]["env_name"] == "lbf"
-    assert d["job"]["generator"]["generator"] == "fcp"
-
-
-def test_minimal_dump_omits_defaults():
-    from oaht_bench.configs.job import JobConfig
-
-    d = JobConfig(job=_job()).minimal_dump()
-    assert "seed" not in d["job"]  # default 0
-    assert "logging" not in d["job"]  # all defaults
-    assert "ppo" not in d["job"]["generator"]  # FCP's LBF PPO block is all defaults here
-
-
-def test_minimal_dump_omits_all_default_nested_models():
-    """An untouched nested model is dropped whole, tag included.
-
-    Loading reconstructs it, so emitting a lone tag for it would be noise.
-    """
-    from oaht_bench.configs.job import JobConfig
-
-    d = JobConfig(job=_job()).minimal_dump()
-    assert "network" not in d["job"]["generator"]
-
-
-def test_minimal_dump_always_states_schema_version():
-    """A file without it is indistinguishable from one written against a schema
-    this build cannot interpret."""
-    from oaht_bench.configs.job import JobConfig
-
-    assert JobConfig(job=_job()).minimal_dump()["schema_version"] == SCHEMA_VERSION
-
-
-def test_minimal_and_full_forms_are_equivalent(tmp_path):
-    """The delta file must load to the same object, and the same hash, as the
-    full one -- otherwise provenance depends on which form was written."""
-    from oaht_bench.configs.job import JobConfig
-
-    original = _job()
-    lean = JobConfig(job=original).to_json_file(tmp_path / "lean.json", minimal=True)
-    fat = JobConfig(job=original).to_json_file(tmp_path / "fat.json", minimal=False)
-
-    a, b = load_job(lean), load_job(fat)
-    assert a == b == original
-    assert a.content_hash() == b.content_hash() == original.content_hash()
-    assert lean.read_text().count("\n") < fat.read_text().count("\n")
-
-
-@pytest.mark.parametrize("path", _shipped_configs(), ids=lambda p: f"{p.parent.name}/{p.stem}")
-def test_shipped_configs_are_deltas(path):
-    """Shipped configs state what the experiment changes, not every default."""
-    import json
-
-    payload = json.loads(path.read_text())
-    gen = payload["job"]["generator"]
-    # A generator block restating all ten PPO fields means the delta broke.
-    assert len(gen.get("ppo", {})) < 10
-
-
-def test_run_directories_record_the_full_config(tmp_path):
-    """Authored configs are deltas; recorded ones are not.
-
-    A run's job.json must remain self-describing even if a default later moves,
-    otherwise a released artifact's meaning depends on the code version that
-    reads it.
-    """
-    import json
-
-    from oaht_bench.configs import save_job
-
-    p = save_job(_job(), tmp_path / "job.json", minimal=False)
-    payload = json.loads(p.read_text())
-    ppo = payload["job"]["generator"]["ppo"]
-    assert len(ppo) == 10  # every PPO field stated
-    assert "logging" in payload["job"]
-
-
-# --- cross-generator metric parity ------------------------------------------
-
-
-def test_log_training_curves_emits_the_shared_tags(tmp_path):
-    """All four generators must report the same episode statistics.
-
-    FCP and CoMeDi get these from ippo's in-training callback; BRDiv and
-    L-BRDiv have their own loops and collected but never logged them, so
-    convergence could not be compared across methods.
-    """
-    import json
-
-    import numpy as np
-
-    from oaht_bench.common.logging import RunLogger, log_training_curves
-
-    metrics = {
-        "returned_episode_returns": np.arange(6.0).reshape(2, 3),
-        "returned_episode_lengths": np.full((2, 3), 100.0),
-        "percent_eaten": np.arange(6.0).reshape(2, 3) * 2,
-        "pg_loss_conf_agent": np.zeros((2, 3, 4)),  # a loss, not an episode stat
-    }
-    with RunLogger(tmp_path / "run") as logger:
-        log_training_curves(logger, metrics, "lbf")
-
-    tags = set()
-    for line in (tmp_path / "run" / "metrics.jsonl").read_text().splitlines():
-        tags |= set(json.loads(line))
-    assert {
-        "Train/returned_episode_returns",
-        "Train/returned_episode_lengths",
-        "Train/percent_eaten",
-    } <= tags
-    assert not any(t.startswith("Train/pg_loss") for t in tags)
-
-
-def test_log_training_curves_averages_over_seeds(tmp_path):
-    """Statistics arrive as (num_seeds, num_updates); only the update axis survives."""
-    import json
-
-    import numpy as np
-
-    from oaht_bench.common.logging import RunLogger, log_training_curves
-
-    metrics = {"returned_episode_returns": np.array([[0.0, 2.0], [2.0, 4.0]])}
-    with RunLogger(tmp_path / "run") as logger:
-        log_training_curves(logger, metrics, "hanabi")
-
-    series = [
-        json.loads(l)["Train/returned_episode_returns"]
-        for l in (tmp_path / "run" / "metrics.jsonl").read_text().splitlines()
-        if "Train/returned_episode_returns" in json.loads(l)
-    ]
-    assert series == [1.0, 3.0]  # means over the seed axis, one per update
 
 
 def test_log_update_metrics_skips_non_scalars(tmp_path):
@@ -983,9 +871,9 @@ def test_log_update_metrics_skips_non_scalars(tmp_path):
 
 def test_log_update_metrics_needs_a_step():
     """Without update_steps there is nothing to plot against; do not guess."""
-    from oaht_bench.common.logging import RunLogger, log_update_metrics
-
     import tempfile
+
+    from oaht_bench.common.logging import RunLogger, log_update_metrics
 
     with tempfile.TemporaryDirectory() as d:
         with RunLogger(d) as logger:
@@ -1098,7 +986,9 @@ def test_comedi_streams_self_play_for_continuity():
 
     src = pathlib.Path(__file__).resolve().parents[1] / "src" / "oaht_bench" / "teammate_gen"
     text = (src / "CoMeDi.py").read_text()
-    stream_block = text[text.index("sp_metric = jax.tree.map") : text.index("jax.experimental.io_callback(_stream")]
+    stream_block = text[
+        text.index("sp_metric = jax.tree.map") : text.index("jax.experimental.io_callback(_stream")
+    ]
     assert "traj_batch_sp_agent0" in stream_block
 
 
@@ -1182,7 +1072,8 @@ def test_sweep_expands_the_grid_and_hashes_each_cell(tmp_path):
     base = tmp_path / "base.json"
     save_job(_job(), base)
     out = generate(
-        base, "s",
+        base,
+        "s",
         {"generator.population_size": [3, 4], "generator.num_envs": [8, 16]},
         tmp_path / "sweeps",
     )
@@ -1201,8 +1092,7 @@ def test_sweep_rejects_an_unrunnable_cell_before_writing(tmp_path):
     from scripts.sweep import generate
 
     base = tmp_path / "base.json"
-    save_job(_job(generator=BrDivConfig(population_size=3, num_envs=16,
-                                        total_timesteps=1e6)), base)
+    save_job(_job(generator=BrDivConfig(population_size=3, num_envs=16, total_timesteps=1e6)), base)
     with pytest.raises(SystemExit, match="not runnable"):
         generate(base, "s", {"generator.total_timesteps": [1e6, 10]}, tmp_path / "sweeps")
     assert not (tmp_path / "sweeps" / "s").exists()
@@ -1260,8 +1150,12 @@ def test_crossplay_single_member_has_no_cross_play():
     original, mod.run_episodes = mod.run_episodes, fake_run_episodes
     try:
         scores = evaluate_population(
-            env=None, params={"w": np.zeros((1, 1, 2))}, population=_Pop(),
-            rng=jax.random.PRNGKey(0), max_episode_steps=8, num_episodes=1,
+            env=None,
+            params={"w": np.zeros((1, 1, 2))},
+            population=_Pop(),
+            rng=jax.random.PRNGKey(0),
+            max_episode_steps=8,
+            num_episodes=1,
         )
     finally:
         mod.run_episodes = original
@@ -1283,8 +1177,8 @@ def test_sweep_ranks_competence_before_separation(tmp_path):
     import scripts.sweep as sw
 
     cases = {
-        "good": (0.60, 0.10),      # competent and diverse
-        "similar": (0.62, 0.55),   # competent, low separation
+        "good": (0.60, 0.10),  # competent and diverse
+        "similar": (0.62, 0.55),  # competent, low separation
         "collapsed": (0.02, 0.00),  # incompetent, huge apparent separation
     }
     cells = []
@@ -1299,9 +1193,7 @@ def test_sweep_ranks_competence_before_separation(tmp_path):
         json.dumps({"name": "t", "axes": {"x": []}, "cells": cells})
     )
 
-    sp_scores = {
-        n: sw._population_scores(tmp_path / n) for n in cases
-    }
+    sp_scores = {n: sw._population_scores(tmp_path / n) for n in cases}
     assert sp_scores["collapsed"][0] < sp_scores["good"][0]
     # 'collapsed' has the largest separation but must not be selected.
     seps = {n: s - x for n, (s, x) in sp_scores.items()}
@@ -1330,12 +1222,13 @@ def test_crossplay_uses_the_partner_population_when_given():
 
     import oaht_bench.teammate_gen.crossplay as mod
 
-    rows = {"w": np.array([[[0.0], [1.0]]])}   # (seed, member, dim)
+    rows = {"w": np.array([[[0.0], [1.0]]])}  # (seed, member, dim)
     cols = {"w": np.array([[[10.0], [11.0]]])}
     seen = []
 
-    def fake_run_episodes(rng, env, *, agent_0_param, agent_0_policy,
-                          agent_1_param, agent_1_policy, **kw):
+    def fake_run_episodes(
+        rng, env, *, agent_0_param, agent_0_policy, agent_1_param, agent_1_policy, **kw
+    ):
         seen.append((float(agent_0_param["w"][0]), float(agent_1_param["w"][0])))
         return {"returned_episode_returns": np.array([0.0])}
 
@@ -1346,8 +1239,13 @@ def test_crossplay_uses_the_partner_population_when_given():
     original, mod.run_episodes = mod.run_episodes, fake_run_episodes
     try:
         mod.evaluate_population(
-            env=None, params=rows, population=_Pop(), rng=jax.random.PRNGKey(0),
-            max_episode_steps=4, num_episodes=1, partner_params=cols,
+            env=None,
+            params=rows,
+            population=_Pop(),
+            rng=jax.random.PRNGKey(0),
+            max_episode_steps=4,
+            num_episodes=1,
+            partner_params=cols,
         )
     finally:
         mod.run_episodes = original
@@ -1377,8 +1275,12 @@ def test_crossplay_self_pairs_when_no_partner_given():
     original, mod.run_episodes = mod.run_episodes, fake_run_episodes
     try:
         mod.evaluate_population(
-            env=None, params=rows, population=_Pop(), rng=jax.random.PRNGKey(0),
-            max_episode_steps=4, num_episodes=1,
+            env=None,
+            params=rows,
+            population=_Pop(),
+            rng=jax.random.PRNGKey(0),
+            max_episode_steps=4,
+            num_episodes=1,
         )
     finally:
         mod.run_episodes = original
@@ -1449,8 +1351,13 @@ def test_member_indices_selects_the_submatrix():
     original, mod.run_episodes = mod.run_episodes, fake_run_episodes
     try:
         scores = mod.evaluate_population(
-            env=None, params=params, population=_Pop(), rng=jax.random.PRNGKey(0),
-            max_episode_steps=4, num_episodes=1, member_indices=[1, 3],
+            env=None,
+            params=params,
+            population=_Pop(),
+            rng=jax.random.PRNGKey(0),
+            max_episode_steps=4,
+            num_episodes=1,
+            member_indices=[1, 3],
         )
     finally:
         mod.run_episodes = original
@@ -1477,9 +1384,7 @@ def test_xp_matrix_columns_follow_the_matrix_width(tmp_path):
     class _FakeWandb:
         def Table(self, columns, data):  # noqa: N802 - mirrors wandb's API
             if len(data) and len(columns) != len(data[0]):
-                raise ValueError(
-                    f"This table expects {len(columns)} columns, found {len(data[0])}"
-                )
+                raise ValueError(f"This table expects {len(columns)} columns, found {len(data[0])}")
             captured["columns"] = columns
             return object()
 

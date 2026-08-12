@@ -82,16 +82,16 @@ def _set_path(payload: dict, dotted: str, value: Any) -> None:
 def generate(base: Path, name: str, axes: dict[str, list[Any]], out_root: Path) -> list[Path]:
     base_job = load_job(base)
     base_payload = json.loads(
-        json.dumps(
-            {"job": base_job.model_dump(mode="json"), "schema_version": 1}
-        )
+        json.dumps({"job": base_job.model_dump(mode="json"), "schema_version": 1})
     )
 
     keys = list(axes)
     written: list[tuple[Path, dict, Any]] = []
     for combo in itertools.product(*(axes[k] for k in keys)):
         payload = json.loads(json.dumps(base_payload))
-        settings = dict(zip(keys, combo))
+        # product() over the same keys, so lengths always agree; strict makes a
+        # future edit that breaks that fail here rather than silently truncate.
+        settings = dict(zip(keys, combo, strict=True))
         for dotted, value in settings.items():
             _set_path(payload["job"], dotted, value)
 
@@ -118,8 +118,7 @@ def generate(base: Path, name: str, axes: dict[str, list[Any]], out_root: Path) 
     out_dir = out_root / name
     out_dir.mkdir(parents=True, exist_ok=True)
     written = [
-        (save_job(j, out_dir / fname, minimal=True), s_, j, pl)
-        for fname, s_, j, pl in written
+        (save_job(j, out_dir / fname, minimal=True), s_, j, pl) for fname, s_, j, pl in written
     ]
 
     manifest = {
@@ -300,8 +299,7 @@ def run_batch(paths: list[Path], *, jobs: int = 1, dry_run: bool = False) -> int
             u = -1
         total += max(u, 0)
         print(f"  {c.name:50s} {u:12,d}")
-    print(f"\n{len(todo)} to run, {len(done)} already done, "
-          f"{total:,} sequential updates total")
+    print(f"\n{len(todo)} to run, {len(done)} already done, {total:,} sequential updates total")
     if dry_run:
         return 0
 
@@ -309,7 +307,8 @@ def run_batch(paths: list[Path], *, jobs: int = 1, dry_run: bool = False) -> int
         c, _ = item
         proc = subprocess.run(
             [sys.executable, "-m", "oaht_bench.cli", f"config={c}"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         return c, proc.returncode, proc.stderr
 
@@ -326,8 +325,7 @@ def run_batch(paths: list[Path], *, jobs: int = 1, dry_run: bool = False) -> int
 
     print(f"\n{len(todo) - len(failed)}/{len(todo)} succeeded.")
     if failed:
-        print("Re-run just the failures by passing their configs again; "
-              "finished runs are skipped.")
+        print("Re-run just the failures by passing their configs again; finished runs are skipped.")
     return 1 if failed else 0
 
 
@@ -339,41 +337,55 @@ def main() -> int:
     g.add_argument("--base", required=True, type=Path)
     g.add_argument("--name", required=True)
     g.add_argument(
-        "--set", action="append", default=[], metavar="PATH=V1,V2",
+        "--set",
+        action="append",
+        default=[],
+        metavar="PATH=V1,V2",
         help="Dotted config path and comma-separated values. Repeatable.",
     )
     g.add_argument("--out", type=Path, default=REPO_ROOT / "configs" / "sweeps")
 
-    rn = sub.add_parser(
-        "run", help="Train every config given, skipping ones already finished."
+    rn = sub.add_parser("run", help="Train every config given, skipping ones already finished.")
+    rn.add_argument(
+        "configs", nargs="+", type=Path, help="Config files, or sweep directories to expand."
     )
-    rn.add_argument("configs", nargs="+", type=Path,
-                    help="Config files, or sweep directories to expand.")
-    rn.add_argument("--jobs", type=int, default=1,
-                    help="Concurrent runs. Each is a separate process; at small "
-                         "num_envs one run does not saturate a device.")
-    rn.add_argument("--dry-run", action="store_true",
-                    help="List what would run, with update counts, and stop.")
+    rn.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="Concurrent runs. Each is a separate process; at small "
+        "num_envs one run does not saturate a device.",
+    )
+    rn.add_argument(
+        "--dry-run", action="store_true", help="List what would run, with update counts, and stop."
+    )
 
     r = sub.add_parser(
         "rescore",
         help="Recompute population_crossplay.csv from saved checkpoints, no retraining.",
     )
     r.add_argument("runs", nargs="+", type=Path, help="Run directories.")
-    r.add_argument("--episodes", type=int, default=None,
-                   help="Override evaluation_episodes for this pass.")
-    r.add_argument("--greedy", action="store_true", default=None,
-                   help="Argmax actions. Diagnostic only -- deadlocks symmetric "
-                        "coordination tasks; see TeammateGenerationJob.evaluation_greedy.")
+    r.add_argument(
+        "--episodes", type=int, default=None, help="Override evaluation_episodes for this pass."
+    )
+    r.add_argument(
+        "--greedy",
+        action="store_true",
+        default=None,
+        help="Argmax actions. Diagnostic only -- deadlocks symmetric "
+        "coordination tasks; see TeammateGenerationJob.evaluation_greedy.",
+    )
     r.add_argument("--dry-run", action="store_true", help="Print without writing.")
 
     c = sub.add_parser("collect", help="Tabulate finished runs.")
     c.add_argument("--sweep", required=True, type=Path)
     c.add_argument("--results", type=Path, default=REPO_ROOT)
     c.add_argument(
-        "--competence-tol", type=float, default=0.05,
+        "--competence-tol",
+        type=float,
+        default=0.05,
         help="Cells within this fraction of the best self-play score are treated "
-             "as equally competent and ranked by separation (default 0.05).",
+        "as equally competent and ranked by separation (default 0.05).",
     )
 
     args = ap.parse_args()
@@ -408,14 +420,14 @@ def main() -> int:
         failed = 0
         for run in args.runs:
             try:
-                s = rescore_run(run, episodes=args.episodes, greedy=args.greedy,
-                                write=not args.dry_run)
+                s = rescore_run(
+                    run, episodes=args.episodes, greedy=args.greedy, write=not args.dry_run
+                )
             except Exception as e:  # one unscorable run must not abort the batch
                 failed += 1
                 print(f"{run.name[:64]:64s}  {type(e).__name__}: {str(e).splitlines()[0][:60]}")
                 continue
-            print(f"{run.name[:64]:64s} {s.self_play:9.4f} {s.cross_play:9.4f} "
-                  f"{s.separation:9.4f}")
+            print(f"{run.name[:64]:64s} {s.self_play:9.4f} {s.cross_play:9.4f} {s.separation:9.4f}")
         if args.dry_run:
             print("\ndry run: no population_crossplay.csv was written.")
         if failed:

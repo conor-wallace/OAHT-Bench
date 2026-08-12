@@ -19,9 +19,8 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
-from pydantic import Field
-
 import chex
+from pydantic import Field
 
 from oaht_bench.configs.base import BaseConfig
 from oaht_bench.configs.network import MlpNetwork
@@ -124,7 +123,7 @@ class PpoRuntime(BaseConfig):
 
 
 class TrainOutput(TypedDict):
-    """What the PPO training function returns.
+    r"""What the PPO training function returns.
 
     Written down because three functions index into this dict and none of them
     said what was in it. Leading axes are added by the ``vmap``\ s the callers
@@ -174,9 +173,7 @@ class CoMeDiRuntime(BaseConfig):
     def from_config(cls, gen: Any, rollout_length: int, num_agents: int) -> CoMeDiRuntime:
         """Build from a :class:`~oaht_bench.configs.teammate_gen.CoMeDiConfig`."""
         if num_agents != 2:
-            raise ValueError(
-                f"CoMeDi assumes exactly 2 agents; this environment has {num_agents}."
-            )
+            raise ValueError(f"CoMeDi assumes exactly 2 agents; this environment has {num_agents}.")
         num_actors = num_agents * gen.num_envs
 
         # Population-selection rollouts are halved because the implementation

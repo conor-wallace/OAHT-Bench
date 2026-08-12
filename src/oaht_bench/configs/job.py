@@ -20,7 +20,6 @@ from oaht_bench.configs.base import BaseConfig, VersionedConfig
 from oaht_bench.configs.env import EnvConfig
 from oaht_bench.configs.teammate_gen import GeneratorConfig
 
-
 #: The benchmark's baseline roster (§12.9). Thirteen entries in four groups:
 #: floors, a reference row, a ceiling, the learning-history family, and the
 #: trajectory-view family. Declaring it here means a typo fails at config load
@@ -60,7 +59,7 @@ class LoggingConfig(BaseConfig):
     verbose: bool = False
 
     @model_validator(mode="after")
-    def _wandb_needs_a_project(self) -> "LoggingConfig":
+    def _wandb_needs_a_project(self) -> LoggingConfig:
         if self.use_wandb and not self.wandb_project:
             raise ValueError("use_wandb is set but wandb_project is empty.")
         return self

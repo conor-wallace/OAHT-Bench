@@ -13,8 +13,18 @@ import importlib
 
 import pytest
 
-COLLIDING_NAMES = ["envs", "agents", "common", "marl", "teammate_generation", "evaluation",
-                   "ego_agent_training", "runners", "benchmarks", "teammate_wrapper"]
+COLLIDING_NAMES = [
+    "envs",
+    "agents",
+    "common",
+    "marl",
+    "teammate_generation",
+    "evaluation",
+    "ego_agent_training",
+    "runners",
+    "benchmarks",
+    "teammate_wrapper",
+]
 
 
 @pytest.mark.parametrize("name", COLLIDING_NAMES)
@@ -118,10 +128,10 @@ def test_absorbed_modules_import(module: str):
 
 def test_all_generators_are_dispatchable():
     """Every generator named in the config union has a runner."""
+    import typing
+
     from oaht_bench.configs.teammate_gen import GeneratorConfig
     from oaht_bench.teammate_gen.runner import _generators
-
-    import typing
 
     members = typing.get_args(typing.get_args(GeneratorConfig)[0])
     declared = {m.model_fields["generator"].default for m in members}

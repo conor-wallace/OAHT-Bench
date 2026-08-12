@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from oaht_bench.common.logging import RunLogger
 from oaht_bench.configs import save_job

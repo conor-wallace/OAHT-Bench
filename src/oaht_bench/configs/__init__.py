@@ -31,8 +31,6 @@ from oaht_bench.configs.job import (
 )
 
 
-
-
 def load_job(path: str | Path) -> AnyJob:
     """Load and validate an experiment config from a JSON file.
 

@@ -15,10 +15,11 @@ described.
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal, Mapping
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, model_validator
-from types import MappingProxyType
 
 from oaht_bench.configs.base import BaseConfig, VersionedConfig
 
