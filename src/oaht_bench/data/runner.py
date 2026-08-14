@@ -45,6 +45,7 @@ def run(job: DatasetCollectionJob) -> Path:
     import jax
 
     from oaht_bench.data.collect import collect_episode, pad_and_stack
+    from oaht_bench.teammate_gen.crossplay import member_params, scored_members
     from oaht_bench.data.schema import EpisodeBatch
     from oaht_bench.envs import make_env
     from oaht_bench.envs.log_wrapper import LogWrapper
@@ -69,8 +70,6 @@ def run(job: DatasetCollectionJob) -> Path:
     # Which members are eligible to be seated. FCP's population spans competence
     # by design, so the 'expert' variant must not draw from its early
     # checkpoints -- the same distinction scoring makes.
-    from oaht_bench.teammate_gen.crossplay import scored_members
-
     converged = scored_members(gen_job)
     eligible = list(range(population.pop_size)) if converged is None else converged
     if job.variant != "expert":
@@ -90,9 +89,7 @@ def run(job: DatasetCollectionJob) -> Path:
         seats = np.asarray(
             jax.random.choice(seat_rng, np.asarray(eligible), shape=(num_seats,))
         )
-        from oaht_bench.data.collect import _member
-
-        seat_params = [_member(params, 0, int(m)) for m in seats]
+        seat_params = [member_params(params, int(m)) for m in seats]
         episodes.append(
             collect_episode(
                 ep_rng, env, seat_params, population.policy_cls,

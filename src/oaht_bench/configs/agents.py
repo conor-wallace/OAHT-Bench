@@ -1,4 +1,4 @@
-from typing import Any, Dict
+from typing import Any
 
 from pydantic import Field
 
@@ -9,7 +9,7 @@ class RLTeammateConfig(BaseConfig):
     algo: str
     ckpt_path: str
     use_log_wrapper: bool = True
-    extra: Dict[str, Any] = Field(default_factory=dict)
+    extra: dict[str, Any] = Field(default_factory=dict)
 
 
 class PopulationConfig(BaseConfig):

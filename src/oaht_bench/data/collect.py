@@ -19,11 +19,6 @@ import jax.numpy as jnp
 import numpy as np
 
 
-def _member(params, seed_index: int, member: int):
-    """Slice one population member's parameters out of the stacked tree."""
-    return jax.tree.map(lambda leaf: leaf[seed_index][member], params)
-
-
 def collect_episode(
     rng,
     env,
@@ -83,7 +78,7 @@ def collect_episode(
 
         rng, step_rng = jax.random.split(rng)
         env_act = {name: jnp.asarray(step_act[i]) for i, name in enumerate(agents)}
-        obs, state, reward, done_flags, _info = env.step(step_rng, state, env_act)
+        obs, state, reward, done_flags, _ = env.step(step_rng, state, env_act)
 
         rec["obs"].append(np.stack(step_obs))
         rec["actions"].append(np.asarray(step_act))

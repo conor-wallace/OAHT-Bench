@@ -49,6 +49,24 @@ import numpy as np
 from oaht_bench.common.run_episodes import run_episodes
 
 
+def member_params(params, index: int, *, seed_index: int = 0):
+    """Slice one member's parameters out of a stacked population tree.
+
+    Generators return parameters with leading axes ``(num_seeds, pop_size, ...)``
+    — see :func:`~oaht_bench.teammate_gen.rescore.population_from_run` for how
+    each one arrives at that shape. This is the one place that knows the layout,
+    so scoring and dataset collection cannot drift apart on what "member i"
+    means.
+
+    Args:
+        params: Stacked parameters for a whole population.
+        index: Flat member index. For FCP this is ``run * num_checkpoints +
+            checkpoint``; see :func:`scored_members`.
+        seed_index: Which training seed's population to read.
+    """
+    return jax.tree.map(lambda leaf: leaf[seed_index][index], params)
+
+
 @dataclass(frozen=True)
 class CrossPlayScores:
     """Summary of a population's self-evaluation."""
@@ -123,7 +141,7 @@ def evaluate_population(
     pop_size = len(idx)
 
     def member(source, i: int):
-        return jax.tree.map(lambda leaf: leaf[seed_index][i], source)
+        return member_params(source, i, seed_index=seed_index)
 
     matrix = np.zeros((pop_size, pop_size), dtype=float)
     for a, i in enumerate(idx):
