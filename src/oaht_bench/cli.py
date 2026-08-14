@@ -83,7 +83,11 @@ def _dispatch(job: AnyJob) -> int:
         print(f"\nwrote {run_dir}")
         return 0
     if job.job_type == "dataset_collection":
-        raise NotImplementedError("dataset_collection runner not yet implemented (§4).")
+        from oaht_bench.data.runner import run as run_data_generation
+
+        run_dir = run_data_generation(job)
+        print(f"\nwrote {run_dir}")
+        return 0
     if job.job_type == "training":
         raise NotImplementedError("training runner not yet implemented (§3.1).")
     if job.job_type == "evaluation":

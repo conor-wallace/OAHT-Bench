@@ -155,7 +155,11 @@ class DatasetCollectionJob(JobBase):
 
     job_type: Literal["dataset_collection"] = "dataset_collection"
     env: EnvConfig
-    population_path: str = Field(description="Directory of teammate checkpoints.")
+    population_path: str = Field(
+        description="Teammate-generation run directory, or the saved_train_run "
+        "inside it. The run's own job.json says which generator produced it, so "
+        "the population is rebuilt the same way scoring rebuilds it."
+    )
     variant: Literal["random", "medium", "expert", "replay_full", "mixed"] = Field(
         description="D4RL-style data regime (§4.3). 'replay_full' is deliberately "
         "not D4RL's 'medium-replay', which stops at medium performance."
