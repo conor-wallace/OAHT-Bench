@@ -172,6 +172,82 @@ class DatasetCollectionJob(JobBase):
     )
 
 
+class OfflineTrainingConfig(BaseConfig):
+    """Optimisation and batching for the two-stage trajectory-view baselines.
+
+    Defaults are TAO's, from ``offline_stage_{1,2}/config.py``. Two differ, both
+    because our datasets are smaller than the ones those values were chosen for,
+    and both are called out here rather than buried: the batch is expressed as
+    teammates x windows (see below), and the step counts are per stage rather
+    than iterations x updates-per-iteration.
+    """
+
+    context_length: int = Field(default=20, gt=0, description="Timesteps per window; TAO's K.")
+    stride: int = Field(
+        default=5,
+        gt=0,
+        description="Step between window starts. The reference samples random "
+        "start offsets instead; a stride enumerates them, which makes a run "
+        "reproducible from the config alone.",
+    )
+    hidden_dim: int = Field(default=32, gt=0)
+    ff_dim: int = Field(default=128, gt=0)
+    num_blocks: int = Field(default=3, gt=0)
+    dropout: float = Field(default=0.1, ge=0.0, lt=1.0)
+
+    stage1_steps: int = Field(
+        default=2000,
+        gt=0,
+        description="Gradient steps for the representation stage. TAO runs "
+        "NUM_ITER x NUM_UPDATE_PER_ITER = 200x10 (MS) or 500x10 (PA).",
+    )
+    stage2_steps: int = Field(
+        default=20000, gt=0, description="Gradient steps for the policy stage; TAO's 2000x10."
+    )
+    stage1_learning_rate: float = Field(default=1e-2, gt=0)
+    stage2_learning_rate: float = Field(default=1e-4, gt=0)
+    weight_decay: float = Field(default=1e-4, ge=0.0)
+    clip_grad: float = Field(default=0.5, gt=0)
+    warmup_steps: int = Field(
+        default=10000,
+        gt=0,
+        description="Linear warmup, min((step+1)/warmup, 1), as the reference schedules it.",
+    )
+
+    teammates_per_batch: int = Field(
+        default=4,
+        gt=0,
+        description="Distinct teammates per stage-1 batch. The reference draws "
+        "trajectories uniformly and gets contrastive positives for free from "
+        "many trajectories per opponent; our coverage is ragged, so the batch is "
+        "built teammate-first to guarantee them.",
+    )
+    windows_per_teammate: int = Field(
+        default=8,
+        gt=1,
+        description="Windows per teammate in a stage-1 batch. Must exceed 1 or "
+        "every anchor is its own only positive.",
+    )
+    stage2_batch_size: int = Field(default=64, gt=0)
+    context_trajectories: int = Field(
+        default=5,
+        gt=0,
+        description="TAO's C: trajectories stitched into the GetOffD context. "
+        "Matches the reference's OCW_SIZE.",
+    )
+    alpha: float = Field(default=1.0, ge=0.0, description="Weight on the generative term.")
+    lam: float = Field(default=1.0, ge=0.0, description="Weight on the discriminative term.")
+    temperature: float = Field(default=0.1, gt=0)
+    base_temperature: float = Field(default=0.1, gt=0)
+    freeze_encoder: bool = Field(
+        default=True,
+        description="Freeze the stage-1 encoder during stage 2. True follows the "
+        "paper; the released code trains it jointly, which would make TAO and "
+        "TAO-w/o-PEL the same model. See offline.tao.tao_policy_loss.",
+    )
+    log_every: int = Field(default=100, gt=0)
+
+
 class TrainingJob(JobBase):
     """Train one baseline on one dataset."""
 
@@ -185,6 +261,7 @@ class TrainingJob(JobBase):
         "backbone-sensitivity ablation.",
     )
     num_seeds: int = Field(default=3, gt=0)
+    offline: OfflineTrainingConfig = Field(default_factory=OfflineTrainingConfig)
 
 
 class EvaluationJob(JobBase):
