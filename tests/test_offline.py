@@ -14,11 +14,13 @@ import pytest
 
 from oaht_bench.offline import (
     AncillaryActionDecoder,
-    ControlDecoder,
-    LiamOffline,
+    DecisionTransformer,
+    LiamDecoder,
+    LiamEncoder,
+    LiamPolicy,
     OpponentPolicyEncoder,
     TaoPolicy,
-    liam_loss,
+    liam_reconstruction_loss,
     make_windows,
     return_to_go,
     supervised_contrastive,
@@ -65,29 +67,31 @@ def test_windows_expose_both_streams_and_the_teammate_label():
     assert w.mask.sum() > 0
 
 
-def test_liam_has_no_cross_attention_and_tao_does():
-    """Appendix F's one structural difference between the two.
+def test_liam_conditions_by_concatenation_and_tao_by_cross_attention():
+    """The conditioning mode is what separates the two, not its presence.
 
-    LIAM's teammate signal arrives only through the reconstruction loss; if it
-    gained a conditioning path the method would no longer be LIAM.
+    An earlier version of this test asserted LIAM had *no* conditioning path,
+    following TAO's Appendix F sketch. LIAM does have one: the original
+    concatenates the embedding to the observation (``liam_agent.py:536``). The
+    distinction is cross-attention versus concatenation.
     """
     w = _windows()
     rng = jax.random.PRNGKey(0)
     kw = dict(timesteps=jnp.asarray(w.timesteps), mask=jnp.asarray(w.mask))
-    liam = LiamOffline(action_dim=6, obs_dim=w.obs_dim)
-    p = liam.init(
-        rng, jnp.asarray(w.ego_rtg), jnp.asarray(w.ego_obs), jnp.asarray(w.ego_actions), **kw
-    )
-    flat = jax.tree_util.tree_flatten_with_path(p)[0]
-    names = " ".join(str(k) for k, _ in flat)
-    assert "MultiHeadDotProductAttention" not in names or "SelfAttention" in names
+    args = (jnp.asarray(w.ego_rtg), jnp.asarray(w.ego_obs), jnp.asarray(w.ego_actions))
+
+    # LIAM widens the observation embedding by hidden_dim -- the concatenation.
+    z = jnp.zeros((len(w), w.context_length, 32))
+    liam = LiamPolicy(action_dim=6, hidden_dim=32)
+    lp = liam.init(rng, *args, embedding=z, **kw)
+    obs_kernel = jax.tree_util.tree_leaves_with_path(lp)
+    widened = [v.shape for k, v in obs_kernel if v.ndim == 2 and v.shape[0] == w.obs_dim + 32]
+    assert widened, "LIAM's observation layer should take obs_dim + hidden_dim inputs"
 
     # A cross-attending backbone must be given a context; omitting it is an error
     # rather than a silent no-op.
     with pytest.raises(ValueError, match="no context was passed"):
-        ControlDecoder(action_dim=6, use_cross_attention=True).init(
-            rng, jnp.asarray(w.ego_rtg), jnp.asarray(w.ego_obs), jnp.asarray(w.ego_actions), **kw
-        )
+        DecisionTransformer(action_dim=6, use_cross_attention=True).init(rng, *args, **kw)
 
 
 def test_supervised_contrastive_matches_the_reference_aggregation():
@@ -122,9 +126,33 @@ def test_supervised_contrastive_drops_rows_with_no_positive():
     assert float(supervised_contrastive(jnp.eye(3), jnp.array([0, 1, 2]))) == 0.0
 
 
-def test_liam_loss_masks_padding():
-    """A window shorter than the context must not be trained on its padding."""
+def test_liam_reconstructs_the_teammate_at_the_same_timestep():
+    """Both targets are at ``t``, per the paper and liam_agent.py:302-303.
+
+    An earlier version used ``a^-1_{t-1}`` following TAO's Appendix F, which asks
+    what the teammate did *last* step rather than what it is doing now.
+    """
+    import inspect
+
+    from oaht_bench.offline import liam as liam_mod
+
+    src = inspect.getsource(liam_mod.liam_reconstruction_loss)
+    assert 'batch["mate_actions"]' in src
+    # no shift of the teammate action stream
+    assert 'mate_actions"][:, :-1]' not in src
+
+
+def test_liam_observation_term_is_a_gaussian_nll_not_a_mean():
+    """``0.5 * sum`` over dims, not ``mean``.
+
+    They differ by ``0.5 * obs_dim`` -- 12x on LBF -- and LIAM sums two terms, so
+    a mean silently reweights observation reconstruction against action
+    reconstruction.
+    """
     w = _windows()
+    rng = jax.random.PRNGKey(0)
+    enc = LiamEncoder(action_dim=6)
+    dec = LiamDecoder(obs_dim=w.obs_dim, action_dim=6)
     batch = {
         k: jnp.asarray(getattr(w, k))
         for k in (
@@ -133,27 +161,95 @@ def test_liam_loss_masks_padding():
             "ego_rtg",
             "mate_obs",
             "mate_actions",
-            "mate_rewards",
             "timesteps",
             "mask",
-            "teammate_id",
         )
     }
-    rng = jax.random.PRNGKey(0)
-    m = LiamOffline(action_dim=6, obs_dim=w.obs_dim)
-    p = m.init(
-        rng, batch["ego_rtg"], batch["ego_obs"], batch["ego_actions"], timesteps=batch["timesteps"]
+    ep = enc.init(
+        rng,
+        batch["ego_rtg"],
+        batch["ego_obs"],
+        batch["ego_actions"],
+        timesteps=batch["timesteps"],
+        mask=batch["mask"],
     )
-    _, aux = liam_loss(p, m, batch, rngs={"dropout": rng}, train=False)
-    assert all(np.isfinite(float(v)) for v in aux.values())
+    z = enc.apply(
+        ep,
+        batch["ego_rtg"],
+        batch["ego_obs"],
+        batch["ego_actions"],
+        timesteps=batch["timesteps"],
+        mask=batch["mask"],
+    )
+    dp = dec.init(rng, z)
+    _, aux = liam_reconstruction_loss(
+        {"encoder": ep, "decoder": dp}, enc, dec, batch, rngs={"dropout": rng}, train=False
+    )
 
-    # Corrupting only the padded tail must not move the loss.
-    bumped = dict(batch)
-    bumped["mate_obs"] = batch["mate_obs"].at[:, -1].add(1000.0)
-    mask_covers_tail = bool(batch["mask"][:, -1].any())
-    _, aux2 = liam_loss(p, m, bumped, rngs={"dropout": rng}, train=False)
-    if not mask_covers_tail:
-        assert float(aux["recon_obs"]) == pytest.approx(float(aux2["recon_obs"]))
+    obs_hat, _ = dec.apply(dp, z)
+    m = np.asarray(batch["mask"], dtype=float)
+    expected = 0.5 * ((np.asarray(batch["mate_obs"]) - np.asarray(obs_hat)) ** 2).sum(-1)
+    expected = (expected * m).sum() / max(m.sum(), 1.0)
+    assert float(aux["recon_obs"]) == pytest.approx(expected, rel=1e-4)
+
+
+def test_liam_stage_two_does_not_differentiate_the_encoder():
+    """Staging is what removes the original's stop_gradient.
+
+    liam_agent.py blocks the gradient because encoder and policy train together
+    online. Offline the encoder is frozen from stage 1, so the block is
+    unnecessary rather than merely absent -- and no encoder parameter should
+    appear in stage 2's gradient.
+    """
+    from oaht_bench.offline import liam_policy_loss
+
+    w = _windows()
+    rng = jax.random.PRNGKey(0)
+    enc = LiamEncoder(action_dim=6)
+    batch = {
+        k: jnp.asarray(getattr(w, k))
+        for k in (
+            "ego_obs",
+            "ego_actions",
+            "ego_rtg",
+            "mate_obs",
+            "mate_actions",
+            "timesteps",
+            "mask",
+        )
+    }
+    ep = enc.init(
+        rng,
+        batch["ego_rtg"],
+        batch["ego_obs"],
+        batch["ego_actions"],
+        timesteps=batch["timesteps"],
+        mask=batch["mask"],
+    )
+    z = enc.apply(
+        ep,
+        batch["ego_rtg"],
+        batch["ego_obs"],
+        batch["ego_actions"],
+        timesteps=batch["timesteps"],
+        mask=batch["mask"],
+    )
+    pol = LiamPolicy(action_dim=6)
+    pp = pol.init(
+        rng,
+        batch["ego_rtg"],
+        batch["ego_obs"],
+        batch["ego_actions"],
+        timesteps=batch["timesteps"],
+        embedding=z,
+        mask=batch["mask"],
+    )
+
+    grads = jax.grad(liam_policy_loss, has_aux=True)(
+        pp, pol, enc, ep, batch, rngs={"dropout": rng}
+    )[0]
+    # gradient is over the policy only; the encoder pytree is not in it
+    assert jax.tree_util.tree_structure(grads) == jax.tree_util.tree_structure(pp)
 
 
 def test_tao_encoder_pools_over_real_timesteps_only():

@@ -41,17 +41,19 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 
-#: Appendix F: all hidden layers except the feed-forward are 32 nodes.
-HIDDEN = 32
-#: Appendix F: the feed-forward layer is 128 nodes with ReLU.
-FEEDFORWARD = 128
-#: Appendix F: 3 self-attention blocks.
-NUM_BLOCKS = 3
+#: Appendix F's sizes, as defaults rather than constants -- they are TAO's
+#: choices for TAO's environments, and every model here takes them as fields so a
+#: different environment can be given a different width without editing a module.
+DEFAULT_HIDDEN_DIM = 32
+DEFAULT_FF_DIM = 128
+DEFAULT_NUM_BLOCKS = 3
 
 
 class Block(nn.Module):
-    """One decoder block: self-attention, optional cross-attention, feed-forward."""
+    """One transformer block: self-attention, optional cross-attention, feed-forward."""
 
+    hidden_dim: int
+    ff_dim: int
     use_cross_attention: bool
     dropout: float
 
@@ -59,7 +61,7 @@ class Block(nn.Module):
     def __call__(self, x, *, context=None, causal_mask, cross_mask=None, train: bool):
         # Single-head throughout, per Appendix F.
         attn = nn.SelfAttention(
-            num_heads=1, qkv_features=HIDDEN, dropout_rate=self.dropout,
+            num_heads=1, qkv_features=self.hidden_dim, dropout_rate=self.dropout,
             deterministic=not train,
         )(x, mask=causal_mask)
         x = nn.LayerNorm()(x + nn.Dropout(self.dropout, deterministic=not train)(attn))
@@ -72,19 +74,25 @@ class Block(nn.Module):
                     "MeLIBA should construct the backbone with it disabled."
                 )
             cross = nn.MultiHeadDotProductAttention(
-                num_heads=1, qkv_features=HIDDEN, dropout_rate=self.dropout,
+                num_heads=1, qkv_features=self.hidden_dim, dropout_rate=self.dropout,
                 deterministic=not train,
             )(x, context, mask=cross_mask)
             x = nn.LayerNorm()(x + nn.Dropout(self.dropout, deterministic=not train)(cross))
 
-        ff = nn.Dense(FEEDFORWARD)(x)
+        ff = nn.Dense(self.ff_dim)(x)
         ff = nn.relu(ff)
-        ff = nn.Dense(HIDDEN)(ff)
+        ff = nn.Dense(self.hidden_dim)(ff)
         return nn.LayerNorm()(x + nn.Dropout(self.dropout, deterministic=not train)(ff))
 
 
-class ControlDecoder(nn.Module):
-    """Return-conditioned causal decoder over ``(G_t, o_t, a_t)`` triples.
+class DecisionTransformer(nn.Module):
+    """Return-conditioned causal transformer over ``(G_t, o_t, a_t)`` triples.
+
+    TAO calls this the "In-context Control Decoder", but *decoder* is already
+    taken in this package: LIAM and TAO both have an encoder that summarises
+    teammate behaviour and a decoder that reconstructs teammate trajectories.
+    This is neither -- it is the policy, and it is a Decision Transformer, which
+    is also the language §3.1 uses.
 
     Returns both the action logits and the hidden states at the ``o_t``
     positions, because LIAM's auxiliary decoder reconstructs the teammate from
@@ -93,6 +101,9 @@ class ControlDecoder(nn.Module):
     """
 
     action_dim: int
+    hidden_dim: int = DEFAULT_HIDDEN_DIM
+    ff_dim: int = DEFAULT_FF_DIM
+    num_blocks: int = DEFAULT_NUM_BLOCKS
     use_cross_attention: bool = False
     dropout: float = 0.1
     max_timesteps: int = 4096
@@ -103,16 +114,16 @@ class ControlDecoder(nn.Module):
         B, T = obs.shape[0], obs.shape[1]
 
         # Modality-specific linear layers, 32 nodes, no activation.
-        g_tok = nn.Dense(HIDDEN)(rtg[..., None])
-        o_tok = nn.Dense(HIDDEN)(obs)
-        a_tok = nn.Dense(HIDDEN)(jax.nn.one_hot(actions, self.action_dim))
+        g_tok = nn.Dense(self.hidden_dim)(rtg[..., None])
+        o_tok = nn.Dense(self.hidden_dim)(obs)
+        a_tok = nn.Dense(self.hidden_dim)(jax.nn.one_hot(actions, self.action_dim))
 
         # Episodic timestep encoding, added to every modality (Chen et al. 2021).
-        pos = nn.Embed(self.max_timesteps, HIDDEN)(timesteps)
+        pos = nn.Embed(self.max_timesteps, self.hidden_dim)(timesteps)
         g_tok, o_tok, a_tok = g_tok + pos, o_tok + pos, a_tok + pos
 
         # Interleave to (G_0, o_0, a_0, G_1, o_1, a_1, ...).
-        x = jnp.stack([g_tok, o_tok, a_tok], axis=2).reshape(B, T * 3, HIDDEN)
+        x = jnp.stack([g_tok, o_tok, a_tok], axis=2).reshape(B, T * 3, self.hidden_dim)
         # Reference `embed_ln`: LayerNorm on the stacked sequence, not per token
         # stream. Absent from the paper.
         x = nn.LayerNorm()(x)
@@ -129,12 +140,12 @@ class ControlDecoder(nn.Module):
             q = jnp.ones((B, T * 3), dtype=bool)
             cross_mask = nn.make_attention_mask(q, context_mask.astype(bool))
 
-        for _ in range(NUM_BLOCKS):
-            x = Block(self.use_cross_attention, self.dropout)(
+        for _ in range(self.num_blocks):
+            x = Block(self.hidden_dim, self.ff_dim, self.use_cross_attention, self.dropout)(
                 x, context=context, causal_mask=attn_mask, cross_mask=cross_mask, train=train
             )
 
         # Actions are read off the o_t positions: index 1 of each triple.
-        obs_hidden = x.reshape(B, T, 3, HIDDEN)[:, :, 1]
+        obs_hidden = x.reshape(B, T, 3, self.hidden_dim)[:, :, 1]
         logits = nn.Dense(self.action_dim)(obs_hidden)
         return logits, obs_hidden

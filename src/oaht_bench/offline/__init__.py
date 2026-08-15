@@ -5,8 +5,14 @@ published precedent for this design: one architecture, each baseline stating
 exactly what it adds. Differences between baselines are therefore differences
 the papers describe rather than ones we introduced.
 
-  LIAM  = backbone - cross-attention + teammate-reconstruction head
-  TAO   = backbone + cross-attention, keyed by a learned policy embedding
+Both are two-stage: stage 1 learns a teammate representation, stage 2 trains the
+policy against a frozen encoder. LIAM's original single-loop training with a
+``stop_gradient`` was a consequence of learning online; offline, staging removes
+the need for it. So the two differ only in what the encoder reads and how its
+output reaches the policy:
+
+  LIAM  encoder over the *ego* history -> embedding concatenated to the observation
+  TAO   encoder over the *teammate* stream -> embedding as cross-attention key/value
 
 **A dataset requirement neither method can be run honestly without.** Both are
 trained to predict the *ego* action, and TAO specifically targets *near-optimal*
@@ -18,9 +24,15 @@ confederate (``final_params_br``), so for those two the data exists; FCP and
 CoMeDi have no best response and would need one trained.
 """
 
-from oaht_bench.offline.backbone import ControlDecoder
+from oaht_bench.offline.backbone import DecisionTransformer
 from oaht_bench.offline.dataset import Windows, make_windows, return_to_go
-from oaht_bench.offline.liam import LiamOffline, liam_loss
+from oaht_bench.offline.liam import (
+    LiamDecoder,
+    LiamEncoder,
+    LiamPolicy,
+    liam_policy_loss,
+    liam_reconstruction_loss,
+)
 from oaht_bench.offline.tao import (
     AncillaryActionDecoder,
     OpponentPolicyEncoder,
@@ -31,14 +43,17 @@ from oaht_bench.offline.tao import (
 
 __all__ = [
     "AncillaryActionDecoder",
-    "ControlDecoder",
-    "LiamOffline",
+    "DecisionTransformer",
+    "LiamDecoder",
+    "LiamEncoder",
+    "LiamPolicy",
     "OpponentPolicyEncoder",
     "TaoPolicy",
     "Windows",
     "embedding_loss",
     "supervised_contrastive",
-    "liam_loss",
+    "liam_policy_loss",
+    "liam_reconstruction_loss",
     "make_windows",
     "return_to_go",
 ]

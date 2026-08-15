@@ -37,7 +37,12 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from oaht_bench.offline.backbone import FEEDFORWARD, HIDDEN, NUM_BLOCKS, ControlDecoder
+from oaht_bench.offline.backbone import (
+    DEFAULT_FF_DIM,
+    DEFAULT_HIDDEN_DIM,
+    DEFAULT_NUM_BLOCKS,
+    DecisionTransformer,
+)
 
 
 class OpponentPolicyEncoder(nn.Module):
@@ -49,8 +54,10 @@ class OpponentPolicyEncoder(nn.Module):
     """
 
     action_dim: int
+    hidden_dim: int = DEFAULT_HIDDEN_DIM
+    ff_dim: int = DEFAULT_FF_DIM
+    num_blocks: int = DEFAULT_NUM_BLOCKS
     dropout: float = 0.1
-
     max_timesteps: int = 4096
 
     @nn.compact
@@ -66,33 +73,33 @@ class OpponentPolicyEncoder(nn.Module):
         a different timestep, and the timestep embedding below is not symmetric.
         """
         # Modality-specific linear layers with ELU, 32 nodes (Appendix F).
-        a = nn.elu(nn.Dense(HIDDEN)(jax.nn.one_hot(mate_actions, self.action_dim)))
-        r = nn.elu(nn.Dense(HIDDEN)(mate_rewards[..., None]))
-        o = nn.elu(nn.Dense(HIDDEN)(mate_next_obs))
+        a = nn.elu(nn.Dense(self.hidden_dim)(jax.nn.one_hot(mate_actions, self.action_dim)))
+        r = nn.elu(nn.Dense(self.hidden_dim)(mate_rewards[..., None]))
+        o = nn.elu(nn.Dense(self.hidden_dim)(mate_next_obs))
 
         # Reference net.py:48-55 -- obs and reward take the timestep embedding at
         # t, the action takes t-1, clamped at 0. The paper mentions no positional
         # encoding in the encoder at all.
-        embed_t = nn.Embed(self.max_timesteps, HIDDEN)
+        embed_t = nn.Embed(self.max_timesteps, self.hidden_dim)
         pos = embed_t(timesteps)
         pos_m1 = embed_t(jnp.where(timesteps > 0, timesteps - 1, timesteps))
         a, r, o = a + pos_m1, r + pos, o + pos
 
         # LayerNorm over the concatenated 3*hidden vector, then fuse to one token
         # per timestep (reference `embed_ln` is LayerNorm(3 * hidden_size)).
-        fused = nn.Dense(HIDDEN)(nn.LayerNorm()(jnp.concatenate([a, r, o], axis=-1)))
+        fused = nn.Dense(self.hidden_dim)(nn.LayerNorm()(jnp.concatenate([a, r, o], axis=-1)))
 
         # Encoder blocks: no causal mask -- the whole teammate trajectory is
         # available when building a policy embedding.
         pad = nn.make_attention_mask(mask, mask)
         x = fused
-        for _ in range(NUM_BLOCKS):
+        for _ in range(self.num_blocks):
             attn = nn.SelfAttention(
-                num_heads=1, qkv_features=HIDDEN, dropout_rate=self.dropout,
+                num_heads=1, qkv_features=self.hidden_dim, dropout_rate=self.dropout,
                 deterministic=not train,
             )(x, mask=pad)
             x = nn.LayerNorm()(x + attn)
-            ff = nn.Dense(HIDDEN)(nn.relu(nn.Dense(FEEDFORWARD)(x)))
+            ff = nn.Dense(self.hidden_dim)(nn.relu(nn.Dense(self.ff_dim)(x)))
             x = nn.LayerNorm()(x + ff)
         return x
 
@@ -120,6 +127,7 @@ class AncillaryActionDecoder(nn.Module):
     """
 
     action_dim: int
+    hidden_dim: int = DEFAULT_HIDDEN_DIM
 
     @nn.compact
     def __call__(self, mate_obs, embedding):
@@ -128,7 +136,7 @@ class AncillaryActionDecoder(nn.Module):
         # ReLU followed by LayerNorm. Embedding the observation first, or
         # dropping the activation, is a different function.
         z = jnp.broadcast_to(embedding[:, None, :], (*mate_obs.shape[:2], embedding.shape[-1]))
-        h = nn.LayerNorm()(nn.relu(nn.Dense(HIDDEN)(jnp.concatenate([mate_obs, z], axis=-1))))
+        h = nn.LayerNorm()(nn.relu(nn.Dense(self.hidden_dim)(jnp.concatenate([mate_obs, z], axis=-1))))
         return nn.Dense(self.action_dim)(h)
 
 
@@ -136,13 +144,15 @@ class TaoPolicy(nn.Module):
     """Stage 2: the shared backbone, cross-attending to the policy embedding."""
 
     action_dim: int
+    hidden_dim: int = DEFAULT_HIDDEN_DIM
     dropout: float = 0.1
 
     @nn.compact
     def __call__(self, rtg, obs, actions, *, timesteps, context, mask=None,
                  context_mask=None, train: bool = False):
-        logits, _ = ControlDecoder(
+        logits, _ = DecisionTransformer(
             action_dim=self.action_dim,
+            hidden_dim=self.hidden_dim,
             use_cross_attention=True,  # Appendix F: z^-1 enters as key/value.
             dropout=self.dropout,
         )(rtg, obs, actions, timesteps=timesteps, mask=mask, context=context,
