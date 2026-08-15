@@ -232,7 +232,7 @@ def embedding_loss(params, encoder, decoder, batch, *, alpha=1.0, lam=1.0, rngs=
     return total, {"loss": total, "generative": gen, "discriminative": dis}
 
 
-def tao_policy_loss(params, policy, encoder, batch, *, freeze_encoder: bool = False,
+def tao_policy_loss(params, policy, encoder, batch, *, freeze_encoder: bool = True,
                     rngs=None, train: bool = True):
     """Stage 2: predict the ego action, cross-attending to the policy embedding.
 
@@ -243,32 +243,37 @@ def tao_policy_loss(params, policy, encoder, batch, *, freeze_encoder: bool = Fa
     ``argmax`` of the one-hot label and calls ``CrossEntropyLoss``, which is
     softmax cross-entropy with integer labels.
 
-    **``freeze_encoder`` defaults to False, which is what the reference does, and
-    that contradicts the paper.** Stage 2 there constructs a *fresh* encoder and
-    steps ``encoder_optimizer`` alongside ``decoder_optimizer``
-    (``nn_trainer.py:89-96``), so the encoder is trained jointly on the action
-    loss and never initialised from stage 1. The paper and README both describe
-    stage 2 as training the ICD "based on the offline dataset **and the trained
-    OPE**", and ``offline_stage_2/config.py:59-61`` defines an
-    ``ENCODER_PARAM_PATH`` pointing at stage 1's checkpoint — which is read
-    nowhere. The load looks dropped from the release rather than deliberately
-    omitted, but the published numbers came from the code, so the code's
-    behaviour is the default here.
+    **The encoder is frozen.** ``freeze_encoder`` defaults to True, which follows
+    the paper and *not* the released code. Stage 2 there constructs a fresh
+    ``GPTEncoder`` (``offline_stage_2/train.py:98``), never loads stage 1's
+    weights, and steps ``encoder_optimizer`` alongside ``decoder_optimizer``
+    (``nn_trainer.py:89-96``); deployment then loads the encoder stage 2
+    produced. On that path stage 1 trains an encoder nothing ever reads.
 
-    Three configurations are therefore reachable, and which one a run used should
-    be recorded:
+    That cannot be what produced the paper, because **TAO w/o PEL is one of its
+    own baselines** (§4.1) — PEL is stage 1. If stage 2 discarded stage 1, TAO
+    and TAO w/o PEL would be the same model and the ablation would report the
+    same number. ``offline_stage_2/config.py:59-61`` defines an
+    ``ENCODER_PARAM_PATH`` pointing at stage 1's checkpoint which is read
+    nowhere, so the load appears to have been dropped from the release.
 
-    * fresh encoder, ``freeze_encoder=False`` — exactly what the reference runs;
-    * stage-1 encoder, ``freeze_encoder=False`` — the paper's staging with the
-      reference's optimisation, and the most defensible reading;
-    * stage-1 encoder, ``freeze_encoder=True`` — a frozen representation, which
-      is what :func:`~oaht_bench.offline.liam.liam_policy_loss` does.
+    Freezing rather than fine-tuning follows from what stage 1 is for. Its
+    generative term conditions on a *different trajectory of the same teammate*
+    and its discriminative term separates teammates by identity; together they
+    make the embedding carry policy identity rather than episode detail. Stage 3
+    then places an *unseen* teammate in that space. Continuing to train the
+    encoder on ego-action prediction would pull it toward whatever helps predict
+    this batch's actions, eroding the structure the method depends on — and the
+    w/o-PEL ablation only means anything if stage 1's product survives.
+
+    ``freeze_encoder=False`` reproduces the released code's behaviour, for
+    anyone wanting to check how much it matters.
 
     Args:
-        params: ``{"policy": ..., "encoder": ...}``. The encoder is in the
-            gradient tree either way; ``freeze_encoder`` stops the gradient at
-            its output rather than removing it, so the same call site works for
-            both and the choice stays visible.
+        params: ``{"policy": ..., "encoder": ...}``, the encoder's coming from
+            stage 1. It stays in the gradient tree either way; ``freeze_encoder``
+            stops the gradient at its output rather than removing the entry, so
+            one call site serves both and the choice stays visible.
     """
     tokens = encoder.apply(
         params["encoder"],

@@ -389,14 +389,14 @@ def _tao_setup(w):
     return rng, batch, enc, pol, {"policy": pp, "encoder": ep}
 
 
-def test_tao_stage_two_trains_the_encoder_by_default():
-    """The reference fine-tunes the encoder in stage 2; the paper implies frozen.
+def test_tao_stage_two_freezes_the_encoder_by_default():
+    """Stage 1's embedding must survive stage 2, or TAO w/o PEL is meaningless.
 
-    offline_stage_2/nn_trainer.py steps encoder_optimizer alongside
-    decoder_optimizer, and its train.py builds a fresh encoder rather than
-    loading stage 1's -- ENCODER_PARAM_PATH is defined in its config and read
-    nowhere. The published numbers came from that code, so joint training is the
-    default; freeze_encoder is available for the paper's reading.
+    TAO w/o PEL is one of the paper's own baselines, and PEL is stage 1. If
+    stage 2 retrained the encoder from scratch -- which the released code does,
+    never loading stage 1's weights -- the two would be the same model. Freezing
+    also protects what stage 1 builds: an embedding carrying policy identity,
+    which stage 3 relies on to place an unseen teammate.
     """
     import optax as _optax
 
@@ -405,17 +405,19 @@ def test_tao_stage_two_trains_the_encoder_by_default():
     w = _windows()
     rng, batch, enc, pol, params = _tao_setup(w)
 
+    default = jax.grad(tao_policy_loss, has_aux=True)(
+        params, pol, enc, batch, rngs={"dropout": rng}
+    )[0]
     joint = jax.grad(tao_policy_loss, has_aux=True)(
         params, pol, enc, batch, freeze_encoder=False, rngs={"dropout": rng}
     )[0]
-    frozen = jax.grad(tao_policy_loss, has_aux=True)(
-        params, pol, enc, batch, freeze_encoder=True, rngs={"dropout": rng}
-    )[0]
 
+    # default: no gradient reaches the encoder at all
+    assert float(_optax.global_norm(default["encoder"])) == 0.0
+    # opting out reproduces the released code's joint training
     assert float(_optax.global_norm(joint["encoder"])) > 0.0
-    assert float(_optax.global_norm(frozen["encoder"])) == 0.0
     # the policy is trained either way
-    assert float(_optax.global_norm(frozen["policy"])) > 0.0
+    assert float(_optax.global_norm(default["policy"])) > 0.0
 
 
 def test_tao_stage_two_loss_is_a_masked_mean_over_valid_steps():
