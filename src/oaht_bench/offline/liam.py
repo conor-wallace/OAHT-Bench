@@ -36,6 +36,19 @@ import optax
 from oaht_bench.offline.backbone import DEFAULT_HIDDEN_DIM, DecisionTransformer
 
 
+def _masked_accuracy(logits, labels, mask) -> jnp.ndarray:
+    """Top-1 accuracy over valid timesteps.
+
+    Reported alongside every cross-entropy term because a loss is not
+    interpretable across baselines or datasets — 0.69 nats means one thing with
+    two actions and another with six — while "fraction of actions predicted
+    correctly" is comparable and has an obvious floor at chance.
+    """
+    correct = (jnp.argmax(logits, axis=-1) == labels).astype(jnp.float32)
+    m = mask.astype(jnp.float32)
+    return (correct * m).sum() / jnp.maximum(m.sum(), 1.0)
+
+
 class LiamEncoder(nn.Module):
     """Ego-history encoder: the backbone, read at the ``o_t`` positions."""
 
@@ -142,8 +155,18 @@ def liam_reconstruction_loss(params, encoder, decoder, batch, *, rngs=None,
     )
     recon_act = (recon_act * mask).sum() / denom
 
+    # Teammate action-prediction accuracy: does the embedding actually let the
+    # decoder say what the teammate is doing? That is the auxiliary task's
+    # purpose, and the loss alone does not say whether it succeeded.
+    recon_acc = _masked_accuracy(mate_act_logits, batch["mate_actions"], mask)
+
     total = recon_obs + recon_act
-    return total, {"loss": total, "recon_obs": recon_obs, "recon_action": recon_act}
+    return total, {
+        "loss": total,
+        "recon_obs": recon_obs,
+        "recon_action": recon_act,
+        "recon_action_accuracy": recon_acc,
+    }
 
 
 def liam_policy_loss(params, policy, encoder, encoder_params, batch, *, rngs=None,
@@ -165,5 +188,6 @@ def liam_policy_loss(params, policy, encoder, encoder_params, batch, *, rngs=Non
     )
     mask = batch["mask"].astype(jnp.float32)
     bc = optax.softmax_cross_entropy_with_integer_labels(logits, batch["ego_actions"])
+    acc = _masked_accuracy(logits, batch["ego_actions"], mask)
     bc = (bc * mask).sum() / jnp.maximum(mask.sum(), 1.0)
-    return bc, {"loss": bc, "bc": bc}
+    return bc, {"loss": bc, "bc": bc, "action_accuracy": acc}

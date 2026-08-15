@@ -45,6 +45,19 @@ from oaht_bench.offline.backbone import (
 )
 
 
+def _masked_accuracy(logits, labels, mask) -> jnp.ndarray:
+    """Top-1 accuracy over valid timesteps.
+
+    Reported alongside every cross-entropy term because a loss is not
+    interpretable across baselines or datasets — 0.69 nats means one thing with
+    two actions and another with six — while "fraction of actions predicted
+    correctly" is comparable and has an obvious floor at chance.
+    """
+    correct = (jnp.argmax(logits, axis=-1) == labels).astype(jnp.float32)
+    m = mask.astype(jnp.float32)
+    return (correct * m).sum() / jnp.maximum(m.sum(), 1.0)
+
+
 class OpponentPolicyEncoder(nn.Module):
     """``M_θe``: the teammate's stream to a sequence of policy-embedding tokens.
 
@@ -232,8 +245,17 @@ def embedding_loss(params, encoder, decoder, batch, *, alpha=1.0, lam=1.0, rngs=
     # Discriminative: the same z_bar, contrasted by teammate label.
     dis = supervised_contrastive(z_bar, batch["teammate_id"])
 
+    # Whether the embedding carries enough about the teammate to predict what a
+    # *different* episode of that teammate did.
+    gen_acc = _masked_accuracy(logits, batch["cross_mate_actions"], cross_mask)
+
     total = alpha * gen + lam * dis
-    return total, {"loss": total, "generative": gen, "discriminative": dis}
+    return total, {
+        "loss": total,
+        "generative": gen,
+        "discriminative": dis,
+        "generative_accuracy": gen_acc,
+    }
 
 
 def tao_policy_loss(params, policy, encoder, batch, *, freeze_encoder: bool = True,
@@ -311,5 +333,6 @@ def tao_policy_loss(params, policy, encoder, batch, *, freeze_encoder: bool = Tr
     )
     mask = batch["mask"].astype(jnp.float32)
     bc = optax.softmax_cross_entropy_with_integer_labels(logits, batch["ego_actions"])
+    acc = _masked_accuracy(logits, batch["ego_actions"], mask)
     bc = (bc * mask).sum() / jnp.maximum(mask.sum(), 1.0)
-    return bc, {"loss": bc, "bc": bc}
+    return bc, {"loss": bc, "bc": bc, "action_accuracy": acc}

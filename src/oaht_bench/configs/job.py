@@ -245,6 +245,13 @@ class OfflineTrainingConfig(BaseConfig):
         "paper; the released code trains it jointly, which would make TAO and "
         "TAO-w/o-PEL the same model. See offline.tao.tao_policy_loss.",
     )
+    eval_episodes: int = Field(
+        default=20,
+        gt=0,
+        description="Episodes per teammate in the post-training rollout. Cost is "
+        "members x this, and it is the only metric that measures play rather "
+        "than action prediction.",
+    )
     log_every: int = Field(default=100, gt=0)
 
 

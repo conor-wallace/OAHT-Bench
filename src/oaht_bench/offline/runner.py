@@ -286,6 +286,23 @@ def run(job: TrainingJob) -> Path:
         with (run_dir / "params.pkl").open("wb") as fh:
             pickle.dump(jax.device_get(out), fh)
 
+        # Evaluation: the first number that says whether the policy plays, as
+        # opposed to predicting dataset actions. Non-fatal because parameters are
+        # already on disk -- a failure here costs a metric, not the run.
+        eval_scores, eval_skipped = None, None
+        if "population_run" not in batch.meta:
+            # Distinguish "no population to play against" from "evaluation
+            # crashed": both leave eval null, and only one is a bug.
+            eval_skipped = (
+                "dataset metadata has no population_run, so there is no teammate "
+                "population to roll out against"
+            )
+            log.warning("skipping evaluation: %s", eval_skipped)
+        else:
+            with nonfatal(f"{job.baseline} evaluation rollouts"):
+                eval_scores = _evaluate(job, batch, windows, stage1_params,
+                                        stage2_params, action_dim, logger)
+
         with nonfatal(f"{job.baseline} post-training summary"):
             (run_dir / "training_summary.json").write_text(
                 json.dumps(
@@ -297,6 +314,13 @@ def run(job: TrainingJob) -> Path:
                         "action_dim": action_dim,
                         "stage1_steps": cfg.stage1_steps,
                         "stage2_steps": cfg.stage2_steps,
+                        "eval_skipped": eval_skipped,
+                        "eval": None if eval_scores is None else {
+                            "mean_return": eval_scores.mean_return,
+                            "worst_teammate_return": eval_scores.worst_teammate_return,
+                            "per_teammate": eval_scores.per_teammate,
+                            "target_return": eval_scores.target_return,
+                        },
                     },
                     indent=2,
                 )
@@ -304,3 +328,92 @@ def run(job: TrainingJob) -> Path:
             )
 
     return run_dir
+
+
+def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params,
+              action_dim, logger):
+    """Roll the trained policy against the population its dataset came from.
+
+    Held-out teammates would be the stronger test (§8) and are not available
+    yet, so this measures in-distribution coordination: the population the data
+    was collected against. Recorded as such rather than presented as
+    generalisation.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    from oaht_bench.configs import load_job
+    from oaht_bench.envs import make_env
+    from oaht_bench.envs.log_wrapper import LogWrapper
+    from oaht_bench.offline import (
+        LiamEncoder,
+        LiamPolicy,
+        OpponentPolicyEncoder,
+        TaoPolicy,
+    )
+    from oaht_bench.offline.evaluate import dataset_target_return, evaluate
+    from oaht_bench.population import artifact_dir, population_from_run, released_members
+    from oaht_bench.common.save_load_utils import load_train_run
+
+    cfg = job.offline
+    pop_run = Path(batch.meta["population_run"])
+    run_dir = pop_run.parent.parent if pop_run.name == "saved_train_run" else pop_run
+    gen_job = load_job(run_dir / "job.json")
+    env = LogWrapper(make_env(job.env.env_name, job.env.env_kwargs()))
+    loaded = population_from_run(gen_job, load_train_run(str(artifact_dir(run_dir))), env)
+    members = released_members(gen_job, loaded.pop_size)
+
+    common = dict(hidden_dim=cfg.hidden_dim, dropout=cfg.dropout)
+    if job.baseline == "liam":
+        encoder = LiamEncoder(action_dim=action_dim, **common)
+        policy = LiamPolicy(action_dim=action_dim, **common)
+
+        def predict(rtg, obs, actions, timesteps, mask):
+            z = encoder.apply(stage1_params["encoder"], rtg, obs, actions,
+                              timesteps=timesteps, mask=mask, train=False)
+            return policy.apply(stage2_params, rtg, obs, actions, timesteps=timesteps,
+                                embedding=z, mask=mask, train=False)
+    else:
+        encoder = OpponentPolicyEncoder(
+            action_dim=action_dim, hidden_dim=cfg.hidden_dim, ff_dim=cfg.ff_dim,
+            num_blocks=cfg.num_blocks, dropout=cfg.dropout,
+        )
+        policy = TaoPolicy(action_dim=action_dim, **common)
+        # The Opponent Context Window: TAO conditions on trajectories of the
+        # teammate, which at deployment accumulate online. We seed it from the
+        # dataset, which is the C=all, offline case -- stage 3's online window is
+        # a separate piece.
+        ctx = encoder.apply(
+            stage2_params["encoder"],
+            jnp.asarray(windows.mate_next_obs), jnp.asarray(windows.mate_actions),
+            jnp.asarray(windows.mate_rewards), mask=jnp.asarray(windows.mask),
+            timesteps=jnp.asarray(windows.timesteps), train=False,
+        )[: cfg.context_trajectories].reshape(1, -1, cfg.hidden_dim)
+        ctx_mask = jnp.asarray(windows.mask)[: cfg.context_trajectories].reshape(1, -1)
+
+        def predict(rtg, obs, actions, timesteps, mask):
+            return policy.apply(stage2_params["policy"], rtg, obs, actions,
+                                timesteps=timesteps, context=ctx, mask=mask,
+                                context_mask=ctx_mask, train=False)
+
+    # jit the whole ego forward pass: the rollout calls it once per environment
+    # step, and Flax's apply overhead dominates otherwise.
+    predict = jax.jit(predict)
+
+    target = dataset_target_return(batch)
+    scores = evaluate(
+        predict, env, loaded, members,
+        rng=jax.random.PRNGKey(job.seed + 1),
+        context_length=cfg.context_length,
+        max_episode_steps=job.env.rollout_length,
+        target_return=target,
+        num_episodes=job.offline.eval_episodes,
+        obs_dim=windows.obs_dim,
+    )
+    for m, v in scores.per_teammate.items():
+        logger.log_item(f"Eval/Return_teammate_{m}", v)
+    logger.log_item("Eval/MeanReturn", scores.mean_return)
+    logger.log_item("Eval/WorstTeammateReturn", scores.worst_teammate_return)
+    logger.commit()
+    log.info("Evaluation:\n%s", scores.describe())
+    return scores
