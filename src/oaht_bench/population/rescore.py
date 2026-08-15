@@ -59,7 +59,7 @@ def population_from_run(job: TeammateGenerationJob, out: Any, env: Any):
     """
     from oaht_bench.teammate_gen.BRDiv import get_brdiv_population
     from oaht_bench.teammate_gen.CoMeDi import get_comedi_population
-    from oaht_bench.teammate_gen.fcp import get_fcp_population
+    from oaht_bench.population.loading import get_fcp_population
     from oaht_bench.teammate_gen.LBRDiv import get_lbrdiv_population
 
     builders = {
@@ -98,11 +98,8 @@ def rescore_run(
     from oaht_bench.common.save_load_utils import load_train_run
     from oaht_bench.envs import make_env
     from oaht_bench.envs.log_wrapper import LogWrapper
-    from oaht_bench.teammate_gen.crossplay import (
-        evaluate_population,
-        scored_members,
-        write_scores,
-    )
+    from oaht_bench.population.crossplay import evaluate_population, write_scores
+    from oaht_bench.population.members import released_members
 
     run_dir = Path(run_dir)
     job = load_job(run_dir / "job.json")
@@ -112,17 +109,17 @@ def rescore_run(
     # Absolute: load_train_run joins relative paths against the wrong root.
     out = load_train_run(str(artifact_dir(run_dir)))
     env = LogWrapper(make_env(job.env.env_name, job.env.env_kwargs()))
-    params, population = population_from_run(job, out, env)
+    loaded = population_from_run(job, out, env)
 
     scores = evaluate_population(
         env,
-        params,
-        population,
+        loaded.params,
+        loaded,
         rng=jax.random.PRNGKey(job.seed),
         max_episode_steps=job.env.rollout_length,
         num_episodes=job.evaluation_episodes if episodes is None else episodes,
-        partner_params=out.get("final_params_br"),
-        member_indices=scored_members(job),
+        partner_params=loaded.partner_params,
+        member_indices=released_members(job, loaded.pop_size),
         greedy=job.evaluation_greedy if greedy is None else greedy,
     )
     if write:

@@ -97,7 +97,7 @@ def _best_response_params(job: TeammateGenerationJob):
     would change a contract three of them do not need.
     """
     from oaht_bench.common.save_load_utils import load_train_run
-    from oaht_bench.teammate_gen.rescore import artifact_dir
+    from oaht_bench.population import artifact_dir
 
     # Absolute, and located rather than assumed: load_train_run resolves a
     # relative path against REPO_PATH, which points at src/oaht_bench and not
@@ -113,9 +113,9 @@ def _evaluate_population(
 
     from oaht_bench.envs import make_env
     from oaht_bench.envs.log_wrapper import LogWrapper
-    from oaht_bench.teammate_gen.crossplay import (
+    from oaht_bench.population import (
         evaluate_population,
-        scored_members,
+        released_members,
         write_scores,
     )
 
@@ -131,7 +131,7 @@ def _evaluate_population(
 
     # FCP's population spans competence by design, so it is scored on the
     # converged checkpoint of each run rather than on every member.
-    members = scored_members(job)
+    members = released_members(job, population.pop_size)
 
     scores = evaluate_population(
         env,

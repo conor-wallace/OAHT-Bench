@@ -28,8 +28,9 @@ from oaht_bench.common.run_episodes import run_episodes
 from oaht_bench.common.save_load_utils import save_train_run
 from oaht_bench.common.logging import RunLogger, log_update_metrics, nonfatal
 from oaht_bench.configs.job import TeammateGenerationJob
+from oaht_bench.population.loading import TrainOutput, get_lbrdiv_population
 from oaht_bench.envs.protocols import TrainingEnv
-from oaht_bench.teammate_gen.runtime import PairedDiversityRuntime, TrainOutput
+from oaht_bench.teammate_gen.runtime import PairedDiversityRuntime
 
 #: A trained paired population: stacked confederate parameters plus the policy
 #: class that reads them. Leading axes are ``(num_seeds, population_size)``.
@@ -983,32 +984,6 @@ def train_lbrdiv_partners(
     train_fn = make_lbrdiv_agents(config)
     out = train_fn(train_rng)
     return out
-
-def get_lbrdiv_population(
-    job: TeammateGenerationJob, out: TrainOutput, env: TrainingEnv
-) -> PairedPopulation:
-    '''
-    Get the partner params and partner population for ego training.
-    '''
-    pop_size = job.generator.population_size
-
-    # partner_params has shape (num_seeds, pop_size, ...)
-    partner_params = out['final_params_conf']
-
-    partner_policy = ActorWithConditionalCriticPolicy(
-        action_dim=env.action_space(env.agents[1]).n,
-        obs_dim=env.observation_space(env.agents[1]).shape[0],
-        pop_size=pop_size, # used to create onehot agent id
-        activation=job.generator.network.activation
-    )
-
-    # Create partner population
-    partner_population = AgentPopulation(
-        pop_size=pop_size,
-        policy_cls=partner_policy
-    )
-
-    return partner_params, partner_population
 
 def run_lbrdiv(job: TeammateGenerationJob, wandb_logger: RunLogger) -> PairedPopulation:
     """Train a L-BRDiv confederate/best-response population from a job config."""

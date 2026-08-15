@@ -13,5 +13,7 @@ class RLTeammateConfig(BaseConfig):
 
 
 class PopulationConfig(BaseConfig):
-    algo: str = Field(description="Teammate generation algorithm used for generating the population")
+    algo: str = Field(
+        description="Teammate generation algorithm used for generating the population"
+    )
     ckpt_path: str = Field(description="Path to the population orbax checkpoint directory")

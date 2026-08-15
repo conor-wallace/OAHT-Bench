@@ -22,13 +22,17 @@ import numpy as np
 def collect_episode(
     rng,
     env,
-    seat_params: Sequence[Any],
-    policy,
+    seats: Sequence[tuple[Any, Any]],
     *,
     max_episode_steps: int,
     greedy: bool = False,
 ) -> dict[str, np.ndarray]:
-    """Run one episode with ``seat_params[i]`` controlling ``env.agents[i]``.
+    """Run one episode with ``seats[i]`` controlling ``env.agents[i]``.
+
+    Each seat is its own ``(params, policy)`` pair rather than sharing one
+    policy, because BRDiv and L-BRDiv give the two seats different roles: a
+    confederate and its best response. It also leaves room for a heuristic
+    teammate opposite a learned one without changing this signature again.
 
     Returns arrays with a leading agent axis for per-agent quantities. Steps
     after termination are recorded but marked invalid, since the environment is
@@ -36,15 +40,18 @@ def collect_episode(
     """
     agents = list(env.agents)
     n = len(agents)
-    if len(seat_params) != n:
+    if len(seats) != n:
         raise ValueError(
-            f"{len(seat_params)} parameter sets for {n} seats ({agents}). Every "
-            f"seat needs an occupant."
+            f"{len(seats)} occupants for {n} seats ({agents}). Every seat needs one."
         )
+    seat_params = [p for p, _ in seats]
+    seat_policies = [pol for _, pol in seats]
 
     rng, reset_rng = jax.random.split(rng)
     obs, state = env.reset(reset_rng)
-    hstates = [policy.init_hstate(1, aux_info={"agent_id": i}) for i in range(n)]
+    hstates = [
+        seat_policies[i].init_hstate(1, aux_info={"agent_id": i}) for i in range(n)
+    ]
     done_flags = {k: jnp.zeros((1,), dtype=bool) for k in agents + ["__all__"]}
 
     rec: dict[str, list] = {k: [] for k in
@@ -59,7 +66,7 @@ def collect_episode(
             rng, act_rng = jax.random.split(rng)
             a_i = avail[name].astype(jnp.float32)
             o_i = obs[name]
-            act, hstates[i] = policy.get_action(
+            act, hstates[i] = seat_policies[i].get_action(
                 params=seat_params[i],
                 obs=o_i.reshape(1, 1, -1),
                 done=done_flags[name].reshape(1, 1),

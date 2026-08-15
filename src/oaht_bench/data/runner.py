@@ -3,7 +3,7 @@
 Seats a population member in every position and records full trajectories. The
 population is rebuilt with the generator's own builder rather than by reading
 the checkpoint directly, so "what a member is" has one definition shared with
-scoring (see :func:`oaht_bench.teammate_gen.rescore.population_from_run`).
+scoring (see :func:`oaht_bench.population.rescore.population_from_run`).
 """
 
 from __future__ import annotations
@@ -12,9 +12,18 @@ import json
 import logging
 from pathlib import Path
 
+import jax
 import numpy as np
+from tqdm import tqdm
 
+from oaht_bench.common.save_load_utils import load_train_run
+from oaht_bench.configs import load_job, save_job
 from oaht_bench.configs.job import DatasetCollectionJob
+from oaht_bench.data.collect import collect_episode, pad_and_stack
+from oaht_bench.data.schema import EpisodeBatch
+from oaht_bench.envs import make_env
+from oaht_bench.envs.log_wrapper import LogWrapper
+from oaht_bench.population import artifact_dir, get_member_params, population_from_run, released_members
 
 log = logging.getLogger(__name__)
 
@@ -26,31 +35,21 @@ def _load_population(job: DatasetCollectionJob, env):
     a population requires the generator-specific builder, because FCP flattens a
     checkpoint grid while the others take ``final_params_conf``.
     """
-    from oaht_bench.common.save_load_utils import load_train_run
-    from oaht_bench.configs import load_job
-    from oaht_bench.teammate_gen.rescore import artifact_dir, population_from_run
-
     pop_run = Path(job.population_path)
     # Accept either the run directory or the checkpoint directory inside it.
     run_dir = pop_run.parent.parent if pop_run.name == "saved_train_run" else pop_run
     gen_job = load_job(run_dir / "job.json")
 
     out = load_train_run(str(artifact_dir(run_dir)))
-    params, population = population_from_run(gen_job, out, env)
-    return params, population, gen_job
+    return population_from_run(gen_job, out, env), gen_job
 
 
+# comment: I imagine that at the dataset generation phase that we will already have ALL of the populations
+# comment: I think it makes sense to add option to the DatasetCollectionJob config that allows population_path to be a list of paths to [fcp, comedi, brdiv, and lbrdiv] populations
+# comment: To take this further, it also makes sense to combine members of one population with members of another to REALLY mix performance
+# comment: Anyway, this central run function should really be the entrypoint for dataset generation and should probably call different private runner functions depending on the dataset variant in the job config 
 def run(job: DatasetCollectionJob) -> Path:
     """Collect a dataset and return the run directory."""
-    import jax
-
-    from oaht_bench.data.collect import collect_episode, pad_and_stack
-    from oaht_bench.teammate_gen.crossplay import member_params, scored_members
-    from oaht_bench.data.schema import EpisodeBatch
-    from oaht_bench.envs import make_env
-    from oaht_bench.envs.log_wrapper import LogWrapper
-    from oaht_bench.configs import save_job
-
     run_dir = Path(job.run_dir())
     existing = run_dir / "dataset.npz"
     if existing.exists():
@@ -64,14 +63,13 @@ def run(job: DatasetCollectionJob) -> Path:
     save_job(job, run_dir / "job.json", minimal=False)
 
     env = LogWrapper(make_env(job.env.env_name, job.env.env_kwargs()))
-    params, population, gen_job = _load_population(job, env)
+    loaded, gen_job = _load_population(job, env)
     num_seats = len(env.agents)
 
     # Which members are eligible to be seated. FCP's population spans competence
     # by design, so the 'expert' variant must not draw from its early
     # checkpoints -- the same distinction scoring makes.
-    converged = scored_members(gen_job)
-    eligible = list(range(population.pop_size)) if converged is None else converged
+    eligible = released_members(gen_job, loaded.pop_size)
     if job.variant != "expert":
         # Other D4RL-style regimes (§4.3) draw from the wider ladder; not yet
         # implemented, so fail rather than silently collect 'expert' data.
@@ -84,15 +82,18 @@ def run(job: DatasetCollectionJob) -> Path:
 
     rng = jax.random.PRNGKey(job.seed)
     episodes, member_ids = [], []
-    for ep in range(job.num_episodes):
+    for ep in tqdm(range(job.num_episodes), desc="Geneating dataset"):
         rng, seat_rng, ep_rng = jax.random.split(rng, 3)
+        # comment: Should we be randomly sampling like this or should iterate over all combinations of teams?
+        # comment: We tune teammage generation algorithms such that matched seats are expert level cooperative and mismatched seats are minimally cooperative
         seats = np.asarray(
             jax.random.choice(seat_rng, np.asarray(eligible), shape=(num_seats,))
         )
-        seat_params = [member_params(params, int(m)) for m in seats]
         episodes.append(
             collect_episode(
-                ep_rng, env, seat_params, population.policy_cls,
+                ep_rng,
+                env,
+                loaded.seat([int(m) for m in seats]),
                 max_episode_steps=job.env.rollout_length,
                 greedy=False,  # sampled: matches training and deployment (see crossplay)
             )
@@ -111,6 +112,7 @@ def run(job: DatasetCollectionJob) -> Path:
             "env": job.env.name,
             "variant": job.variant,
             "generator": gen_job.generator.generator,
+            "paired_roles": loaded.paired,
             "population_run": str(job.population_path),
             "population_config_hash": gen_job.content_hash(),
             "eligible_members": [int(m) for m in eligible],

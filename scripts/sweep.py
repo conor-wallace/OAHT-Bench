@@ -414,7 +414,7 @@ def main() -> int:
         return run_batch(args.configs, jobs=args.jobs, dry_run=args.dry_run)
 
     if args.mode == "rescore":
-        from oaht_bench.teammate_gen.rescore import rescore_run
+        from oaht_bench.population import rescore_run
 
         print(f"{'run':64s} {'SP':>9s} {'XP':>9s} {'SP-XP':>9s}")
         failed = 0

@@ -31,8 +31,9 @@ from oaht_bench.envs.log_wrapper import LogWrapper, LogEnvState
 from oaht_bench.teammate_gen.marl.ippo import make_train as make_ppo_train
 from oaht_bench.common.logging import RunLogger, log_update_metrics, nonfatal
 from oaht_bench.configs.job import TeammateGenerationJob
+from oaht_bench.population.loading import TrainOutput, get_comedi_population
 from oaht_bench.envs.protocols import TrainingEnv
-from oaht_bench.teammate_gen.runtime import CoMeDiRuntime, TrainOutput
+from oaht_bench.teammate_gen.runtime import CoMeDiRuntime
 
 #: A trained CoMeDi population: stacked confederate parameters plus the policy
 #: class that reads them. Leading axes are ``(num_seeds, population_size)``.
@@ -1042,30 +1043,6 @@ def train_comedi_partners(
     train_fn = make_comedi_agents(config)
     out = train_fn(train_rng)
     return out
-
-def get_comedi_population(
-    job: TeammateGenerationJob, out: TrainOutput, env: TrainingEnv
-) -> CoMeDiPopulation:
-    '''Build the partner population from a completed CoMeDi run.'''
-    comedi_pop_size = job.generator.population_size
-
-    # partner_params has shape (num_seeds, comedi_pop_size, ...)
-    partner_params = out['final_params_conf']
-
-    partner_policy = ActorWithConditionalCriticPolicy(
-        action_dim=env.action_space(env.agents[1]).n,
-        obs_dim=env.observation_space(env.agents[1]).shape[0],
-        pop_size=comedi_pop_size, # used to create onehot agent id
-        activation=job.generator.network.activation,
-    )
-
-    # Create partner population
-    partner_population = AgentPopulation(
-        pop_size=comedi_pop_size,
-        policy_cls=partner_policy
-    )
-
-    return partner_params, partner_population
 
 def run_comedi(job: TeammateGenerationJob, wandb_logger: RunLogger) -> CoMeDiPopulation:
     '''Train a CoMeDi population from a validated job config.'''

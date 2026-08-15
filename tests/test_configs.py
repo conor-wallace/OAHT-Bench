@@ -1042,7 +1042,7 @@ def test_guard_watches_the_path_the_checkpoint_is_written_to(tmp_path):
     """
     import pathlib
 
-    from oaht_bench.teammate_gen.rescore import artifact_dir
+    from oaht_bench.population import artifact_dir
 
     job = _job(output_dir=str(tmp_path))
     run_dir = pathlib.Path(job.run_dir())
@@ -1120,7 +1120,7 @@ def test_sweep_manifest_records_cost_per_cell(tmp_path):
 def test_crossplay_separation_is_sp_minus_xp():
     import numpy as np
 
-    from oaht_bench.teammate_gen.crossplay import CrossPlayScores
+    from oaht_bench.population import CrossPlayScores
 
     s = CrossPlayScores(matrix=np.eye(3), self_play=0.6, cross_play=0.1)
     assert s.separation == pytest.approx(0.5)
@@ -1133,7 +1133,7 @@ def test_crossplay_single_member_has_no_cross_play():
     import jax
     import numpy as np
 
-    from oaht_bench.teammate_gen.crossplay import evaluate_population
+    from oaht_bench.population import evaluate_population
 
     class _Pop:
         pop_size = 1
@@ -1145,7 +1145,7 @@ def test_crossplay_single_member_has_no_cross_play():
         calls["n"] = calls.get("n", 0) + 1
         return {"returned_episode_returns": np.array([0.5])}
 
-    import oaht_bench.teammate_gen.crossplay as mod
+    import oaht_bench.population.crossplay as mod
 
     original, mod.run_episodes = mod.run_episodes, fake_run_episodes
     try:
@@ -1220,7 +1220,7 @@ def test_crossplay_uses_the_partner_population_when_given():
     import jax
     import numpy as np
 
-    import oaht_bench.teammate_gen.crossplay as mod
+    import oaht_bench.population.crossplay as mod
 
     rows = {"w": np.array([[[0.0], [1.0]]])}  # (seed, member, dim)
     cols = {"w": np.array([[[10.0], [11.0]]])}
@@ -1259,7 +1259,7 @@ def test_crossplay_self_pairs_when_no_partner_given():
     import jax
     import numpy as np
 
-    import oaht_bench.teammate_gen.crossplay as mod
+    import oaht_bench.population.crossplay as mod
 
     rows = {"w": np.array([[[0.0], [1.0]]])}
     seen = []
@@ -1298,19 +1298,24 @@ def test_fcp_scores_only_converged_checkpoints():
     C order, so the converged member of run r is at r*num_checkpoints + ckpts-1.
     """
     from oaht_bench.configs.teammate_gen import FcpConfig
-    from oaht_bench.teammate_gen.crossplay import scored_members
+    from oaht_bench.population import released_members
 
     job = _job(generator=FcpConfig(population_size=4, num_checkpoints=3))
-    assert scored_members(job) == [2, 5, 8, 11]
+    # pop_size is the loaded population's width, 4 runs x 3 checkpoints.
+    assert released_members(job, 12) == [2, 5, 8, 11]
 
 
 def test_other_generators_score_every_member():
-    """They release one member per convention already."""
+    """They release one member per convention already.
+
+    Returned as an explicit list rather than ``None``-means-all, so no caller has
+    to remember a sentinel.
+    """
     from oaht_bench.configs.teammate_gen import BrDivConfig, CoMeDiConfig, LBrDivConfig
-    from oaht_bench.teammate_gen.crossplay import scored_members
+    from oaht_bench.population import released_members
 
     for gen in (CoMeDiConfig(), BrDivConfig(), LBrDivConfig()):
-        assert scored_members(_job(generator=gen)) is None
+        assert released_members(_job(generator=gen), 5) == [0, 1, 2, 3, 4]
 
 
 def test_fcp_scoring_does_not_reward_dropping_checkpoints():
@@ -1323,10 +1328,10 @@ def test_fcp_scoring_does_not_reward_dropping_checkpoints():
     population_size alone.
     """
     from oaht_bench.configs.teammate_gen import FcpConfig
-    from oaht_bench.teammate_gen.crossplay import scored_members
+    from oaht_bench.population import released_members
 
-    few = scored_members(_job(generator=FcpConfig(population_size=5, num_checkpoints=2)))
-    many = scored_members(_job(generator=FcpConfig(population_size=5, num_checkpoints=8)))
+    few = released_members(_job(generator=FcpConfig(population_size=5, num_checkpoints=2)), 10)
+    many = released_members(_job(generator=FcpConfig(population_size=5, num_checkpoints=8)), 40)
     assert len(few) == len(many) == 5
 
 
@@ -1335,7 +1340,7 @@ def test_member_indices_selects_the_submatrix():
     import jax
     import numpy as np
 
-    import oaht_bench.teammate_gen.crossplay as mod
+    import oaht_bench.population.crossplay as mod
 
     params = {"w": np.array([[[0.0], [1.0], [2.0], [3.0]]])}
     seen = []
@@ -1492,3 +1497,51 @@ def test_paired_env_scaling_does_not_cost_gradient_steps():
     # updates ~ timesteps / envs, so the ratio must be preserved exactly
     assert scaled["total_timesteps"] / scaled["num_envs"] == base_ts / base_envs
     assert scaled["pop"] == mod.POPULATION_SIZE
+
+
+def test_paired_populations_seat_a_best_response_opposite_a_confederate():
+    """BRDiv/L-BRDiv seats have roles; filling both from confederates is OOD.
+
+    A confederate is never trained to play with another confederate. Before
+    LoadedPopulation carried both halves, population_from_run returned only
+    final_params_conf, so dataset collection seated conf-vs-conf and lost 25-40%
+    of the population's designed return on LBF.
+    """
+    from oaht_bench.population.loading import LoadedPopulation
+
+    conf = {"w": __import__("numpy").arange(12).reshape(1, 3, 4)}
+    br = {"w": __import__("numpy").arange(100, 112).reshape(1, 3, 4)}
+    policy = object()
+
+    paired = LoadedPopulation(
+        params=conf, policy_cls=policy, pop_size=3, generator="brdiv", partner_params=br
+    )
+    assert paired.paired
+    seats = paired.seat([0, 1])
+    # seat 0 from confederates, seat 1 from best responses
+    assert seats[0][0]["w"].tolist() == [0, 1, 2, 3]
+    assert seats[1][0]["w"].tolist() == [104, 105, 106, 107]
+
+    homogeneous = LoadedPopulation(params=conf, policy_cls=policy, pop_size=3, generator="fcp")
+    assert not homogeneous.paired
+    seats = homogeneous.seat([0, 1])
+    assert seats[0][0]["w"].tolist() == [0, 1, 2, 3]
+    assert seats[1][0]["w"].tolist() == [4, 5, 6, 7]
+
+
+def test_paired_population_refuses_a_third_seat():
+    """The paired generators assert num_agents == 2 during training too."""
+    import numpy as np
+    import pytest
+
+    from oaht_bench.population.loading import LoadedPopulation
+
+    paired = LoadedPopulation(
+        params={"w": np.zeros((1, 3, 2))},
+        policy_cls=object(),
+        pop_size=3,
+        generator="brdiv",
+        partner_params={"w": np.zeros((1, 3, 2))},
+    )
+    with pytest.raises(ValueError, match="no role for a third seat"):
+        paired.seat([0, 1, 2])

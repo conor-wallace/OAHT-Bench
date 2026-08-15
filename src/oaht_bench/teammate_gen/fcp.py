@@ -20,8 +20,9 @@ from oaht_bench.common.plot_utils import get_metric_names
 from oaht_bench.common.save_load_utils import save_train_run
 from oaht_bench.common.logging import RunLogger, nonfatal
 from oaht_bench.configs.job import TeammateGenerationJob
+from oaht_bench.population.loading import TrainOutput, get_fcp_population
 from oaht_bench.envs.protocols import TrainingEnv
-from oaht_bench.teammate_gen.runtime import PpoRuntime, TrainOutput
+from oaht_bench.teammate_gen.runtime import PpoRuntime
 
 #: A trained population: stacked parameters plus the policy class that reads them.
 #: Leading axes of the parameters are ``(num_seeds, population_size * num_checkpoints)``.
@@ -30,31 +31,6 @@ FcpPopulation = tuple[chex.ArrayTree, AgentPopulation]
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-
-def get_fcp_population(
-    job: TeammateGenerationJob, out: TrainOutput, env: TrainingEnv
-) -> FcpPopulation:
-    '''Flatten each seed's partner pool for downstream use.'''
-    gen = job.generator
-    num_seeds = gen.num_seeds
-    fcp_pop_size = gen.population_size * gen.num_checkpoints
-
-    partner_params = out['checkpoints'] # shape is (num_seeds, partner_pop_size, num_ckpts, ...)
-    flattened_partner_params = jax.tree.map(lambda x: x.reshape(num_seeds, fcp_pop_size, *x.shape[3:]), partner_params)
-
-    partner_policy = MLPActorCriticPolicy(
-        action_dim=env.action_space(env.agents[1]).n,
-        obs_dim=env.observation_space(env.agents[1]).shape[0],
-        activation=gen.network.activation,
-    )
-
-    # Create partner population
-    partner_population = AgentPopulation(
-        pop_size=fcp_pop_size,
-        policy_cls=partner_policy
-    )
-
-    return flattened_partner_params, partner_population
 
 def train_fcp_partners(
     rng: chex.PRNGKey,

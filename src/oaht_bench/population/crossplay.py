@@ -47,24 +47,7 @@ import jax
 import numpy as np
 
 from oaht_bench.common.run_episodes import run_episodes
-
-
-def member_params(params, index: int, *, seed_index: int = 0):
-    """Slice one member's parameters out of a stacked population tree.
-
-    Generators return parameters with leading axes ``(num_seeds, pop_size, ...)``
-    — see :func:`~oaht_bench.teammate_gen.rescore.population_from_run` for how
-    each one arrives at that shape. This is the one place that knows the layout,
-    so scoring and dataset collection cannot drift apart on what "member i"
-    means.
-
-    Args:
-        params: Stacked parameters for a whole population.
-        index: Flat member index. For FCP this is ``run * num_checkpoints +
-            checkpoint``; see :func:`scored_members`.
-        seed_index: Which training seed's population to read.
-    """
-    return jax.tree.map(lambda leaf: leaf[seed_index][index], params)
+from oaht_bench.population.members import get_member_params
 
 
 @dataclass(frozen=True)
@@ -120,7 +103,7 @@ def evaluate_population(
             accuracy/time trade-off.
         seed_index: Which training seed's population to evaluate.
         member_indices: Score only these members. FCP passes its *converged*
-            checkpoints here; see :func:`scored_members` for why. ``None`` scores
+            checkpoints here; see :func:`released_members` for why. ``None`` scores
             the whole population.
         greedy: Take argmax actions rather than sampling. Off by default, and it
             should stay off for anything reported. Argmax makes two members of a
@@ -141,7 +124,7 @@ def evaluate_population(
     pop_size = len(idx)
 
     def member(source, i: int):
-        return member_params(source, i, seed_index=seed_index)
+        return get_member_params(source, i, seed_index=seed_index)
 
     matrix = np.zeros((pop_size, pop_size), dtype=float)
     for a, i in enumerate(idx):
@@ -179,33 +162,3 @@ def write_scores(scores: CrossPlayScores, run_dir: Path) -> Path:
     return path
 
 
-def scored_members(job) -> list[int] | None:
-    """Which population members the SP/XP scores should be computed over.
-
-    FCP is the exception, and getting it wrong inverts the tuning signal. Its
-    population deliberately spans *competence*: ``ippo`` stores checkpoints at
-    ``num_updates // (num_checkpoints - 1)`` intervals from step 1 onward, so
-    members range from barely-trained to converged. Averaging self-play across
-    all of them penalises exactly what makes the method work — and the paper's
-    own ``FCP-T`` ablation, which keeps only converged checkpoints, is
-    *significantly worse* downstream. Ranking a sweep on that mean would push
-    ``num_checkpoints`` toward 1 and reproduce the ablation.
-
-    So FCP is scored on the converged checkpoint of each independent run: one
-    member per training seed, which is the "convention" that run arrived at. The
-    competence spread is retained in the population and is not a defect to
-    optimize away.
-
-    The other three release one member per convention already, so all of their
-    members are scored.
-
-    Returns:
-        Flat member indices, or ``None`` to score everything.
-    """
-    gen = job.generator
-    if gen.generator != "fcp":
-        return None
-    # get_fcp_population reshapes (seeds, runs, ckpts, ...) -> (seeds, runs*ckpts, ...)
-    # in C order, so flat index == run * num_checkpoints + checkpoint.
-    ckpts = gen.num_checkpoints
-    return [run * ckpts + (ckpts - 1) for run in range(gen.population_size)]
