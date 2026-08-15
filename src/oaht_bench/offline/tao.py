@@ -230,3 +230,72 @@ def embedding_loss(params, encoder, decoder, batch, *, alpha=1.0, lam=1.0, rngs=
 
     total = alpha * gen + lam * dis
     return total, {"loss": total, "generative": gen, "discriminative": dis}
+
+
+def tao_policy_loss(params, policy, encoder, batch, *, freeze_encoder: bool = False,
+                    rngs=None, train: bool = True):
+    """Stage 2: predict the ego action, cross-attending to the policy embedding.
+
+    Cross-entropy over valid timesteps only. The reference flattens and indexes
+    by the mask before calling ``CrossEntropyLoss``, whose default reduction is a
+    mean, so this is a masked mean rather than a masked sum
+    (``offline_stage_2/nn_trainer.py:83-87``). Its ``CrossEntropy`` helper takes
+    ``argmax`` of the one-hot label and calls ``CrossEntropyLoss``, which is
+    softmax cross-entropy with integer labels.
+
+    **``freeze_encoder`` defaults to False, which is what the reference does, and
+    that contradicts the paper.** Stage 2 there constructs a *fresh* encoder and
+    steps ``encoder_optimizer`` alongside ``decoder_optimizer``
+    (``nn_trainer.py:89-96``), so the encoder is trained jointly on the action
+    loss and never initialised from stage 1. The paper and README both describe
+    stage 2 as training the ICD "based on the offline dataset **and the trained
+    OPE**", and ``offline_stage_2/config.py:59-61`` defines an
+    ``ENCODER_PARAM_PATH`` pointing at stage 1's checkpoint — which is read
+    nowhere. The load looks dropped from the release rather than deliberately
+    omitted, but the published numbers came from the code, so the code's
+    behaviour is the default here.
+
+    Three configurations are therefore reachable, and which one a run used should
+    be recorded:
+
+    * fresh encoder, ``freeze_encoder=False`` — exactly what the reference runs;
+    * stage-1 encoder, ``freeze_encoder=False`` — the paper's staging with the
+      reference's optimisation, and the most defensible reading;
+    * stage-1 encoder, ``freeze_encoder=True`` — a frozen representation, which
+      is what :func:`~oaht_bench.offline.liam.liam_policy_loss` does.
+
+    Args:
+        params: ``{"policy": ..., "encoder": ...}``. The encoder is in the
+            gradient tree either way; ``freeze_encoder`` stops the gradient at
+            its output rather than removing it, so the same call site works for
+            both and the choice stays visible.
+    """
+    tokens = encoder.apply(
+        params["encoder"],
+        batch["mate_next_obs"],
+        batch["mate_actions"],
+        batch["mate_rewards"],
+        mask=batch["mask"],
+        timesteps=batch["timesteps"],
+        train=train and not freeze_encoder,
+        rngs=rngs,
+    )
+    if freeze_encoder:
+        tokens = jax.lax.stop_gradient(tokens)
+
+    logits = policy.apply(
+        params["policy"],
+        batch["ego_rtg"],
+        batch["ego_obs"],
+        batch["ego_actions"],
+        timesteps=batch["timesteps"],
+        context=tokens,
+        mask=batch["mask"],
+        context_mask=batch["mask"],
+        train=train,
+        rngs=rngs,
+    )
+    mask = batch["mask"].astype(jnp.float32)
+    bc = optax.softmax_cross_entropy_with_integer_labels(logits, batch["ego_actions"])
+    bc = (bc * mask).sum() / jnp.maximum(mask.sum(), 1.0)
+    return bc, {"loss": bc, "bc": bc}

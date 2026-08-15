@@ -10,6 +10,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import optax
 import pytest
 
 from oaht_bench.offline import (
@@ -336,3 +337,116 @@ def test_encoder_consumes_next_observations():
         real = np.flatnonzero(w.mask[i])
         for t in real[:-1]:
             assert np.allclose(w.mate_next_obs[i, t], w.mate_obs[i, t + 1])
+
+
+def _tao_setup(w):
+    import jax as _jax
+
+    rng = _jax.random.PRNGKey(0)
+    batch = {
+        k: jnp.asarray(getattr(w, k))
+        for k in (
+            "ego_obs",
+            "ego_actions",
+            "ego_rtg",
+            "mate_obs",
+            "mate_next_obs",
+            "mate_actions",
+            "mate_rewards",
+            "timesteps",
+            "mask",
+            "teammate_id",
+        )
+    }
+    enc = OpponentPolicyEncoder(action_dim=6)
+    ep = enc.init(
+        rng,
+        batch["mate_next_obs"],
+        batch["mate_actions"],
+        batch["mate_rewards"],
+        mask=batch["mask"],
+        timesteps=batch["timesteps"],
+    )
+    tok = enc.apply(
+        ep,
+        batch["mate_next_obs"],
+        batch["mate_actions"],
+        batch["mate_rewards"],
+        mask=batch["mask"],
+        timesteps=batch["timesteps"],
+    )
+    pol = TaoPolicy(action_dim=6)
+    pp = pol.init(
+        rng,
+        batch["ego_rtg"],
+        batch["ego_obs"],
+        batch["ego_actions"],
+        timesteps=batch["timesteps"],
+        context=tok,
+        mask=batch["mask"],
+        context_mask=batch["mask"],
+    )
+    return rng, batch, enc, pol, {"policy": pp, "encoder": ep}
+
+
+def test_tao_stage_two_trains_the_encoder_by_default():
+    """The reference fine-tunes the encoder in stage 2; the paper implies frozen.
+
+    offline_stage_2/nn_trainer.py steps encoder_optimizer alongside
+    decoder_optimizer, and its train.py builds a fresh encoder rather than
+    loading stage 1's -- ENCODER_PARAM_PATH is defined in its config and read
+    nowhere. The published numbers came from that code, so joint training is the
+    default; freeze_encoder is available for the paper's reading.
+    """
+    import optax as _optax
+
+    from oaht_bench.offline import tao_policy_loss
+
+    w = _windows()
+    rng, batch, enc, pol, params = _tao_setup(w)
+
+    joint = jax.grad(tao_policy_loss, has_aux=True)(
+        params, pol, enc, batch, freeze_encoder=False, rngs={"dropout": rng}
+    )[0]
+    frozen = jax.grad(tao_policy_loss, has_aux=True)(
+        params, pol, enc, batch, freeze_encoder=True, rngs={"dropout": rng}
+    )[0]
+
+    assert float(_optax.global_norm(joint["encoder"])) > 0.0
+    assert float(_optax.global_norm(frozen["encoder"])) == 0.0
+    # the policy is trained either way
+    assert float(_optax.global_norm(frozen["policy"])) > 0.0
+
+
+def test_tao_stage_two_loss_is_a_masked_mean_over_valid_steps():
+    """The reference indexes by the mask then calls CrossEntropyLoss.
+
+    Its default reduction is a mean, so padding must not enter the denominator.
+    """
+    from oaht_bench.offline import tao_policy_loss
+
+    w = _windows()
+    rng, batch, enc, pol, params = _tao_setup(w)
+    _, aux = tao_policy_loss(params, pol, enc, batch, rngs={"dropout": rng}, train=False)
+
+    tok = enc.apply(
+        params["encoder"],
+        batch["mate_next_obs"],
+        batch["mate_actions"],
+        batch["mate_rewards"],
+        mask=batch["mask"],
+        timesteps=batch["timesteps"],
+    )
+    logits = pol.apply(
+        params["policy"],
+        batch["ego_rtg"],
+        batch["ego_obs"],
+        batch["ego_actions"],
+        timesteps=batch["timesteps"],
+        context=tok,
+        mask=batch["mask"],
+        context_mask=batch["mask"],
+    )
+    m = np.asarray(batch["mask"])
+    ce = np.asarray(optax.softmax_cross_entropy_with_integer_labels(logits, batch["ego_actions"]))
+    assert float(aux["bc"]) == pytest.approx(ce[m].mean(), rel=1e-4)

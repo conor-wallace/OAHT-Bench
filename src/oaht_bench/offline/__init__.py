@@ -39,6 +39,7 @@ from oaht_bench.offline.tao import (
     TaoPolicy,
     embedding_loss,
     supervised_contrastive,
+    tao_policy_loss,
 )
 
 __all__ = [
@@ -52,6 +53,7 @@ __all__ = [
     "Windows",
     "embedding_loss",
     "supervised_contrastive",
+    "tao_policy_loss",
     "liam_policy_loss",
     "liam_reconstruction_loss",
     "make_windows",
