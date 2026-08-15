@@ -201,32 +201,36 @@ def embedding_loss(params, encoder, decoder, batch, *, alpha=1.0, lam=1.0, rngs=
                    train: bool = True):
     """Stage 1: ``L_emb = α·L_gen + λ·L_dis`` (Eq. 4).
 
-    ``batch`` must supply a *second* trajectory of the same teammate under the
-    ``cross_*`` keys — the generative term conditions on an embedding from a
-    different episode of the same policy, which is what stops the embedding from
-    memorising episode specifics.
+    One encoder pass, on the *anchor* trajectory. The pooled embedding ``z̄`` is
+    then used for both terms: the generative decoder predicts a **different**
+    trajectory's actions from that different trajectory's observations while
+    conditioned on ``z̄``, and the discriminative term contrasts ``z̄`` against
+    other anchors by teammate label (``offline_stage_1/nn_trainer.py:100-133``).
+
+    The direction matters. An earlier version encoded the cross trajectory and
+    decoded the anchor, which is a different task and cost a second encoder pass;
+    the reference conditions on the anchor and is scored on the *other* episode,
+    which is what forces the embedding to describe the policy rather than the
+    episode it was computed from.
     """
     enc_params, dec_params = params["encoder"], params["decoder"]
     tokens = encoder.apply(
-        enc_params, batch["cross_mate_next_obs"], batch["cross_mate_actions"],
-        batch["cross_mate_rewards"], mask=batch["cross_mask"],
-        timesteps=batch["cross_timesteps"], train=train, rngs=rngs,
+        enc_params, batch["mate_next_obs"], batch["mate_actions"], batch["mate_rewards"],
+        mask=batch["mask"], timesteps=batch["timesteps"], train=train, rngs=rngs,
     )
     # Unmasked mean, as the reference pools (see OpponentPolicyEncoder.pool).
     z_bar = OpponentPolicyEncoder.pool(tokens)
 
-    logits = decoder.apply(dec_params, batch["mate_obs"], z_bar)
-    mask = batch["mask"].astype(jnp.float32)
-    gen = optax.softmax_cross_entropy_with_integer_labels(logits, batch["mate_actions"])
-    gen = (gen * mask).sum() / jnp.maximum(mask.sum(), 1.0)
+    # Generative: a different trajectory of the same teammate, scored under z_bar.
+    logits = decoder.apply(dec_params, batch["cross_mate_obs"], z_bar)
+    cross_mask = batch["cross_mask"].astype(jnp.float32)
+    gen = optax.softmax_cross_entropy_with_integer_labels(
+        logits, batch["cross_mate_actions"]
+    )
+    gen = (gen * cross_mask).sum() / jnp.maximum(cross_mask.sum(), 1.0)
 
-    own_tokens = encoder.apply(
-        enc_params, batch["mate_next_obs"], batch["mate_actions"], batch["mate_rewards"],
-        mask=batch["mask"], timesteps=batch["timesteps"], train=train, rngs=rngs,
-    )
-    dis = supervised_contrastive(
-        OpponentPolicyEncoder.pool(own_tokens), batch["teammate_id"]
-    )
+    # Discriminative: the same z_bar, contrasted by teammate label.
+    dis = supervised_contrastive(z_bar, batch["teammate_id"])
 
     total = alpha * gen + lam * dis
     return total, {"loss": total, "generative": gen, "discriminative": dis}
@@ -275,13 +279,18 @@ def tao_policy_loss(params, policy, encoder, batch, *, freeze_encoder: bool = Tr
             stops the gradient at its output rather than removing the entry, so
             one call site serves both and the choice stays visible.
     """
+    # GetOffD: C fragments of the same teammate, concatenated, sampled
+    # independently of the decoder window (see oaht_bench.offline.sampler). The
+    # context is therefore C*T long while the decoder window is T -- which is
+    # fine, because it enters as cross-attention keys rather than being
+    # concatenated to anything.
     tokens = encoder.apply(
         params["encoder"],
-        batch["mate_next_obs"],
-        batch["mate_actions"],
-        batch["mate_rewards"],
-        mask=batch["mask"],
-        timesteps=batch["timesteps"],
+        batch["context_mate_next_obs"],
+        batch["context_mate_actions"],
+        batch["context_mate_rewards"],
+        mask=batch["context_mask"],
+        timesteps=batch["context_timesteps"],
         train=train and not freeze_encoder,
         rngs=rngs,
     )
@@ -296,7 +305,7 @@ def tao_policy_loss(params, policy, encoder, batch, *, freeze_encoder: bool = Tr
         timesteps=batch["timesteps"],
         context=tokens,
         mask=batch["mask"],
-        context_mask=batch["mask"],
+        context_mask=batch["context_mask"],
         train=train,
         rngs=rngs,
     )

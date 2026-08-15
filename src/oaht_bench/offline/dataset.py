@@ -50,6 +50,11 @@ class Windows:
     timesteps: np.ndarray
     #: (N, T) — False where the window ran past the end of its episode.
     mask: np.ndarray
+    #: (N,) — which episode the fragment came from. TAO's generative term
+    #: conditions on a *different trajectory* of the same teammate, which is an
+    #: episode-level notion: two overlapping windows of one episode are not two
+    #: trajectories.
+    episode_id: np.ndarray
     #: (N,) — which population member was the teammate. TAO's InfoNCE positives
     #: are defined by this label; it is the field §4.2 anticipated.
     teammate_id: np.ndarray
@@ -111,7 +116,7 @@ def make_windows(
     T = context_length
     ego_o, ego_a, ego_g = [], [], []
     mate_o, mate_no, mate_a, mate_r = [], [], [], []
-    steps, masks, ids = [], [], []
+    steps, masks, ids, eps = [], [], [], []
     # Teammate observations shifted one step; the final step repeats, which the
     # mask covers since a window never ends on a step the episode did not take.
     next_obs = np.concatenate(
@@ -152,6 +157,7 @@ def make_windows(
             m[T - n :] = True
             masks.append(m)
             ids.append(batch.member_ids[ep, teammate_index])
+            eps.append(ep)
 
     return Windows(
         ego_obs=np.stack(ego_o).astype(np.float32),
@@ -163,5 +169,6 @@ def make_windows(
         mate_rewards=np.stack(mate_r).astype(np.float32),
         timesteps=np.stack(steps).astype(np.int32),
         mask=np.stack(masks),
+        episode_id=np.asarray(eps, dtype=np.int32),
         teammate_id=np.asarray(ids, dtype=np.int32),
     )

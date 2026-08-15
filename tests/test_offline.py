@@ -340,40 +340,37 @@ def test_encoder_consumes_next_observations():
 
 
 def _tao_setup(w):
+    """A stage-2 batch built the way training builds it, through the sampler.
+
+    The encoder context is GetOffD -- C fragments of the same teammate,
+    concatenated -- so it is longer than the decoder window and cannot be faked
+    by reusing the window's own teammate stream.
+    """
     import jax as _jax
 
+    from oaht_bench.offline import TeammateIndex, sample_stage2
+
     rng = _jax.random.PRNGKey(0)
-    batch = {
-        k: jnp.asarray(getattr(w, k))
-        for k in (
-            "ego_obs",
-            "ego_actions",
-            "ego_rtg",
-            "mate_obs",
-            "mate_next_obs",
-            "mate_actions",
-            "mate_rewards",
-            "timesteps",
-            "mask",
-            "teammate_id",
-        )
-    }
+    idx = TeammateIndex.build(w)
+    raw = sample_stage2(w, idx, np.random.default_rng(0), batch_size=6, context_trajectories=3)
+    batch = {k: jnp.asarray(v) for k, v in raw.items()}
+
     enc = OpponentPolicyEncoder(action_dim=6)
     ep = enc.init(
         rng,
-        batch["mate_next_obs"],
-        batch["mate_actions"],
-        batch["mate_rewards"],
-        mask=batch["mask"],
-        timesteps=batch["timesteps"],
+        batch["context_mate_next_obs"],
+        batch["context_mate_actions"],
+        batch["context_mate_rewards"],
+        mask=batch["context_mask"],
+        timesteps=batch["context_timesteps"],
     )
     tok = enc.apply(
         ep,
-        batch["mate_next_obs"],
-        batch["mate_actions"],
-        batch["mate_rewards"],
-        mask=batch["mask"],
-        timesteps=batch["timesteps"],
+        batch["context_mate_next_obs"],
+        batch["context_mate_actions"],
+        batch["context_mate_rewards"],
+        mask=batch["context_mask"],
+        timesteps=batch["context_timesteps"],
     )
     pol = TaoPolicy(action_dim=6)
     pp = pol.init(
@@ -384,7 +381,7 @@ def _tao_setup(w):
         timesteps=batch["timesteps"],
         context=tok,
         mask=batch["mask"],
-        context_mask=batch["mask"],
+        context_mask=batch["context_mask"],
     )
     return rng, batch, enc, pol, {"policy": pp, "encoder": ep}
 
@@ -433,11 +430,11 @@ def test_tao_stage_two_loss_is_a_masked_mean_over_valid_steps():
 
     tok = enc.apply(
         params["encoder"],
-        batch["mate_next_obs"],
-        batch["mate_actions"],
-        batch["mate_rewards"],
-        mask=batch["mask"],
-        timesteps=batch["timesteps"],
+        batch["context_mate_next_obs"],
+        batch["context_mate_actions"],
+        batch["context_mate_rewards"],
+        mask=batch["context_mask"],
+        timesteps=batch["context_timesteps"],
     )
     logits = pol.apply(
         params["policy"],
@@ -447,7 +444,7 @@ def test_tao_stage_two_loss_is_a_masked_mean_over_valid_steps():
         timesteps=batch["timesteps"],
         context=tok,
         mask=batch["mask"],
-        context_mask=batch["mask"],
+        context_mask=batch["context_mask"],
     )
     m = np.asarray(batch["mask"])
     ce = np.asarray(optax.softmax_cross_entropy_with_integer_labels(logits, batch["ego_actions"]))

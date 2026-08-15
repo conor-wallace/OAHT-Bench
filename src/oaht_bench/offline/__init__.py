@@ -26,6 +26,7 @@ CoMeDi have no best response and would need one trained.
 
 from oaht_bench.offline.backbone import DecisionTransformer
 from oaht_bench.offline.dataset import Windows, make_windows, return_to_go
+from oaht_bench.offline.sampler import TeammateIndex, sample_stage1, sample_stage2
 from oaht_bench.offline.liam import (
     LiamDecoder,
     LiamEncoder,
@@ -50,7 +51,10 @@ __all__ = [
     "LiamPolicy",
     "OpponentPolicyEncoder",
     "TaoPolicy",
+    "TeammateIndex",
     "Windows",
+    "sample_stage1",
+    "sample_stage2",
     "embedding_loss",
     "supervised_contrastive",
     "tao_policy_loss",
