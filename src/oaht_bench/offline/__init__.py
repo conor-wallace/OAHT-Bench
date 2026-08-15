@@ -26,7 +26,7 @@ from oaht_bench.offline.tao import (
     OpponentPolicyEncoder,
     TaoPolicy,
     embedding_loss,
-    info_nce,
+    supervised_contrastive,
 )
 
 __all__ = [
@@ -37,7 +37,7 @@ __all__ = [
     "TaoPolicy",
     "Windows",
     "embedding_loss",
-    "info_nce",
+    "supervised_contrastive",
     "liam_loss",
     "make_windows",
     "return_to_go",

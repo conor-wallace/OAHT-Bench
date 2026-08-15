@@ -35,12 +35,12 @@ class LiamOffline(nn.Module):
     dropout: float = 0.1
 
     @nn.compact
-    def __call__(self, rtg, obs, actions, *, timesteps, train: bool = False):
+    def __call__(self, rtg, obs, actions, *, timesteps, mask=None, train: bool = False):
         logits, obs_hidden = ControlDecoder(
             action_dim=self.action_dim,
             use_cross_attention=False,  # Appendix F: ICD minus cross-attention.
             dropout=self.dropout,
-        )(rtg, obs, actions, timesteps=timesteps, train=train)
+        )(rtg, obs, actions, timesteps=timesteps, mask=mask, train=train)
 
         # Extra decoder: 2 linear layers, 32 nodes, no activation. One head per
         # reconstruction target, both read from the o_t embeddings.
@@ -76,6 +76,7 @@ def liam_loss(
         batch["ego_obs"],
         batch["ego_actions"],
         timesteps=batch["timesteps"],
+        mask=batch["mask"],
         train=train,
         rngs=rngs,
     )
@@ -92,7 +93,9 @@ def liam_loss(
     prev_mate_actions = jnp.concatenate(
         [batch["mate_actions"][:, :1], batch["mate_actions"][:, :-1]], axis=1
     )
-    shift_mask = mask.at[:, 0].set(0.0)
+    # Sequences are left-padded, so "the first step" is not index 0. A t-1
+    # target is valid only where step t-1 is itself real.
+    shift_mask = mask * jnp.concatenate([jnp.zeros_like(mask[:, :1]), mask[:, :-1]], axis=1)
     act_ce = optax.softmax_cross_entropy_with_integer_labels(
         mate_act_logits, prev_mate_actions
     )

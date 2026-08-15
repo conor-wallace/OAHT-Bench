@@ -34,9 +34,14 @@ class Windows:
     ego_actions: np.ndarray
     #: (N, T) — return-to-go for the learner, the DT conditioning signal.
     ego_rtg: np.ndarray
-    #: (N, T, obs_dim) — teammate observations, LIAM's reconstruction target
-    #: and part of TAO's encoder input.
+    #: (N, T, obs_dim) — teammate observations, LIAM's reconstruction target and
+    #: the ancillary decoder's input.
     mate_obs: np.ndarray
+    #: (N, T, obs_dim) — teammate observations shifted one step forward. TAO's
+    #: encoder fuses ``(a_t, r_t, o_{t+1})``: the reference realises the paper's
+    #: ``(a_{t-1}, r_{t-1}, o_t)`` by feeding next-observations at the same index
+    #: rather than shifting the action and reward streams.
+    mate_next_obs: np.ndarray
     #: (N, T) — teammate actions.
     mate_actions: np.ndarray
     #: (N, T) — teammate rewards, fused into TAO's encoder tokens.
@@ -105,8 +110,13 @@ def make_windows(
     rtg = return_to_go(batch.rewards[:, ego], batch.valid)
     T = context_length
     ego_o, ego_a, ego_g = [], [], []
-    mate_o, mate_a, mate_r = [], [], []
+    mate_o, mate_no, mate_a, mate_r = [], [], [], []
     steps, masks, ids = [], [], []
+    # Teammate observations shifted one step; the final step repeats, which the
+    # mask covers since a window never ends on a step the episode did not take.
+    next_obs = np.concatenate(
+        [batch.obs[:, teammate_index, 1:], batch.obs[:, teammate_index, -1:]], axis=1
+    )
 
     for ep in range(batch.num_episodes):
         length = int(batch.valid[ep].sum())
@@ -118,20 +128,28 @@ def make_windows(
             if n <= 0:
                 continue
 
-            def pad(arr, width=T):
-                out = np.zeros((width, *arr.shape[1:]), dtype=arr.dtype)
-                out[: arr.shape[0]] = arr
-                return out
+            def pad(arr, width=T, fill=0):
+                """Left-pad, the Decision Transformer convention the reference
+                inherits: the most recent timestep is always last, so a short
+                window and a full one agree on where "now" is."""
+                if arr.shape[0] == width:
+                    return arr
+                head = np.full((width - arr.shape[0], *arr.shape[1:]), fill, dtype=arr.dtype)
+                return np.concatenate([head, arr], axis=0)
 
             ego_o.append(pad(batch.obs[ep, ego][sl][:n]))
-            ego_a.append(pad(batch.actions[ep, ego][sl][:n]))
+            # Reference pads actions with -10, an out-of-range sentinel, so the
+            # embedding of a padded action cannot be confused with action 0.
+            ego_a.append(pad(batch.actions[ep, ego][sl][:n], fill=-10))
             ego_g.append(pad(rtg[ep][sl][:n]))
             mate_o.append(pad(batch.obs[ep, teammate_index][sl][:n]))
-            mate_a.append(pad(batch.actions[ep, teammate_index][sl][:n]))
+            mate_no.append(pad(next_obs[ep][sl][:n]))
+            mate_a.append(pad(batch.actions[ep, teammate_index][sl][:n], fill=-10))
             mate_r.append(pad(batch.rewards[ep, teammate_index][sl][:n]))
-            steps.append(pad(np.arange(start, start + n)))
+            # 1-indexed, 0 reserved for padding (reference utils.py:115-118).
+            steps.append(pad(np.arange(start + 1, start + n + 1)))
             m = np.zeros(T, dtype=bool)
-            m[:n] = True
+            m[T - n :] = True
             masks.append(m)
             ids.append(batch.member_ids[ep, teammate_index])
 
@@ -140,6 +158,7 @@ def make_windows(
         ego_actions=np.stack(ego_a).astype(np.int32),
         ego_rtg=np.stack(ego_g).astype(np.float32),
         mate_obs=np.stack(mate_o).astype(np.float32),
+        mate_next_obs=np.stack(mate_no).astype(np.float32),
         mate_actions=np.stack(mate_a).astype(np.int32),
         mate_rewards=np.stack(mate_r).astype(np.float32),
         timesteps=np.stack(steps).astype(np.int32),

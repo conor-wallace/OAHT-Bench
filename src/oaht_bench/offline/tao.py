@@ -51,16 +51,36 @@ class OpponentPolicyEncoder(nn.Module):
     action_dim: int
     dropout: float = 0.1
 
+    max_timesteps: int = 4096
+
     @nn.compact
-    def __call__(self, mate_obs, mate_actions, mate_rewards, *, mask, train: bool = False):
+    def __call__(self, mate_next_obs, mate_actions, mate_rewards, *, mask, timesteps,
+                 train: bool = False):
+        """``mate_next_obs`` is deliberate.
+
+        The reference feeds ``traj['next_observations']`` alongside ``actions``
+        and ``rewards`` at the *same* index (``offline_stage_1/utils.py:109-111``),
+        which is how the paper's ``(a_{t-1}, r_{t-1}, o_t)`` fusion is realised —
+        by choosing next-observations, not by shifting the action and reward
+        streams. An index shift gets the same pairing but labels each token with
+        a different timestep, and the timestep embedding below is not symmetric.
+        """
         # Modality-specific linear layers with ELU, 32 nodes (Appendix F).
         a = nn.elu(nn.Dense(HIDDEN)(jax.nn.one_hot(mate_actions, self.action_dim)))
         r = nn.elu(nn.Dense(HIDDEN)(mate_rewards[..., None]))
-        o = nn.elu(nn.Dense(HIDDEN)(mate_obs))
+        o = nn.elu(nn.Dense(HIDDEN)(mate_next_obs))
 
-        # (a_{t-1}, r_{t-1}, o_t) -> one fused token per timestep.
-        prev = lambda x: jnp.concatenate([jnp.zeros_like(x[:, :1]), x[:, :-1]], axis=1)  # noqa: E731
-        fused = nn.Dense(HIDDEN)(jnp.concatenate([prev(a), prev(r), o], axis=-1))
+        # Reference net.py:48-55 -- obs and reward take the timestep embedding at
+        # t, the action takes t-1, clamped at 0. The paper mentions no positional
+        # encoding in the encoder at all.
+        embed_t = nn.Embed(self.max_timesteps, HIDDEN)
+        pos = embed_t(timesteps)
+        pos_m1 = embed_t(jnp.where(timesteps > 0, timesteps - 1, timesteps))
+        a, r, o = a + pos_m1, r + pos, o + pos
+
+        # LayerNorm over the concatenated 3*hidden vector, then fuse to one token
+        # per timestep (reference `embed_ln` is LayerNorm(3 * hidden_size)).
+        fused = nn.Dense(HIDDEN)(nn.LayerNorm()(jnp.concatenate([a, r, o], axis=-1)))
 
         # Encoder blocks: no causal mask -- the whole teammate trajectory is
         # available when building a policy embedding.
@@ -77,8 +97,17 @@ class OpponentPolicyEncoder(nn.Module):
         return x
 
     @staticmethod
-    def pool(tokens, mask):
-        """``AP``: average over real timesteps, giving ``z̄⁻¹``."""
+    def pool(tokens, mask=None):
+        """``AP``, giving ``z̄⁻¹``.
+
+        The reference pools with a plain ``nn.AvgPool1d(kernel_size=NUM_STEPS)``
+        (``nn_trainer.py:32,109``) — an unmasked mean over every position,
+        padding included. That is what produced the published numbers, so it is
+        the default here; ``mask`` is accepted for the masked variant but is not
+        what TAO does.
+        """
+        if mask is None:
+            return tokens.mean(axis=1)
         m = mask.astype(tokens.dtype)[..., None]
         return (tokens * m).sum(axis=1) / jnp.maximum(m.sum(axis=1), 1.0)
 
@@ -94,8 +123,12 @@ class AncillaryActionDecoder(nn.Module):
 
     @nn.compact
     def __call__(self, mate_obs, embedding):
+        # Reference MLPDecoder (offline_stage_1/net.py:116-133): the *raw*
+        # observation is concatenated with the latent, then one hidden layer with
+        # ReLU followed by LayerNorm. Embedding the observation first, or
+        # dropping the activation, is a different function.
         z = jnp.broadcast_to(embedding[:, None, :], (*mate_obs.shape[:2], embedding.shape[-1]))
-        h = nn.Dense(HIDDEN)(jnp.concatenate([nn.Dense(HIDDEN)(mate_obs), z], axis=-1))
+        h = nn.LayerNorm()(nn.relu(nn.Dense(HIDDEN)(jnp.concatenate([mate_obs, z], axis=-1))))
         return nn.Dense(self.action_dim)(h)
 
 
@@ -106,35 +139,52 @@ class TaoPolicy(nn.Module):
     dropout: float = 0.1
 
     @nn.compact
-    def __call__(self, rtg, obs, actions, *, timesteps, context, train: bool = False):
+    def __call__(self, rtg, obs, actions, *, timesteps, context, mask=None,
+                 context_mask=None, train: bool = False):
         logits, _ = ControlDecoder(
             action_dim=self.action_dim,
             use_cross_attention=True,  # Appendix F: z^-1 enters as key/value.
             dropout=self.dropout,
-        )(rtg, obs, actions, timesteps=timesteps, context=context, train=train)
+        )(rtg, obs, actions, timesteps=timesteps, mask=mask, context=context,
+          context_mask=context_mask, train=train)
         return logits
 
 
-def info_nce(embeddings, labels, *, temperature: float = 0.1):
-    """Eq. 3. Positives are pairs sharing a teammate label.
+def supervised_contrastive(
+    embeddings, labels, *, temperature: float = 0.1, base_temperature: float = 0.1
+):
+    """Eq. 3, as the reference implements it (``nn_trainer.py:130-156``).
 
-    Windows whose teammate appears only once in the batch have no positive and
-    are dropped from the mean rather than contributing a degenerate term — with
-    random seating, per-teammate coverage is ragged (1-4 episodes each on the
-    LBF datasets), so this is the common case, not an edge case.
+    This is SupCon (Khosla et al. 2020), not plain InfoNCE, and the difference is
+    the aggregation: the loss is the **mean over positives of the log-probability**,
+    not the log-sum-exp over them. With several positives per anchor the two have
+    different gradients — SupCon pulls every positive in equally, InfoNCE is
+    dominated by the nearest.
+
+    Two further details taken from the reference: similarities are on **raw dot
+    products, not normalised embeddings**, and the max is subtracted per row for
+    numerical stability before the log-sum-exp.
+
+    Rows with no positive are dropped rather than dividing by zero. The reference
+    divides by ``dis_mask.sum(1)`` unguarded because its sampler guarantees a
+    positive per anchor; ours cannot, since seats are sampled independently and
+    per-teammate coverage is ragged.
     """
-    z = embeddings / jnp.maximum(jnp.linalg.norm(embeddings, axis=-1, keepdims=True), 1e-8)
-    sim = z @ z.T / temperature
+    # Reference matmuls the pooled hidden states directly -- no L2 normalisation.
+    sim = (embeddings @ embeddings.T) / temperature
     n = sim.shape[0]
     eye = jnp.eye(n, dtype=bool)
     positive = (labels[:, None] == labels[None, :]) & ~eye
 
-    sim = jnp.where(eye, -jnp.inf, sim)
-    log_denom = jax.nn.logsumexp(sim, axis=-1)
-    log_num = jax.nn.logsumexp(jnp.where(positive, sim, -jnp.inf), axis=-1)
-    has_positive = positive.any(axis=-1)
-    per_row = jnp.where(has_positive, log_denom - log_num, 0.0)
-    return per_row.sum() / jnp.maximum(has_positive.sum(), 1)
+    sim = sim - jax.lax.stop_gradient(sim.max(axis=1, keepdims=True))
+    exp_sim = jnp.exp(sim) * (~eye)
+    log_prob = sim - jnp.log(jnp.maximum(exp_sim.sum(axis=1, keepdims=True), 1e-12))
+
+    n_pos = positive.sum(axis=1)
+    mean_log_prob_pos = (positive * log_prob).sum(axis=1) / jnp.maximum(n_pos, 1)
+    per_row = -(temperature / base_temperature) * mean_log_prob_pos
+    has_positive = n_pos > 0
+    return jnp.where(has_positive, per_row, 0.0).sum() / jnp.maximum(has_positive.sum(), 1)
 
 
 def embedding_loss(params, encoder, decoder, batch, *, alpha=1.0, lam=1.0, rngs=None,
@@ -148,10 +198,12 @@ def embedding_loss(params, encoder, decoder, batch, *, alpha=1.0, lam=1.0, rngs=
     """
     enc_params, dec_params = params["encoder"], params["decoder"]
     tokens = encoder.apply(
-        enc_params, batch["cross_mate_obs"], batch["cross_mate_actions"],
-        batch["cross_mate_rewards"], mask=batch["cross_mask"], train=train, rngs=rngs,
+        enc_params, batch["cross_mate_next_obs"], batch["cross_mate_actions"],
+        batch["cross_mate_rewards"], mask=batch["cross_mask"],
+        timesteps=batch["cross_timesteps"], train=train, rngs=rngs,
     )
-    z_bar = OpponentPolicyEncoder.pool(tokens, batch["cross_mask"])
+    # Unmasked mean, as the reference pools (see OpponentPolicyEncoder.pool).
+    z_bar = OpponentPolicyEncoder.pool(tokens)
 
     logits = decoder.apply(dec_params, batch["mate_obs"], z_bar)
     mask = batch["mask"].astype(jnp.float32)
@@ -159,10 +211,12 @@ def embedding_loss(params, encoder, decoder, batch, *, alpha=1.0, lam=1.0, rngs=
     gen = (gen * mask).sum() / jnp.maximum(mask.sum(), 1.0)
 
     own_tokens = encoder.apply(
-        enc_params, batch["mate_obs"], batch["mate_actions"], batch["mate_rewards"],
-        mask=batch["mask"], train=train, rngs=rngs,
+        enc_params, batch["mate_next_obs"], batch["mate_actions"], batch["mate_rewards"],
+        mask=batch["mask"], timesteps=batch["timesteps"], train=train, rngs=rngs,
     )
-    dis = info_nce(OpponentPolicyEncoder.pool(own_tokens, batch["mask"]), batch["teammate_id"])
+    dis = supervised_contrastive(
+        OpponentPolicyEncoder.pool(own_tokens), batch["teammate_id"]
+    )
 
     total = alpha * gen + lam * dis
     return total, {"loss": total, "generative": gen, "discriminative": dis}

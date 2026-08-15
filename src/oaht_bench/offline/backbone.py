@@ -16,6 +16,16 @@ From Appendix F, verbatim in effect:
   *episodic timestep* positional encoding.
 * Actions are predicted autoregressively under a causal mask, from the hidden
   states **at the ``o_t`` token positions**.
+
+Three details come from the authors' reference implementation rather than the
+paper, which does not mention them:
+
+* a **LayerNorm on the stacked token sequence** before the blocks
+  (``embed_ln``, ``offline_stage_2/net.py:77``);
+* the causal mask is **combined with the padding mask**, so real tokens never
+  attend to padding — the paper says only "causal mask";
+* sequences are **left-padded**, the Decision Transformer convention the
+  reference inherits, so the most recent timestep is always last.
 * Feed-forward **128 nodes, ReLU**; every other hidden layer **32 nodes, no
   activation**; modality-specific layers **32 nodes, no activation**.
 
@@ -46,7 +56,7 @@ class Block(nn.Module):
     dropout: float
 
     @nn.compact
-    def __call__(self, x, *, context=None, causal_mask, train: bool):
+    def __call__(self, x, *, context=None, causal_mask, cross_mask=None, train: bool):
         # Single-head throughout, per Appendix F.
         attn = nn.SelfAttention(
             num_heads=1, qkv_features=HIDDEN, dropout_rate=self.dropout,
@@ -64,7 +74,7 @@ class Block(nn.Module):
             cross = nn.MultiHeadDotProductAttention(
                 num_heads=1, qkv_features=HIDDEN, dropout_rate=self.dropout,
                 deterministic=not train,
-            )(x, context)
+            )(x, context, mask=cross_mask)
             x = nn.LayerNorm()(x + nn.Dropout(self.dropout, deterministic=not train)(cross))
 
         ff = nn.Dense(FEEDFORWARD)(x)
@@ -88,7 +98,8 @@ class ControlDecoder(nn.Module):
     max_timesteps: int = 4096
 
     @nn.compact
-    def __call__(self, rtg, obs, actions, *, timesteps, context=None, train: bool = False):
+    def __call__(self, rtg, obs, actions, *, timesteps, mask=None, context=None,
+                 context_mask=None, train: bool = False):
         B, T = obs.shape[0], obs.shape[1]
 
         # Modality-specific linear layers, 32 nodes, no activation.
@@ -102,11 +113,25 @@ class ControlDecoder(nn.Module):
 
         # Interleave to (G_0, o_0, a_0, G_1, o_1, a_1, ...).
         x = jnp.stack([g_tok, o_tok, a_tok], axis=2).reshape(B, T * 3, HIDDEN)
+        # Reference `embed_ln`: LayerNorm on the stacked sequence, not per token
+        # stream. Absent from the paper.
+        x = nn.LayerNorm()(x)
 
-        causal = nn.make_causal_mask(jnp.ones((B, T * 3)))
+        attn_mask = nn.make_causal_mask(jnp.ones((B, T * 3)))
+        if mask is not None:
+            # Each timestep contributes three tokens, so the padding mask has to
+            # be tripled to line up. Without this, real tokens attend to padding.
+            stacked = jnp.repeat(mask.astype(bool), 3, axis=1)
+            attn_mask = nn.combine_masks(attn_mask, nn.make_attention_mask(stacked, stacked))
+
+        cross_mask = None
+        if context is not None and context_mask is not None:
+            q = jnp.ones((B, T * 3), dtype=bool)
+            cross_mask = nn.make_attention_mask(q, context_mask.astype(bool))
+
         for _ in range(NUM_BLOCKS):
             x = Block(self.use_cross_attention, self.dropout)(
-                x, context=context, causal_mask=causal, train=train
+                x, context=context, causal_mask=attn_mask, cross_mask=cross_mask, train=train
             )
 
         # Actions are read off the o_t positions: index 1 of each triple.
