@@ -164,6 +164,24 @@ class DatasetCollectionJob(JobBase):
         description="D4RL-style data regime (§4.3). 'replay_full' is deliberately "
         "not D4RL's 'medium-replay', which stops at medium performance."
     )
+    mismatch_fraction: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of episodes seated with *mismatched* members — "
+        "member i opposite member j, i != j. Zero means every episode is the "
+        "generator's designed pairing, which is what makes 'expert' a stated "
+        "property rather than an artefact of sampling: at population_size=5, "
+        "independent seat draws matched only 1 episode in 5.\n\n"
+        "Note this is a different kind of suboptimality from the one the offline "
+        "opponent-modelling literature uses. TIPR (ICML 2025) measures datasets "
+        "by an Optimal Ratio rho = return of the dataset's ego policy / return "
+        "of the best response to that teammate, and constructs rho < 1 by "
+        "training the ego for *fewer steps against the same teammate*. That is "
+        "an incompetent partner for the right teammate; a mismatched pairing is "
+        "a competent partner for the wrong one. Both are worth having and they "
+        "are not interchangeable — see §4.3.",
+    )
     num_episodes: int = Field(gt=0)
     mirror_trajectories: bool = Field(
         default=False,

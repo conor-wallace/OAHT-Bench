@@ -1545,3 +1545,69 @@ def test_paired_population_refuses_a_third_seat():
     )
     with pytest.raises(ValueError, match="no role for a third seat"):
         paired.seat([0, 1, 2])
+
+
+# --- dataset seating -------------------------------------------------------
+
+
+def test_seat_plan_splits_by_count_not_by_coin_flip():
+    """mismatch_fraction is a property of the dataset, not a draw.
+
+    A per-episode Bernoulli gives the fraction only in expectation: at 12
+    episodes and p=0.5 it produced 25%, because 9 of that seed's 12 uniforms
+    happened to fall below the threshold. Allocating counts up front makes the
+    number exact.
+    """
+    import numpy as np
+
+    from oaht_bench.data.runner import _seat_plan
+
+    for n, frac in ((10, 0.5), (10, 0.3), (100, 0.25), (7, 0.0), (7, 1.0)):
+        plan = _seat_plan([0, 1, 2, 3, 4], n, frac, np.random.default_rng(0))
+        assert len(plan) == n
+        assert sum(a != b for a, b in plan) == round(n * frac)
+
+
+def test_matched_and_mismatched_pools_are_disjoint():
+    """Each fraction draws only from its own pool.
+
+    A matched episode can never come out mismatched and vice versa, which is
+    what makes the two counts mean exactly what they say.
+    """
+    import numpy as np
+
+    from oaht_bench.data.runner import _seat_plan
+
+    plan = _seat_plan([0, 1, 2, 3, 4], 10, 0.5, np.random.default_rng(0))
+    matched = [p for p in plan if p[0] == p[1]]
+    mismatched = [p for p in plan if p[0] != p[1]]
+    assert sorted(matched) == [(i, i) for i in range(5)]
+    assert all(a != b for a, b in mismatched)
+
+
+def test_seat_plan_covers_every_teammate_equally():
+    """Uneven coverage is what forces the contrastive sampler to compensate.
+
+    Cycling a shuffled pool rather than sampling with replacement means 10
+    episodes over 5 members give each exactly two turns as the modelled agent.
+    """
+    import collections
+
+    import numpy as np
+
+    from oaht_bench.data.runner import _seat_plan
+
+    for n in (10, 20, 100):
+        plan = _seat_plan([0, 1, 2, 3, 4], n, 0.5, np.random.default_rng(1))
+        counts = collections.Counter(a for a, _ in plan)
+        assert max(counts.values()) - min(counts.values()) <= 1
+
+
+def test_mismatch_needs_two_members():
+    import numpy as np
+    import pytest as _pytest
+
+    from oaht_bench.data.runner import _seat_plan
+
+    with _pytest.raises(ValueError, match="at least two distinct"):
+        _seat_plan([3], 10, 0.5, np.random.default_rng(0))

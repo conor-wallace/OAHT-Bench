@@ -44,6 +44,58 @@ def _load_population(job: DatasetCollectionJob, env):
     return population_from_run(gen_job, out, env), gen_job
 
 
+def _draw_cycling(pool: list, count: int, rng) -> list:
+    """Take ``count`` entries from ``pool``, using every entry equally often.
+
+    Repeatedly shuffles the whole pool rather than sampling with replacement, so
+    with 5 members and 10 draws each member appears exactly twice. Sampling gives
+    a multinomial spread instead, and uneven per-teammate coverage is what forces
+    the stage-1 sampler to compensate when building contrastive batches.
+    """
+    out: list = []
+    while len(out) < count:
+        out.extend(pool[i] for i in rng.permutation(len(pool)))
+    return out[:count]
+
+
+def _seat_plan(eligible: list[int], num_episodes: int, mismatch_fraction: float, rng):
+    """Which two members occupy the seats in each episode.
+
+    The split is by *count*, not a coin flip per episode: with
+    ``mismatch_fraction=0.5`` and 10 episodes exactly 5 are matched and 5 are
+    mismatched. A per-episode Bernoulli only gives the fraction in expectation --
+    at 12 episodes it produced 25% where 50% was asked -- and a dataset variant
+    should be a stated property, not a draw.
+
+    Matched episodes draw only from ``(i, i)`` and mismatched only from
+    ``(i, j)`` with ``i != j``. Neither pool can produce the other, so the two
+    counts mean exactly what they say.
+    """
+    n_mismatched = int(round(num_episodes * mismatch_fraction))
+    n_matched = num_episodes - n_mismatched
+
+    if n_mismatched and len(eligible) < 2:
+        raise ValueError(
+            f"mismatch_fraction={mismatch_fraction} needs at least two distinct "
+            f"members, but the population releases {len(eligible)}."
+        )
+
+    matched = _draw_cycling([(m, m) for m in eligible], n_matched, rng)
+    # Stratify the mismatched draws by the ego seat rather than sampling from
+    # the n*(n-1) pool: drawing k pairs from that pool leaves ego coverage
+    # lumpy for small k, and every teammate should appear equally often as the
+    # one being modelled.
+    primaries = _draw_cycling(list(eligible), n_mismatched, rng)
+    mismatched = [
+        (a, int(rng.choice([m for m in eligible if m != a]))) for a in primaries
+    ]
+
+    plan = matched + mismatched
+    # Interleave, or any consumer that slices the dataset by index gets a
+    # biased subset.
+    return [plan[i] for i in rng.permutation(len(plan))]
+
+
 # comment: I imagine that at the dataset generation phase that we will already have ALL of the populations
 # comment: I think it makes sense to add option to the DatasetCollectionJob config that allows population_path to be a list of paths to [fcp, comedi, brdiv, and lbrdiv] populations
 # comment: To take this further, it also makes sense to combine members of one population with members of another to REALLY mix performance
@@ -81,14 +133,27 @@ def run(job: DatasetCollectionJob) -> Path:
         )
 
     rng = jax.random.PRNGKey(job.seed)
+    # The seating plan is decided up front so the matched/mismatched split is
+    # exact rather than sampled, and so every teammate gets equal coverage.
+    plan = _seat_plan(
+        [int(m) for m in eligible], job.num_episodes, job.mismatch_fraction,
+        np.random.default_rng(job.seed),
+    )
     episodes, member_ids = [], []
     for ep in tqdm(range(job.num_episodes), desc="Geneating dataset"):
-        rng, seat_rng, ep_rng = jax.random.split(rng, 3)
-        # comment: Should we be randomly sampling like this or should iterate over all combinations of teams?
-        # comment: We tune teammage generation algorithms such that matched seats are expert level cooperative and mismatched seats are minimally cooperative
-        seats = np.asarray(
-            jax.random.choice(seat_rng, np.asarray(eligible), shape=(num_seats,))
-        )
+        rng, ep_rng = jax.random.split(rng)
+        # Matched by default: member i opposite member i, which
+        # LoadedPopulation.seat resolves to conf_i vs br_i for the paired
+        # generators and self_i vs self_i for the homogeneous ones. That is the
+        # designed pairing in every case, so the dataset stops carrying which
+        # generator produced it -- one member index means "this teammate at its
+        # intended competence" regardless of method.
+        #
+        # Independent draws per seat made this 1-in-population_size by accident:
+        # at n=5, 80% of an "expert" dataset was mismatched play, which is what
+        # the generators are tuned to make minimally cooperative.
+        primary, partner = plan[ep]
+        seats = np.asarray([primary] + [partner] * (num_seats - 1))
         episodes.append(
             collect_episode(
                 ep_rng,
@@ -113,6 +178,7 @@ def run(job: DatasetCollectionJob) -> Path:
             "variant": job.variant,
             "generator": gen_job.generator.generator,
             "paired_roles": loaded.paired,
+            "mismatch_fraction": job.mismatch_fraction,
             "population_run": str(job.population_path),
             "population_config_hash": gen_job.content_hash(),
             "eligible_members": [int(m) for m in eligible],
