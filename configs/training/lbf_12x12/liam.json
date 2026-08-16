@@ -10,16 +10,15 @@
       "rollout_length": 128,
       "tier": "tier1"
     },
-    "dataset_path": "results/dataset_collection/fcp_lbf_12x12-e0980af272e7/dataset.npz",
+    "dataset_path": "results/dataset_collection/fcp_lbf_12x12-187ca62dbe39/dataset.npz",
     "baseline": "liam",
     "label": "liam_fcp_lbf_12x12",
     "offline": {
-      "stage1_steps": 300,
-      "stage2_steps": 300,
-      "log_every": 100,
-      "stage2_batch_size": 32,
-      "windows_per_teammate": 4,
-      "eval_episodes": 3
+      "stride": 20,
+      "stage1_steps": 2000,
+      "stage2_steps": 20000,
+      "log_every": 250,
+      "eval_episodes": 20
     },
     "logging": {
       "use_wandb": false
