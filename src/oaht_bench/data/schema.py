@@ -45,8 +45,12 @@ class EpisodeBatch:
     dones: np.ndarray
     #: (num_episodes, T) — True where the step happened rather than padding.
     valid: np.ndarray
-    #: (num_episodes, num_agents, T, num_actions) — action mask, all-ones where
-    #: the environment does not mask (LBF, Overcooked); meaningful in Hanabi.
+    #: (num_episodes, num_agents, T, num_actions) — which actions the
+    #: environment permitted at each step. **Not** all-ones on LBF: every step
+    #: masks something there, 4.77 of 6 actions available on average and action 5
+    #: unavailable 67% of the time. An earlier version of this comment claimed
+    #: LBF did not mask, which is why the offline baselines were built without
+    #: consulting the field.
     avail_actions: np.ndarray
     #: Which population member sat in each seat, per episode.
     #: (num_episodes, num_agents)

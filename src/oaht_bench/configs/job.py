@@ -226,10 +226,26 @@ class OfflineTrainingConfig(BaseConfig):
     stage2_learning_rate: float = Field(default=1e-4, gt=0)
     weight_decay: float = Field(default=1e-4, ge=0.0)
     clip_grad: float = Field(default=0.5, gt=0)
-    warmup_steps: int = Field(
-        default=10000,
-        gt=0,
-        description="Linear warmup, min((step+1)/warmup, 1), as the reference schedules it.",
+    warmup_fraction: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        description="Linear warmup over this fraction of each stage, rather than "
+        "a fixed step count. The reference uses WARMUP_STEPS=10000 for both "
+        "stages, which is exactly half of stage 2 (20000 steps) but five times "
+        "the whole of stage 1 (2000) -- so its stage-1 learning rate ramps to "
+        "0.2x nominal and stops, never reaching the 1e-2 the config names. A "
+        "fraction reproduces stage 2 exactly and gives stage 1 the schedule its "
+        "learning rate implies.",
+    )
+    normalize_observations: bool = Field(
+        default=True,
+        description="Standardise observations and rescale return-to-go from the "
+        "dataset. The reference does both (OBS_NORMALIZE, REWARD_SCALE); without "
+        "them LBF observations sit at std 3.3 against a return-to-go at std "
+        "0.155, so the return token -- the Decision Transformer's whole control "
+        "signal -- carries a twentieth of an observation feature's magnitude "
+        "into a sum of three embeddings.",
     )
 
     teammates_per_batch: int = Field(

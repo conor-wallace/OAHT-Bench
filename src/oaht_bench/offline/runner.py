@@ -32,28 +32,31 @@ log = logging.getLogger(__name__)
 SUPPORTED = ("liam", "tao")
 
 
-def _schedule(cfg):
+def _schedule(cfg, total_steps: int):
     """Linear warmup then constant, as the reference schedules it.
 
-    ``lambda steps: min((steps + 1) / warmup_steps, 1)`` on top of AdamW.
+    ``lambda steps: min((steps + 1) / warmup, 1)`` on top of AdamW, with warmup
+    a fraction of *this* stage rather than a shared constant.
     """
     import jax.numpy as jnp
     import optax
 
     # jnp, not np: the step count is a traced array inside the jitted update.
+    warmup = max(1.0, total_steps * cfg.warmup_fraction)
+
     def scale(step):
-        return jnp.minimum((step + 1) / cfg.warmup_steps, 1.0)
+        return jnp.minimum((step + 1) / warmup, 1.0)
 
     return optax.scale_by_schedule(scale)
 
 
-def _optimiser(cfg, learning_rate: float):
+def _optimiser(cfg, learning_rate: float, total_steps: int):
     import optax
 
     return optax.chain(
         optax.clip_by_global_norm(cfg.clip_grad),
         optax.adamw(learning_rate=learning_rate, weight_decay=cfg.weight_decay),
-        _schedule(cfg),
+        _schedule(cfg, total_steps),
     )
 
 
@@ -134,7 +137,8 @@ def run(job: TrainingJob) -> Path:
 
     cfg = job.offline
     batch = EpisodeBatch.load(Path(job.dataset_path))
-    windows = make_windows(batch, context_length=cfg.context_length, stride=cfg.stride)
+    windows = make_windows(batch, context_length=cfg.context_length,
+                           stride=cfg.stride, normalize=cfg.normalize_observations)
     index = TeammateIndex.build(windows)
     action_dim = int(batch.avail_actions.shape[-1])
     log.info(
@@ -170,7 +174,7 @@ def run(job: TrainingJob) -> Path:
                 return to_jax({
                     k: getattr(windows, k)[idx] for k in
                     ("ego_obs", "ego_actions", "ego_rtg", "mate_obs", "mate_actions",
-                     "timesteps", "mask")
+                     "ego_avail", "mate_avail", "timesteps", "mask")
                 })
 
             probe = stage1_batch(0)
@@ -266,7 +270,7 @@ def run(job: TrainingJob) -> Path:
         log.info("stage 1: %d steps", cfg.stage1_steps)
         stage1_params = _train_stage(
             stage1_loss, stage1_params, stage1_batch,
-            optimiser=_optimiser(cfg, cfg.stage1_learning_rate),
+            optimiser=_optimiser(cfg, cfg.stage1_learning_rate, cfg.stage1_steps),
             steps=cfg.stage1_steps, rng=s1_rng, logger=logger,
             prefix="Stage1", log_every=cfg.log_every,
         )
@@ -275,14 +279,20 @@ def run(job: TrainingJob) -> Path:
         stage2_params, stage2_loss = make_stage2(stage1_params)
         stage2_params = _train_stage(
             stage2_loss, stage2_params, stage2_batch,
-            optimiser=_optimiser(cfg, cfg.stage2_learning_rate),
+            optimiser=_optimiser(cfg, cfg.stage2_learning_rate, cfg.stage2_steps),
             steps=cfg.stage2_steps, rng=s2_rng, logger=logger,
             prefix="Stage2", log_every=cfg.log_every,
         )
 
         # Save before reporting. A charting failure after a long run must not
         # discard it -- the lesson from teammate generation.
-        out: dict[str, Any] = {"stage1": stage1_params, "stage2": stage2_params}
+        # The normalisation travels with the parameters: a policy trained on
+        # standardised observations is wrong without it at rollout.
+        out: dict[str, Any] = {
+            "stage1": stage1_params,
+            "stage2": stage2_params,
+            "normalization": windows.norm,
+        }
         with (run_dir / "params.pkl").open("wb") as fh:
             pickle.dump(jax.device_get(out), fh)
 
@@ -406,7 +416,8 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params,
         rng=jax.random.PRNGKey(job.seed + 1),
         context_length=cfg.context_length,
         max_episode_steps=job.env.rollout_length,
-        target_return=target,
+        target_return=target if windows.norm is None else windows.norm.apply_rtg(target),
+        normalization=windows.norm,
         num_episodes=job.offline.eval_episodes,
         obs_dim=windows.obs_dim,
     )

@@ -162,6 +162,8 @@ def test_liam_observation_term_is_a_gaussian_nll_not_a_mean():
             "ego_rtg",
             "mate_obs",
             "mate_actions",
+            "ego_avail",
+            "mate_avail",
             "timesteps",
             "mask",
         )
@@ -215,6 +217,8 @@ def test_liam_stage_two_does_not_differentiate_the_encoder():
             "ego_rtg",
             "mate_obs",
             "mate_actions",
+            "ego_avail",
+            "mate_avail",
             "timesteps",
             "mask",
         )
@@ -449,3 +453,56 @@ def test_tao_stage_two_loss_is_a_masked_mean_over_valid_steps():
     m = np.asarray(batch["mask"])
     ce = np.asarray(optax.softmax_cross_entropy_with_integer_labels(logits, batch["ego_actions"]))
     assert float(aux["bc"]) == pytest.approx(ce[m].mean(), rel=1e-4)
+
+
+def test_available_actions_are_enforced_everywhere_the_data_enforces_them():
+    """Collection masks; training and evaluation must too.
+
+    ``data/collect.py`` passes ``avail_actions`` into every seat's
+    ``get_action``, so a recorded action is always legal. For a while the
+    learned policy was held to no such constraint -- windows dropped the field,
+    the losses never masked, and the rollout sampled the ego from raw logits.
+    On LBF that is 20.5% of (step, action) pairs, and action 5 is unavailable
+    67% of the time.
+    """
+    import inspect
+
+    from oaht_bench.offline import dataset as ds
+    from oaht_bench.offline import evaluate as ev
+    from oaht_bench.offline import liam as liam_mod
+    from oaht_bench.offline import tao as tao_mod
+
+    # windows carry the masks for both seats
+    w = _windows()
+    assert w.ego_avail.shape == (len(w), w.context_length, 6)
+    assert w.mate_avail.shape == w.ego_avail.shape
+    assert "avail_actions" in inspect.getsource(ds.make_windows)
+
+    # every cross-entropy is over masked logits
+    assert "mask_logits" in inspect.getsource(liam_mod.liam_reconstruction_loss)
+    assert "mask_logits" in inspect.getsource(liam_mod.liam_policy_loss)
+    assert "mask_logits" in inspect.getsource(tao_mod.embedding_loss)
+    assert "mask_logits" in inspect.getsource(tao_mod.tao_policy_loss)
+
+    # and the rollout masks before sampling the ego
+    assert "mask_logits" in inspect.getsource(ev._rollout)
+
+
+def test_mask_logits_matches_the_absorbed_convention():
+    """``logits - (1 - avail) * 1e10``, per agents/mlp_actor_critic.py:36-37.
+
+    Not ``-inf``: a fully-masked row would then be NaN after softmax, and padded
+    timesteps are masked with all-ones precisely to avoid that.
+    """
+    from oaht_bench.offline.backbone import mask_logits
+
+    logits = jnp.zeros((1, 3))
+    avail = jnp.asarray([[1.0, 0.0, 1.0]])
+    out = np.asarray(mask_logits(logits, avail))[0]
+    assert out[0] == 0.0 and out[2] == 0.0
+    assert out[1] == pytest.approx(-1e10)
+    # the unavailable action gets essentially zero probability
+    probs = np.asarray(jax.nn.softmax(jnp.asarray(out)))
+    assert probs[1] < 1e-12
+    # passing None is a no-op, for callers without a mask
+    assert np.array_equal(np.asarray(mask_logits(logits, None)), np.asarray(logits))

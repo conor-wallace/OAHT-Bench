@@ -24,6 +24,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from oaht_bench.offline.backbone import mask_logits
+
 
 @dataclass(frozen=True)
 class EvalScores:
@@ -90,6 +92,7 @@ def _rollout(
     target_return: float,
     ego_index: int,
     obs_dim: int,
+    normalization=None,
 ):
     """One episode: ``predict`` drives the ego seat, the teammate drives the other.
 
@@ -127,7 +130,10 @@ def _rollout(
         ctx_rtg = np.roll(ctx_rtg, -1)
         ctx_t = np.roll(ctx_t, -1)
         ctx_mask = np.roll(ctx_mask, -1)
-        ctx_obs[-1] = np.asarray(obs[agents[ego_index]]).reshape(-1)
+        raw_obs = np.asarray(obs[agents[ego_index]]).reshape(-1)
+        # The same transform the windows were built with. A policy trained on
+        # standardised observations is simply wrong without it here.
+        ctx_obs[-1] = raw_obs if normalization is None else normalization.apply_obs(raw_obs)
         ctx_act[-1] = -10  # the ego has not acted yet at t; predicted from o_t
         ctx_rtg[-1] = rtg
         ctx_t[-1] = min(t + 1, K * 64)
@@ -140,8 +146,18 @@ def _rollout(
             jnp.asarray(ctx_t)[None],
             jnp.asarray(ctx_mask)[None],
         )
+        # Hold the learner to the same constraint the data was generated under.
+        # Collection passes avail_actions into every seat's get_action, so a
+        # recorded action is always legal; sampling the ego from unmasked logits
+        # let it choose actions the environment cannot execute -- 20.5% of
+        # (step, action) pairs on LBF, and action 5 two thirds of the time.
+        ego_avail = jax.lax.stop_gradient(
+            env.get_avail_actions(state)[agents[ego_index]]
+        ).astype(jnp.float32).reshape(-1)
         rng, act_rng = jax.random.split(rng)
-        ego_action = int(jax.random.categorical(act_rng, logits[0, -1]))
+        ego_action = int(
+            jax.random.categorical(act_rng, mask_logits(logits[0, -1], ego_avail))
+        )
         ctx_act[-1] = ego_action
 
         rng, mate_rng = jax.random.split(rng)
@@ -168,7 +184,8 @@ def _rollout(
         r = float(np.asarray(reward[agents[ego_index]]).reshape(-1)[0])
         total += r
         # Reference: the target tracks what is left, not what was asked for.
-        rtg -= r
+        # Decrement in the same units the target is expressed in.
+        rtg -= r if normalization is None else r / normalization.rtg_scale
         if bool(np.asarray(done_flags["__all__"]).reshape(-1)[0]):
             break
     return total
@@ -187,6 +204,7 @@ def evaluate(
     num_episodes: int = 20,
     ego_index: int = 0,
     obs_dim: int,
+    normalization=None,
 ) -> EvalScores:
     """Play ``num_episodes`` against each member and record the returns.
 
@@ -216,6 +234,7 @@ def evaluate(
                     rng=ep_rng, context_length=context_length,
                     max_episode_steps=max_episode_steps,
                     target_return=target_return, ego_index=ego_index, obs_dim=obs_dim,
+                    normalization=normalization,
                 )
             )
         arr = np.asarray(returns)

@@ -42,6 +42,7 @@ from oaht_bench.offline.backbone import (
     DEFAULT_HIDDEN_DIM,
     DEFAULT_NUM_BLOCKS,
     DecisionTransformer,
+    mask_logits,
 )
 
 
@@ -235,7 +236,10 @@ def embedding_loss(params, encoder, decoder, batch, *, alpha=1.0, lam=1.0, rngs=
     z_bar = OpponentPolicyEncoder.pool(tokens)
 
     # Generative: a different trajectory of the same teammate, scored under z_bar.
-    logits = decoder.apply(dec_params, batch["cross_mate_obs"], z_bar)
+    logits = mask_logits(
+        decoder.apply(dec_params, batch["cross_mate_obs"], z_bar),
+        batch["cross_mate_avail"],
+    )
     cross_mask = batch["cross_mask"].astype(jnp.float32)
     gen = optax.softmax_cross_entropy_with_integer_labels(
         logits, batch["cross_mate_actions"]
@@ -319,17 +323,20 @@ def tao_policy_loss(params, policy, encoder, batch, *, freeze_encoder: bool = Tr
     if freeze_encoder:
         tokens = jax.lax.stop_gradient(tokens)
 
-    logits = policy.apply(
-        params["policy"],
-        batch["ego_rtg"],
-        batch["ego_obs"],
-        batch["ego_actions"],
-        timesteps=batch["timesteps"],
-        context=tokens,
-        mask=batch["mask"],
-        context_mask=batch["context_mask"],
-        train=train,
-        rngs=rngs,
+    logits = mask_logits(
+        policy.apply(
+            params["policy"],
+            batch["ego_rtg"],
+            batch["ego_obs"],
+            batch["ego_actions"],
+            timesteps=batch["timesteps"],
+            context=tokens,
+            mask=batch["mask"],
+            context_mask=batch["context_mask"],
+            train=train,
+            rngs=rngs,
+        ),
+        batch["ego_avail"],
     )
     mask = batch["mask"].astype(jnp.float32)
     bc = optax.softmax_cross_entropy_with_integer_labels(logits, batch["ego_actions"])

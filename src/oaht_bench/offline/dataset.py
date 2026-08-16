@@ -20,6 +20,27 @@ from oaht_bench.data.schema import EpisodeBatch
 
 
 @dataclass(frozen=True)
+class Normalization:
+    """The transform applied to a dataset, so evaluation can repeat it.
+
+    Stored rather than recomputed: a policy trained on standardised
+    observations must see standardised observations at rollout, and a target
+    return expressed in raw units has to be divided by the same scale it was
+    trained under.
+    """
+
+    obs_mean: np.ndarray
+    obs_std: np.ndarray
+    rtg_scale: float
+
+    def apply_obs(self, obs: np.ndarray) -> np.ndarray:
+        return (obs - self.obs_mean) / self.obs_std
+
+    def apply_rtg(self, rtg):
+        return rtg / self.rtg_scale
+
+
+@dataclass(frozen=True)
 class Windows:
     """Fixed-length windows over the ego and teammate streams.
 
@@ -32,6 +53,11 @@ class Windows:
     ego_obs: np.ndarray
     #: (N, T) — the learner's actions, the behaviour-cloning target.
     ego_actions: np.ndarray
+    #: (N, T, num_actions) — which actions the environment permitted. Collection
+    #: already masks with these (``collect.py`` passes them to every seat's
+    #: ``get_action``), so a recorded action is always legal; carrying them here
+    #: is what lets the learned policy be held to the same constraint.
+    ego_avail: np.ndarray
     #: (N, T) — return-to-go for the learner, the DT conditioning signal.
     ego_rtg: np.ndarray
     #: (N, T, obs_dim) — teammate observations, LIAM's reconstruction target and
@@ -44,6 +70,9 @@ class Windows:
     mate_next_obs: np.ndarray
     #: (N, T) — teammate actions.
     mate_actions: np.ndarray
+    #: (N, T, num_actions) — the teammate's action mask, for the reconstruction
+    #: and ancillary heads that predict teammate actions.
+    mate_avail: np.ndarray
     #: (N, T) — teammate rewards, fused into TAO's encoder tokens.
     mate_rewards: np.ndarray
     #: (N, T) — timestep within the episode, for the positional encoding.
@@ -58,6 +87,8 @@ class Windows:
     #: (N,) — which population member was the teammate. TAO's InfoNCE positives
     #: are defined by this label; it is the field §4.2 anticipated.
     teammate_id: np.ndarray
+    #: The transform already applied, or ``None`` if the arrays are raw.
+    norm: Normalization | None = None
 
     def __len__(self) -> int:
         return int(self.ego_obs.shape[0])
@@ -88,6 +119,7 @@ def make_windows(
     context_length: int,
     stride: int = 1,
     teammate_index: int | None = None,
+    normalize: bool = True,
 ) -> Windows:
     """Slice every episode into overlapping windows of ``context_length``.
 
@@ -97,6 +129,14 @@ def make_windows(
             with multi-episode context; for behaviour-cloning baselines like LIAM
             a within-episode window is what the specification asks for.
         stride: Step between window starts.
+        normalize: Standardise observations and rescale return-to-go. The
+            reference normalises observations per opponent (``OBS_NORMALIZE``)
+            and divides returns by a per-environment ``REWARD_SCALE``; neither
+            was applied here, which left LBF observations at std 3.3 against a
+            return-to-go at std 0.155. Since the three modality embeddings are
+            summed, the return token — the Decision Transformer's whole control
+            signal — carried about a twentieth of an observation feature's
+            magnitude.
         teammate_index: Seat treated as the teammate. Defaults to the seat that
             is not ``batch.ego_index``, which is unambiguous only while every
             environment has two seats — hence the explicit error below.
@@ -116,6 +156,7 @@ def make_windows(
     T = context_length
     ego_o, ego_a, ego_g = [], [], []
     mate_o, mate_no, mate_a, mate_r = [], [], [], []
+    ego_av, mate_av = [], []
     steps, masks, ids, eps = [], [], [], []
     # Teammate observations shifted one step; the final step repeats, which the
     # mask covers since a window never ends on a step the episode did not take.
@@ -152,6 +193,10 @@ def make_windows(
             mate_a.append(pad(batch.actions[ep, teammate_index][sl][:n], fill=-10))
             mate_r.append(pad(batch.rewards[ep, teammate_index][sl][:n]))
             # 1-indexed, 0 reserved for padding (reference utils.py:115-118).
+            # Pad the mask with ones: a padded step has no legal action either
+            # way, and zeros would make the masked logits all -1e10.
+            ego_av.append(pad(batch.avail_actions[ep, ego][sl][:n], fill=1))
+            mate_av.append(pad(batch.avail_actions[ep, teammate_index][sl][:n], fill=1))
             steps.append(pad(np.arange(start + 1, start + n + 1)))
             m = np.zeros(T, dtype=bool)
             m[T - n :] = True
@@ -159,16 +204,40 @@ def make_windows(
             ids.append(batch.member_ids[ep, teammate_index])
             eps.append(ep)
 
+    stacked_ego_obs = np.stack(ego_o).astype(np.float32)
+    stacked_mate_obs = np.stack(mate_o).astype(np.float32)
+    stacked_mate_next = np.stack(mate_no).astype(np.float32)
+    stacked_rtg = np.stack(ego_g).astype(np.float32)
+    stacked_mask = np.stack(masks)
+
+    norm = None
+    if normalize:
+        valid = stacked_ego_obs[stacked_mask]
+        obs_mean = valid.mean(axis=0)
+        # Guard constant features: LBF observations include dimensions that
+        # never vary, and dividing by their zero std produces NaN.
+        obs_std = np.maximum(valid.std(axis=0), 1e-6)
+        rtg_valid = stacked_rtg[stacked_mask]
+        rtg_scale = float(max(rtg_valid.std(), 1e-6))
+        norm = Normalization(obs_mean=obs_mean, obs_std=obs_std, rtg_scale=rtg_scale)
+        stacked_ego_obs = norm.apply_obs(stacked_ego_obs)
+        stacked_mate_obs = norm.apply_obs(stacked_mate_obs)
+        stacked_mate_next = norm.apply_obs(stacked_mate_next)
+        stacked_rtg = norm.apply_rtg(stacked_rtg)
+
     return Windows(
-        ego_obs=np.stack(ego_o).astype(np.float32),
+        norm=norm,
+        ego_obs=stacked_ego_obs,
         ego_actions=np.stack(ego_a).astype(np.int32),
-        ego_rtg=np.stack(ego_g).astype(np.float32),
-        mate_obs=np.stack(mate_o).astype(np.float32),
-        mate_next_obs=np.stack(mate_no).astype(np.float32),
+        ego_avail=np.stack(ego_av).astype(np.float32),
+        ego_rtg=stacked_rtg,
+        mate_obs=stacked_mate_obs,
+        mate_next_obs=stacked_mate_next,
         mate_actions=np.stack(mate_a).astype(np.int32),
+        mate_avail=np.stack(mate_av).astype(np.float32),
         mate_rewards=np.stack(mate_r).astype(np.float32),
         timesteps=np.stack(steps).astype(np.int32),
-        mask=np.stack(masks),
+        mask=stacked_mask,
         episode_id=np.asarray(eps, dtype=np.int32),
         teammate_id=np.asarray(ids, dtype=np.int32),
     )

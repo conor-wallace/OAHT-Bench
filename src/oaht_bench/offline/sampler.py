@@ -128,7 +128,9 @@ def sample_stage1(
     batch["teammate_id"] = windows.teammate_id[anchor_idx]
     # The generative term reads the cross trajectory's *observations* and scores
     # its *actions* -- not next-observations, which are the encoder's input.
-    batch.update(_take(windows, cross_idx, ("mate_obs", "mate_actions", "mask"), "cross_"))
+    batch.update(_take(
+        windows, cross_idx, ("mate_obs", "mate_actions", "mate_avail", "mask"), "cross_"
+    ))
     return batch
 
 
@@ -164,6 +166,7 @@ def sample_stage2(
         "ego_rtg": windows.ego_rtg[decoder_idx],
         "timesteps": windows.timesteps[decoder_idx],
         "mask": windows.mask[decoder_idx],
+        "ego_avail": windows.ego_avail[decoder_idx],
         "teammate_id": windows.teammate_id[decoder_idx],
     }
     # Concatenate the C fragments along time: (batch, C, T, ...) -> (batch, C*T, ...)

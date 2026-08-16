@@ -33,7 +33,11 @@ import flax.linen as nn
 import jax.numpy as jnp
 import optax
 
-from oaht_bench.offline.backbone import DEFAULT_HIDDEN_DIM, DecisionTransformer
+from oaht_bench.offline.backbone import (
+    DEFAULT_HIDDEN_DIM,
+    DecisionTransformer,
+    mask_logits,
+)
 
 
 def _masked_accuracy(logits, labels, mask) -> jnp.ndarray:
@@ -143,6 +147,9 @@ def liam_reconstruction_loss(params, encoder, decoder, batch, *, rngs=None,
         timesteps=batch["timesteps"], mask=batch["mask"], train=train, rngs=rngs,
     )
     mate_obs_hat, mate_act_logits = decoder.apply(params["decoder"], z)
+    # The teammate could only have taken a legal action, so the reconstruction
+    # target lives in the masked distribution.
+    mate_act_logits = mask_logits(mate_act_logits, batch["mate_avail"])
 
     mask = batch["mask"].astype(jnp.float32)
     denom = jnp.maximum(mask.sum(), 1.0)
@@ -181,10 +188,13 @@ def liam_policy_loss(params, policy, encoder, encoder_params, batch, *, rngs=Non
         encoder_params, batch["ego_rtg"], batch["ego_obs"], batch["ego_actions"],
         timesteps=batch["timesteps"], mask=batch["mask"], train=False,
     )
-    logits = policy.apply(
-        params, batch["ego_rtg"], batch["ego_obs"], batch["ego_actions"],
-        timesteps=batch["timesteps"], embedding=z, mask=batch["mask"],
-        train=train, rngs=rngs,
+    logits = mask_logits(
+        policy.apply(
+            params, batch["ego_rtg"], batch["ego_obs"], batch["ego_actions"],
+            timesteps=batch["timesteps"], embedding=z, mask=batch["mask"],
+            train=train, rngs=rngs,
+        ),
+        batch["ego_avail"],
     )
     mask = batch["mask"].astype(jnp.float32)
     bc = optax.softmax_cross_entropy_with_integer_labels(logits, batch["ego_actions"])
