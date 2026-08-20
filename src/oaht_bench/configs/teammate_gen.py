@@ -253,8 +253,71 @@ class LBrDivConfig(GeneratorBase):
         }
 
 
+class RpgConfig(GeneratorBase):
+    """AD-RPG (Rational Adversarial Diversity): general-sum diversity via manipulators.
+
+    Clean-room reimplementation of the ``doublesided_RAD`` algorithm from Lauffer
+    et al. (NeurIPS 2025); the upstream repo is unlicensed and on an incompatible
+    stack, so nothing is absorbed — this is authored from the paper (see
+    ``PROVENANCE.md``). ``population_size`` is the number of diversity particles N
+    (the paper's ``NUM_PARTICLES``, which it runs at 2); each particle is a base
+    policy shaped by a paired manipulator, and the released population is the N
+    converged base policies (a self-play set, like CoMeDi/BRDiv release members).
+
+    ``ppo`` supplies the *base* agent's PPO hyperparameters; the manipulator has
+    its own learning rate and entropy, since it optimizes the diversity objective
+    rather than task return.
+    """
+
+    generator: Literal["rpg"] = "rpg"
+    total_timesteps: float = Field(default=1e7, gt=0)
+    n_lookahead: int = Field(
+        default=1,
+        gt=0,
+        description="Inner base-update steps the manipulator differentiates "
+        "through (the opponent-shaping horizon). Upstream default 1.",
+    )
+    dice_lambda: float = Field(
+        default=0.99,
+        gt=0,
+        le=1,
+        description="Loaded-DiCE past-dependency discount in the base surrogate "
+        "loss; controls the bias/variance of the higher-order gradient estimate.",
+    )
+    partnerplay_ratio: float = Field(
+        default=0.1,
+        ge=0,
+        description="Weight moved from self-play to cross-play in the base "
+        "objective (the paper's PARTNERPLAY_RATIO): base self-play carries "
+        "(1 - N*ratio), each cross-play pairing carries `ratio`. Keeps a base "
+        "policy in-distribution against the partners it is scored with.",
+    )
+    off_diag_factor: float = Field(
+        default=0.25,
+        ge=0,
+        description="Scales the manipulator's cross-play *minimization* term "
+        "(weight -off_diag_factor/(N-1) per off-diagonal pairing) against its "
+        "self-play *maximization* term (weight +1). Higher pushes harder for "
+        "mutual incompatibility.",
+    )
+    manipulator_lr: float = Field(default=2.5e-4, gt=0)
+    manipulator_entropy_coef: float = Field(default=0.0, ge=0)
+
+    def to_algorithm_dict(self) -> dict[str, Any]:
+        return {
+            **self._base_algorithm_dict(),
+            "TOTAL_TIMESTEPS": self.total_timesteps,
+            "N_LOOKAHEAD": self.n_lookahead,
+            "DICE_LAMBDA": self.dice_lambda,
+            "PARTNERPLAY_RATIO": self.partnerplay_ratio,
+            "OFF_DIAG_FACTOR": self.off_diag_factor,
+            "MANIPULATOR_LR": self.manipulator_lr,
+            "MANIPULATOR_ENT_COEF": self.manipulator_entropy_coef,
+        }
+
+
 #: Discriminated union, selected by ``generator``.
 GeneratorConfig = Annotated[
-    FcpConfig | CoMeDiConfig | BrDivConfig | LBrDivConfig,
+    FcpConfig | CoMeDiConfig | BrDivConfig | LBrDivConfig | RpgConfig,
     Field(discriminator="generator"),
 ]

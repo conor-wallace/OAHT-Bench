@@ -221,6 +221,94 @@ class CoMeDiRuntime(BaseConfig):
         return {**self.network.to_agent_dict(), "POP_SIZE": self.population_size}
 
 
+class RpgRuntime(BaseConfig):
+    """Derived values for AD-RPG.
+
+    N diversity particles, each a base policy paired with a manipulator. The base
+    agents optimize task return (with DiCE coupling to their manipulator); the
+    manipulators optimize the diversity objective through an inner lookahead. This
+    is authored, not absorbed, so there is no ``to_agent_dict`` bridge to a
+    SCREAMING_CASE dict — :func:`~oaht_bench.teammate_gen.RPG.run_rpg` reads the
+    typed fields directly.
+
+    ``num_updates`` counts *outer* steps; each spends one manipulator update plus
+    ``n_lookahead`` base rollouts+updates. The timestep accounting only bounds the
+    outer count here; :mod:`oaht_bench.teammate_gen.plan` breaks out the inner work.
+    """
+
+    # --- authored ---
+    ppo: PpoHyperparams
+    network: MlpNetwork
+    rollout_length: int = Field(gt=0)
+    num_envs: int = Field(gt=0)
+    total_timesteps: float = Field(gt=0)
+    num_checkpoints: int = Field(gt=0)
+    population_size: int = Field(gt=0)
+    num_eval_episodes: int = Field(gt=0)
+    n_lookahead: int = Field(gt=0)
+    dice_lambda: float = Field(gt=0, le=1)
+    partnerplay_ratio: float = Field(ge=0)
+    off_diag_factor: float = Field(ge=0)
+    manipulator_lr: float = Field(gt=0)
+    manipulator_entropy_coef: float = Field(ge=0)
+
+    # --- derived ---
+    num_game_agents: int = Field(gt=0)
+    num_actors: int = Field(gt=0)
+    num_updates: int = Field(gt=0)
+
+    @classmethod
+    def from_config(cls, gen: Any, rollout_length: int, num_agents: int) -> RpgRuntime:
+        """Build from a :class:`~oaht_bench.configs.teammate_gen.RpgConfig`."""
+        if num_agents != 2:
+            raise ValueError(
+                f"AD-RPG (doublesided_RAD) is defined over 2-player self/cross-play "
+                f"pairings and assumes exactly 2 agents; this environment has {num_agents}."
+            )
+        if gen.population_size < 2:
+            raise ValueError(
+                f"AD-RPG needs at least 2 particles for a cross-play (diversity) term; "
+                f"population_size={gen.population_size}. Use FCP for a single self-play run."
+            )
+        # The base objective moves N*partnerplay_ratio of the self-play weight onto
+        # cross-play, so it must stay a proper convex split.
+        if gen.population_size * gen.partnerplay_ratio > 1.0:
+            raise ValueError(
+                f"population_size * partnerplay_ratio = "
+                f"{gen.population_size * gen.partnerplay_ratio:g} > 1, which drives the "
+                f"base self-play weight (1 - N*ratio) negative. Lower partnerplay_ratio "
+                f"below {1.0 / gen.population_size:g} at N={gen.population_size}."
+            )
+        num_actors = num_agents * gen.num_envs
+        num_updates = int(gen.total_timesteps // (rollout_length * gen.num_envs))
+        if num_updates < 1:
+            raise ValueError(
+                f"total_timesteps={gen.total_timesteps:g} gives {num_updates} outer "
+                f"updates at rollout_length={rollout_length} and num_envs={gen.num_envs}; "
+                f"training would be a no-op. Raise it above {rollout_length * gen.num_envs}."
+            )
+
+        return cls(
+            ppo=gen.ppo,
+            network=gen.network,
+            rollout_length=rollout_length,
+            num_envs=gen.num_envs,
+            total_timesteps=gen.total_timesteps,
+            num_checkpoints=gen.num_checkpoints,
+            population_size=gen.population_size,
+            num_eval_episodes=gen.num_eval_episodes,
+            n_lookahead=gen.n_lookahead,
+            dice_lambda=gen.dice_lambda,
+            partnerplay_ratio=gen.partnerplay_ratio,
+            off_diag_factor=gen.off_diag_factor,
+            manipulator_lr=gen.manipulator_lr,
+            manipulator_entropy_coef=gen.manipulator_entropy_coef,
+            num_game_agents=num_agents,
+            num_actors=num_actors,
+            num_updates=num_updates,
+        )
+
+
 class PairedDiversityRuntime(BaseConfig):
     """Derived values for BRDiv and L-BRDiv.
 

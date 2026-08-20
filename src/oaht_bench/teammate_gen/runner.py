@@ -27,8 +27,15 @@ def _generators() -> dict[str, Callable[..., Any]]:
     from oaht_bench.teammate_gen.CoMeDi import run_comedi
     from oaht_bench.teammate_gen.fcp import run_fcp
     from oaht_bench.teammate_gen.LBRDiv import run_lbrdiv
+    from oaht_bench.teammate_gen.RPG import run_rpg
 
-    return {"fcp": run_fcp, "comedi": run_comedi, "brdiv": run_brdiv, "lbrdiv": run_lbrdiv}
+    return {
+        "fcp": run_fcp,
+        "comedi": run_comedi,
+        "brdiv": run_brdiv,
+        "lbrdiv": run_lbrdiv,
+        "rpg": run_rpg,
+    }
 
 
 def run(job: TeammateGenerationJob) -> Path:

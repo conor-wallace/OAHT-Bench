@@ -610,9 +610,18 @@ def test_shipped_configs_exist_for_every_generator_and_tier1_env():
     paths = _shipped_configs()
     envs = {p.parent.name for p in paths}
     gens = {p.stem for p in paths}
-    assert envs == set(preset_names("tier1"))
-    assert gens == {"fcp", "comedi", "brdiv", "lbrdiv"}
-    assert len(paths) == 12
+    tier1 = set(preset_names("tier1"))
+    assert envs == tier1
+
+    # The four cooperative generators cover every tier1 environment. AD-RPG is
+    # shipped for LBF only: it is 2-player, ~n^2 in cost, and only validated on the
+    # environment the others are tuned on (see gen_teammate_configs.py and
+    # docs/tuning_record.md), so it is deliberately not emitted for the rest.
+    cooperative = {"fcp", "comedi", "brdiv", "lbrdiv"}
+    assert gens == cooperative | {"rpg"}
+    rpg_envs = {p.parent.name for p in paths if p.stem == "rpg"}
+    assert rpg_envs == {"lbf_12x12"}
+    assert len(paths) == len(cooperative) * len(tier1) + 1
 
 
 @pytest.mark.parametrize("path", _shipped_configs(), ids=lambda p: f"{p.parent.name}/{p.stem}")
@@ -1611,3 +1620,76 @@ def test_mismatch_needs_two_members():
 
     with _pytest.raises(ValueError, match="at least two distinct"):
         _seat_plan([3], 10, 0.5, np.random.default_rng(0))
+
+
+# --- AD-RPG (clean-room reimplementation) -----------------------------------
+
+
+def test_rpg_config_to_algorithm_dict_carries_diversity_knobs():
+    """The resolved-config dump must record the RPG-specific hyperparameters."""
+    from oaht_bench.configs.teammate_gen import RpgConfig
+
+    d = RpgConfig(
+        population_size=3,
+        partnerplay_ratio=0.1,
+        off_diag_factor=0.25,
+        n_lookahead=2,
+        dice_lambda=0.95,
+    ).to_algorithm_dict()
+    assert d["ALG"] == "rpg"
+    assert d["N_LOOKAHEAD"] == 2
+    assert d["DICE_LAMBDA"] == 0.95
+    assert d["PARTNERPLAY_RATIO"] == 0.1
+    assert d["OFF_DIAG_FACTOR"] == 0.25
+
+
+def test_rpg_runtime_derives_outer_updates():
+    from oaht_bench.configs.teammate_gen import RpgConfig
+    from oaht_bench.teammate_gen.runtime import RpgRuntime
+
+    gen = RpgConfig(population_size=2, num_envs=8, total_timesteps=8192)
+    rt = RpgRuntime.from_config(gen, rollout_length=128, num_agents=2)
+    assert rt.num_updates == int(8192 // (128 * 8))
+    assert rt.num_actors == 2 * 8
+
+
+def test_rpg_runtime_needs_at_least_two_particles():
+    """A single particle has no cross-play term -- that is FCP, not diversity."""
+    from oaht_bench.configs.teammate_gen import RpgConfig
+    from oaht_bench.teammate_gen.runtime import RpgRuntime
+
+    gen = RpgConfig(population_size=1, num_envs=8, total_timesteps=1e6)
+    with pytest.raises(ValueError, match="at least 2 particles"):
+        RpgRuntime.from_config(gen, rollout_length=128, num_agents=2)
+
+
+def test_rpg_runtime_rejects_a_negative_self_play_weight():
+    """N * partnerplay_ratio must stay below 1 or the base self-play weight flips."""
+    from oaht_bench.configs.teammate_gen import RpgConfig
+    from oaht_bench.teammate_gen.runtime import RpgRuntime
+
+    gen = RpgConfig(population_size=5, partnerplay_ratio=0.3, num_envs=8, total_timesteps=1e6)
+    with pytest.raises(ValueError, match="self-play weight"):
+        RpgRuntime.from_config(gen, rollout_length=128, num_agents=2)
+
+
+def test_rpg_runtime_requires_two_agents():
+    from oaht_bench.configs.teammate_gen import RpgConfig
+    from oaht_bench.teammate_gen.runtime import RpgRuntime
+
+    gen = RpgConfig(population_size=2, num_envs=8, total_timesteps=1e6)
+    with pytest.raises(ValueError, match="exactly 2 agents"):
+        RpgRuntime.from_config(gen, rollout_length=128, num_agents=3)
+
+
+def test_training_plan_counts_rpg_lookahead_and_particles():
+    """One outer step is n_lookahead base updates + one manipulator update; the N
+    particles are vmapped, so they are parallel members."""
+    from oaht_bench.configs.teammate_gen import RpgConfig
+    from oaht_bench.teammate_gen.plan import training_plan
+
+    gen = RpgConfig(population_size=3, num_envs=8, total_timesteps=1e6, n_lookahead=2)
+    plan = training_plan(_job(generator=gen))
+    assert plan.parallel_members == 3
+    assert plan.updates_per_unit == 3  # n_lookahead + 1
+    assert plan.sequential_updates == 3 * plan.sequential_units

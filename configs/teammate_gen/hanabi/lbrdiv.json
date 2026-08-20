@@ -33,11 +33,7 @@
       "total_timesteps": 1500000000.0
     },
     "job_type": "teammate_generation",
-    "label": "lbrdiv_hanabi",
-    "logging": {
-      "use_wandb": true,
-      "wandb_project": "oaht-bench"
-    }
+    "label": "lbrdiv_hanabi"
   },
   "schema_version": 1
 }

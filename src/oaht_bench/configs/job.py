@@ -18,7 +18,21 @@ from pydantic import Field, model_validator
 
 from oaht_bench.configs.base import BaseConfig, VersionedConfig
 from oaht_bench.configs.env import EnvConfig
+from oaht_bench.configs.network import (
+    LiamNetworkConfig,
+    MelibaNetworkConfig,
+    OmisNetworkConfig,
+    TaoNetworkConfig,
+)
 from oaht_bench.configs.teammate_gen import GeneratorConfig
+
+#: Offline network config, selected by ``architecture``. Only LIAM is on the
+#: BaseAhtPolicy contract; the other three carry a config so their runs validate
+#: while they stay on the runner's inline path (transitional).
+OfflineNetworkConfig = Annotated[
+    LiamNetworkConfig | MelibaNetworkConfig | OmisNetworkConfig | TaoNetworkConfig,
+    Field(discriminator="architecture"),
+]
 
 #: The benchmark's baseline roster (§12.9). Thirteen entries in four groups:
 #: floors, a reference row, a ceiling, the learning-history family, and the
@@ -200,6 +214,9 @@ class OfflineTrainingConfig(BaseConfig):
     than iterations x updates-per-iteration.
     """
 
+    # Defaults to LIAM so a job that omits `offline` still validates; the
+    # architecture is serialised either way, so it stays in the run's hash.
+    network: OfflineNetworkConfig = Field(default_factory=LiamNetworkConfig)
     context_length: int = Field(default=20, gt=0, description="Timesteps per window; TAO's K.")
     stride: int = Field(
         default=5,
@@ -208,11 +225,6 @@ class OfflineTrainingConfig(BaseConfig):
         "start offsets instead; a stride enumerates them, which makes a run "
         "reproducible from the config alone.",
     )
-    hidden_dim: int = Field(default=32, gt=0)
-    ff_dim: int = Field(default=128, gt=0)
-    num_blocks: int = Field(default=3, gt=0)
-    dropout: float = Field(default=0.1, ge=0.0, lt=1.0)
-
     stage1_steps: int = Field(
         default=2000,
         gt=0,
@@ -278,6 +290,27 @@ class OfflineTrainingConfig(BaseConfig):
         description="Freeze the stage-1 encoder during stage 2. True follows the "
         "paper; the released code trains it jointly, which would make TAO and "
         "TAO-w/o-PEL the same model. See offline.tao.tao_policy_loss.",
+    )
+    # MeLIBA only. Defaults from the jax-aht implementation
+    # (``meliba_agent.py``: ENCODER_LATENT_DIM, DECODER_KL_WEIGHT).
+    latent_dim: int = Field(
+        default=16,
+        gt=0,
+        description="MeLIBA's per-latent dimension; the encoder emits two latents "
+        "(agent character and mental state) of this size.",
+    )
+    kl_weight: float = Field(
+        default=0.05,
+        ge=0.0,
+        description="MeLIBA's beta on the sequential belief KL (DECODER_KL_WEIGHT).",
+    )
+    # OMIS only. Weight on the critic (value) regression in the representation
+    # stage; the imitator cross-entropy has weight 1. Search is not deployed, so
+    # this only shapes the saved critic head.
+    value_coef: float = Field(
+        default=1.0,
+        ge=0.0,
+        description="OMIS's weight on the critic MSE relative to the imitator CE.",
     )
     eval_episodes: int = Field(
         default=20,

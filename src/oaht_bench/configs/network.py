@@ -46,3 +46,34 @@ class MlpNetwork(BaseConfig):
         if self.policy_input_dim is not None:
             out["POLICY_INPUT_DIM"] = self.policy_input_dim
         return out
+
+
+class BaseOfflineAhtNetworkConfig(BaseConfig):
+    ff_dim: int = Field(default=128, gt=0)
+    hidden_dim: int = Field(default=32, gt=0)
+    num_blocks: int = Field(default=3, gt=0)
+
+    dropout: float = Field(default=0.1, ge=0.0, lt=1.0)
+
+    # Resolved from the dataset before a policy is built (see
+    # ``offline.runner`` and ``BaseAhtPolicy``), so a policy is pure-config. Left
+    # ``None`` in an authored config -- the dataset path already in the hash
+    # determines them, so they are a derived convenience, not a tuning knob.
+    obs_dim: int | None = Field(default=None, ge=1)
+    action_dim: int | None = Field(default=None, ge=1)
+
+
+class LiamNetworkConfig(BaseOfflineAhtNetworkConfig):
+    architecture: Literal["liam"] = "liam"
+
+
+class MelibaNetworkConfig(BaseOfflineAhtNetworkConfig):
+    architecture: Literal["meliba"] = "meliba"
+
+
+class OmisNetworkConfig(BaseOfflineAhtNetworkConfig):
+    architecture: Literal["omis"] = "omis"
+
+
+class TaoNetworkConfig(BaseOfflineAhtNetworkConfig):
+    architecture: Literal["tao"] = "tao"

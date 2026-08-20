@@ -24,7 +24,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from oaht_bench.offline.backbone import mask_logits
+from oaht_bench.offline.utils import mask_logits
 
 
 @dataclass(frozen=True)
@@ -151,13 +151,13 @@ def _rollout(
         # recorded action is always legal; sampling the ego from unmasked logits
         # let it choose actions the environment cannot execute -- 20.5% of
         # (step, action) pairs on LBF, and action 5 two thirds of the time.
-        ego_avail = jax.lax.stop_gradient(
-            env.get_avail_actions(state)[agents[ego_index]]
-        ).astype(jnp.float32).reshape(-1)
-        rng, act_rng = jax.random.split(rng)
-        ego_action = int(
-            jax.random.categorical(act_rng, mask_logits(logits[0, -1], ego_avail))
+        ego_avail = (
+            jax.lax.stop_gradient(env.get_avail_actions(state)[agents[ego_index]])
+            .astype(jnp.float32)
+            .reshape(-1)
         )
+        rng, act_rng = jax.random.split(rng)
+        ego_action = int(jax.random.categorical(act_rng, mask_logits(logits[0, -1], ego_avail)))
         ctx_act[-1] = ego_action
 
         rng, mate_rng = jax.random.split(rng)
@@ -230,10 +230,16 @@ def evaluate(
             rng, ep_rng = jax.random.split(rng)
             returns.append(
                 _rollout(
-                    env, predict, mate_params, loaded.policy_cls,
-                    rng=ep_rng, context_length=context_length,
+                    env,
+                    predict,
+                    mate_params,
+                    loaded.policy_cls,
+                    rng=ep_rng,
+                    context_length=context_length,
                     max_episode_steps=max_episode_steps,
-                    target_return=target_return, ego_index=ego_index, obs_dim=obs_dim,
+                    target_return=target_return,
+                    ego_index=ego_index,
+                    obs_dim=obs_dim,
                     normalization=normalization,
                 )
             )

@@ -28,6 +28,7 @@ from oaht_bench.teammate_gen.runtime import (
     CoMeDiRuntime,
     PairedDiversityRuntime,
     PpoRuntime,
+    RpgRuntime,
 )
 
 
@@ -114,6 +115,18 @@ def training_plan(job: TeammateGenerationJob, *, num_agents: int = 2) -> Trainin
             sequential_units=max(0, gen.population_size - 1),
             parallel_members=1,
             warmup_updates=rt.warmup().num_updates,
+        )
+
+    if gen.generator == "rpg":
+        rt = RpgRuntime.from_config(gen, rollout_length=rollout, num_agents=num_agents)
+        # One outer step = n_lookahead base updates + one manipulator update, run
+        # sequentially over num_updates steps. The N particles (base+manipulator
+        # pairs) are vmapped, so they are parallel members rather than sequential.
+        return TrainingPlan(
+            generator="rpg",
+            updates_per_unit=rt.n_lookahead + 1,
+            sequential_units=rt.num_updates,
+            parallel_members=rt.population_size,
         )
 
     rt = PairedDiversityRuntime.from_config(gen, rollout_length=rollout, num_agents=num_agents)

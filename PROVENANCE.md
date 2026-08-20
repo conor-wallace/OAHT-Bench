@@ -33,3 +33,24 @@ marl                   -> oaht_bench.teammate_gen.marl
 common                 -> oaht_bench.common
 ego_agent_training     -> oaht_bench.algorithms
 ```
+
+# Clean-room reimplementations (not absorbed)
+
+Some algorithms are reimplemented from their papers rather than absorbed, because
+their source is unavailable under a redistributable license. **No source code is
+copied** from these upstreams; the reference repository is used only to understand
+the method. Unlike absorbed code, these files are authored, linted (they are on the
+Ruff allowlist in `pyproject.toml`), and unit-tested.
+
+## AD-RPG (Rational Adversarial Diversity)
+
+- Reference paper: Lauffer, Shah, Carroll, Seshia, Russell & Dennis, *Robust and
+  Diverse Multi-Agent Learning via Rational Policy Gradient*, NeurIPS 2025.
+- Reference repository (read-only, **not** copied): `https://github.com/niklaslauffer/rational-policy-gradient`, commit `0f9b863cae3eb78cf70d4e20db2f3441ba73c32c`.
+- License: **none** — the upstream repository ships no license, so its code cannot
+  be absorbed or redistributed. This is the reason for the clean-room path.
+- Local path: `src/oaht_bench/teammate_gen/RPG.py` (authored). Scope: the
+  `doublesided_RAD` variant only (adversarial diversity), reimplemented natively on
+  our JAX/`marl` stack. The upstream targets jax 0.4.30 / flax 0.8.5 / a JaxMARL
+  fork / Hydra, none of which match our pinned stack, so a native reimplementation
+  was required regardless of licensing.

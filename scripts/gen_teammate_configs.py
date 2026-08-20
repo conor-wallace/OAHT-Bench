@@ -33,6 +33,7 @@ from oaht_bench.configs.teammate_gen import (
     FcpConfig,
     LBrDivConfig,
     PpoHyperparams,
+    RpgConfig,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -159,6 +160,17 @@ PPO: dict[str, dict[str, dict[str, Any]]] = {
             gae_lambda=0.95,
         ),
     },
+    "rpg": {
+        # UNTUNED starting point. RPG's base update is a single DiCE policy-gradient
+        # step (no PPO clipping/epochs), so only learning_rate, entropy_coef, gamma,
+        # gae_lambda, value_coef and max_grad_norm are read; the PPO-specific fields
+        # are inert. Base LR follows the reference repo's Overcooked base actor
+        # (2.5e-4); the manipulator LR lives on RpgConfig, not here.
+        "lbf": dict(
+            learning_rate=2.5e-4,
+            entropy_coef=0.01,
+        ),
+    },
 }
 
 #: Budget, population and environment count, per (generator, family).
@@ -258,6 +270,15 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         "overcooked": _paired_scale(128, 9e7),
         "hanabi": _paired_scale(128, 5e8),
     },
+    "rpg": {
+        # UNTUNED. RPG is the most expensive generator here: each outer update
+        # collects N self-play + N**2 cross-play rollouts and runs an inner
+        # n_lookahead per particle, so cost grows ~quadratically in pop. This is a
+        # deliberately modest LBF starting budget (~1,220 updates at num_envs=64);
+        # scaling is one of the two open adoption questions (does coverage hold past
+        # the paper's N=2?). Tune on GPU before trusting the population.
+        "lbf": dict(total_timesteps=1e7, num_envs=64, pop=POPULATION_SIZE),
+    },
 }
 
 #: Diversity weights that differ per environment.
@@ -313,6 +334,11 @@ def build(generator: str, preset_name: str, num_checkpoints: int = 5):
             lagrange_learning_rate=_lagrange_lr(pop),
             **common,
         )
+    if generator == "rpg":
+        # Diversity knobs use RpgConfig's defaults (partnerplay_ratio=0.1,
+        # off_diag_factor=0.25, dice_lambda=0.99, n_lookahead=1, manipulator_lr).
+        # At pop=5 the base self-play weight is 1 - 5*0.1 = 0.5 (stays positive).
+        return RpgConfig(total_timesteps=scale["total_timesteps"], **common)
     raise ValueError(f"unknown generator {generator!r}")
 
 
@@ -342,7 +368,10 @@ def main() -> int:
     written = []
     for env_name in envs:
         env = get_preset(env_name)
-        for generator in ("fcp", "comedi", "brdiv", "lbrdiv"):
+        for generator in ("fcp", "comedi", "brdiv", "lbrdiv", "rpg"):
+            # RPG is only tuned/supported on LBF so far (see SCALE/PPO tables).
+            if generator == "rpg" and _family(env_name) != "lbf":
+                continue
             gen = build(generator, env_name)
             kwargs: dict[str, Any] = {}
             if args.wandb:

@@ -32,11 +32,7 @@
       "total_timesteps": 1000000000.0
     },
     "job_type": "teammate_generation",
-    "label": "fcp_hanabi",
-    "logging": {
-      "use_wandb": true,
-      "wandb_project": "oaht-bench"
-    }
+    "label": "fcp_hanabi"
   },
   "schema_version": 1
 }

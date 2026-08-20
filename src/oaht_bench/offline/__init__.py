@@ -26,17 +26,38 @@ CoMeDi have no best response and would need one trained.
 
 from oaht_bench.offline.backbone import DecisionTransformer
 from oaht_bench.offline.dataset import Windows, make_windows, return_to_go
-from oaht_bench.offline.sampler import TeammateIndex, sample_stage1, sample_stage2
 from oaht_bench.offline.liam import (
     LiamDecoder,
     LiamEncoder,
+    LiamNetwork,
     LiamPolicy,
     liam_policy_loss,
     liam_reconstruction_loss,
 )
+from oaht_bench.offline.meliba import (
+    MelibaDecoder,
+    MelibaEncoder,
+    MelibaNetwork,
+    MelibaPolicy,
+    meliba_belief,
+    meliba_policy_loss,
+    meliba_reconstruction_loss,
+)
+from oaht_bench.offline.omis import (
+    OmisActor,
+    OmisEncoder,
+    OmisModel,
+    OmisPolicy,
+    omis_actor_loss,
+    omis_representation_loss,
+    omis_search,
+)
+from oaht_bench.offline.registry import BaseAhtPolicy, get_policy
+from oaht_bench.offline.sampler import TeammateIndex, sample_stage1, sample_stage2
 from oaht_bench.offline.tao import (
     AncillaryActionDecoder,
     OpponentPolicyEncoder,
+    TaoNetwork,
     TaoPolicy,
     embedding_loss,
     supervised_contrastive,
@@ -45,11 +66,23 @@ from oaht_bench.offline.tao import (
 
 __all__ = [
     "AncillaryActionDecoder",
+    "BaseAhtPolicy",
     "DecisionTransformer",
     "LiamDecoder",
     "LiamEncoder",
+    "LiamNetwork",
     "LiamPolicy",
+    "get_policy",
+    "MelibaDecoder",
+    "MelibaEncoder",
+    "MelibaNetwork",
+    "MelibaPolicy",
+    "OmisActor",
+    "OmisEncoder",
+    "OmisModel",
+    "OmisPolicy",
     "OpponentPolicyEncoder",
+    "TaoNetwork",
     "TaoPolicy",
     "TeammateIndex",
     "Windows",
@@ -60,6 +93,12 @@ __all__ = [
     "tao_policy_loss",
     "liam_policy_loss",
     "liam_reconstruction_loss",
+    "meliba_belief",
+    "meliba_policy_loss",
+    "meliba_reconstruction_loss",
+    "omis_actor_loss",
+    "omis_representation_loss",
+    "omis_search",
     "make_windows",
     "return_to_go",
 ]

@@ -19,11 +19,7 @@
       "total_timesteps": 24000000.0
     },
     "job_type": "teammate_generation",
-    "label": "fcp_lbf_12x12",
-    "logging": {
-      "use_wandb": true,
-      "wandb_project": "oaht-bench"
-    }
+    "label": "fcp_lbf_12x12"
   },
   "schema_version": 1
 }

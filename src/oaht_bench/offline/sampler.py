@@ -106,9 +106,7 @@ def sample_stage1(
             "only member of its class and the contrastive term has no positives."
         )
     available = index.teammates
-    chosen = rng.choice(
-        available, size=min(teammates_per_batch, len(available)), replace=False
-    )
+    chosen = rng.choice(available, size=min(teammates_per_batch, len(available)), replace=False)
 
     anchors: list[int] = []
     for t in chosen:
@@ -117,20 +115,20 @@ def sample_stage1(
         anchors.extend(rng.choice(pool, size=windows_per_teammate, replace=replace).tolist())
     anchor_idx = np.asarray(anchors)
 
-    cross_idx = np.asarray([
-        index.cross_trajectory(
-            int(windows.teammate_id[i]), int(windows.episode_id[i]), rng
-        )
-        for i in anchor_idx
-    ])
+    cross_idx = np.asarray(
+        [
+            index.cross_trajectory(int(windows.teammate_id[i]), int(windows.episode_id[i]), rng)
+            for i in anchor_idx
+        ]
+    )
 
     batch = _take(windows, anchor_idx, _ANCHOR_KEYS)
     batch["teammate_id"] = windows.teammate_id[anchor_idx]
     # The generative term reads the cross trajectory's *observations* and scores
     # its *actions* -- not next-observations, which are the encoder's input.
-    batch.update(_take(
-        windows, cross_idx, ("mate_obs", "mate_actions", "mate_avail", "mask"), "cross_"
-    ))
+    batch.update(
+        _take(windows, cross_idx, ("mate_obs", "mate_actions", "mate_avail", "mask"), "cross_")
+    )
     return batch
 
 
@@ -156,8 +154,9 @@ def sample_stage2(
     context_rows = []
     for i in decoder_idx:
         t, ep = int(windows.teammate_id[i]), int(windows.episode_id[i])
-        context_rows.append([index.cross_trajectory(t, ep, rng)
-                             for _ in range(context_trajectories)])
+        context_rows.append(
+            [index.cross_trajectory(t, ep, rng) for _ in range(context_trajectories)]
+        )
     context_idx = np.asarray(context_rows)  # (batch, C)
 
     batch = {
@@ -170,11 +169,13 @@ def sample_stage2(
         "teammate_id": windows.teammate_id[decoder_idx],
     }
     # Concatenate the C fragments along time: (batch, C, T, ...) -> (batch, C*T, ...)
-    for key, out in (("mate_next_obs", "context_mate_next_obs"),
-                     ("mate_actions", "context_mate_actions"),
-                     ("mate_rewards", "context_mate_rewards"),
-                     ("timesteps", "context_timesteps"),
-                     ("mask", "context_mask")):
+    for key, out in (
+        ("mate_next_obs", "context_mate_next_obs"),
+        ("mate_actions", "context_mate_actions"),
+        ("mate_rewards", "context_mate_rewards"),
+        ("timesteps", "context_timesteps"),
+        ("mask", "context_mask"),
+    ):
         stacked = getattr(windows, key)[context_idx]
         batch[out] = stacked.reshape(stacked.shape[0], -1, *stacked.shape[3:])
     return batch

@@ -35,11 +35,7 @@
       "total_timesteps_per_iteration": 20000000.0
     },
     "job_type": "teammate_generation",
-    "label": "comedi_hanabi",
-    "logging": {
-      "use_wandb": true,
-      "wandb_project": "oaht-bench"
-    }
+    "label": "comedi_hanabi"
   },
   "schema_version": 1
 }

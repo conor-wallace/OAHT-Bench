@@ -232,3 +232,30 @@ jax-aht's per-environment Hydra configs. Those encode real tuning and are a
 reasonable starting point, but the FCP result above shows what inheriting them
 can cost: upstream's LBF budget left the population at 74% of the achievable
 food, and CoMeDi's left each member with 160 updates.
+
+## AD-RPG × LBF 12×12 (untuned; a falsification, not a tuned baseline)
+
+AD-RPG is a clean-room reimplementation of the paper's `doublesided_RAD`
+(`src/oaht_bench/teammate_gen/RPG.py`, see `PROVENANCE.md`). Its LBF config is a
+**deliberately modest, untuned starting point** (`total_timesteps=1e7`,
+`num_envs=64`, `pop=5`, defaults for `partnerplay_ratio`, `off_diag_factor`,
+`dice_lambda`, `n_lookahead`). It exists to answer one question first: **does an
+algorithm sold as general-purpose produce a diverse, non-sabotaging LBF
+population, on the same environment the other four are tuned on?**
+
+Two things this config cannot yet tell us, both open adoption gates:
+
+- **Scale.** The paper only demonstrates `NUM_PARTICLES=2`. Cost here grows ~`n²`
+  (each outer update collects `n` self-play + `n²` cross-play rollouts and runs an
+  inner `n_lookahead` per particle), so `pop=5` is far heavier than any other
+  generator and may not hold coverage — or may destabilise. Whether SP−XP
+  separation survives past `n=2` is the first thing a GPU sweep must establish.
+- **Held-out usability.** The paper evaluates its population by in-population
+  cross-play, never as a held-out training population for a separately-trained
+  ego. Our runner scores it exactly like the other self-play releases, but whether
+  that population is *useful* as AHT teammates is unmeasured until `ppo_br.py`.
+
+The correctness of the algorithm itself (the DiCE surrogate and the higher-order
+manipulator meta-gradient) is pinned by `tests/test_rpg.py` on CPU-sized inputs;
+what those tests do **not** establish is that training converges to a good LBF
+population, which only a real run can show.

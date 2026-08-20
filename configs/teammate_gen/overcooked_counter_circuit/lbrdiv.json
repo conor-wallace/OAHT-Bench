@@ -22,11 +22,7 @@
       "total_timesteps": 270000000.0
     },
     "job_type": "teammate_generation",
-    "label": "lbrdiv_overcooked_counter_circuit",
-    "logging": {
-      "use_wandb": true,
-      "wandb_project": "oaht-bench"
-    }
+    "label": "lbrdiv_overcooked_counter_circuit"
   },
   "schema_version": 1
 }

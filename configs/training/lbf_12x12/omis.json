@@ -11,11 +11,11 @@
       "tier": "tier1"
     },
     "dataset_path": "results/dataset_collection/fcp_lbf_12x12-187ca62dbe39/dataset.npz",
-    "baseline": "liam",
-    "label": "liam_fcp_lbf_12x12",
+    "baseline": "omis",
+    "label": "omis_fcp_lbf_12x12",
     "offline": {
       "network": {
-        "architecture": "liam"
+        "architecture": "omis"
       },
       "stride": 20,
       "stage1_steps": 2000,

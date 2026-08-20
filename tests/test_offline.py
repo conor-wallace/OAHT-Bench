@@ -18,9 +18,9 @@ from oaht_bench.offline import (
     DecisionTransformer,
     LiamDecoder,
     LiamEncoder,
-    LiamPolicy,
+    LiamNetwork,
     OpponentPolicyEncoder,
-    TaoPolicy,
+    TaoNetwork,
     liam_reconstruction_loss,
     make_windows,
     return_to_go,
@@ -83,7 +83,7 @@ def test_liam_conditions_by_concatenation_and_tao_by_cross_attention():
 
     # LIAM widens the observation embedding by hidden_dim -- the concatenation.
     z = jnp.zeros((len(w), w.context_length, 32))
-    liam = LiamPolicy(action_dim=6, hidden_dim=32)
+    liam = LiamNetwork(action_dim=6, hidden_dim=32)
     lp = liam.init(rng, *args, embedding=z, **kw)
     obs_kernel = jax.tree_util.tree_leaves_with_path(lp)
     widened = [v.shape for k, v in obs_kernel if v.ndim == 2 and v.shape[0] == w.obs_dim + 32]
@@ -135,7 +135,7 @@ def test_liam_reconstructs_the_teammate_at_the_same_timestep():
     """
     import inspect
 
-    from oaht_bench.offline import liam as liam_mod
+    from oaht_bench.offline.liam import model as liam_mod
 
     src = inspect.getsource(liam_mod.liam_reconstruction_loss)
     assert 'batch["mate_actions"]' in src
@@ -239,7 +239,7 @@ def test_liam_stage_two_does_not_differentiate_the_encoder():
         timesteps=batch["timesteps"],
         mask=batch["mask"],
     )
-    pol = LiamPolicy(action_dim=6)
+    pol = LiamNetwork(action_dim=6)
     pp = pol.init(
         rng,
         batch["ego_rtg"],
@@ -276,7 +276,7 @@ def test_tao_policy_consumes_the_embedding_sequence():
     w = _windows()
     rng = jax.random.PRNGKey(0)
     ctx = jnp.zeros((len(w), w.context_length, 32))
-    pol = TaoPolicy(action_dim=6)
+    pol = TaoNetwork(action_dim=6)
     p = pol.init(
         rng,
         jnp.asarray(w.ego_rtg),
@@ -376,7 +376,7 @@ def _tao_setup(w):
         mask=batch["context_mask"],
         timesteps=batch["context_timesteps"],
     )
-    pol = TaoPolicy(action_dim=6)
+    pol = TaoNetwork(action_dim=6)
     pp = pol.init(
         rng,
         batch["ego_rtg"],
@@ -469,8 +469,8 @@ def test_available_actions_are_enforced_everywhere_the_data_enforces_them():
 
     from oaht_bench.offline import dataset as ds
     from oaht_bench.offline import evaluate as ev
-    from oaht_bench.offline import liam as liam_mod
     from oaht_bench.offline import tao as tao_mod
+    from oaht_bench.offline.liam import model as liam_mod
 
     # windows carry the masks for both seats
     w = _windows()
@@ -494,7 +494,7 @@ def test_mask_logits_matches_the_absorbed_convention():
     Not ``-inf``: a fully-masked row would then be NaN after softmax, and padded
     timesteps are masked with all-ones precisely to avoid that.
     """
-    from oaht_bench.offline.backbone import mask_logits
+    from oaht_bench.offline.utils import mask_logits
 
     logits = jnp.zeros((1, 3))
     avail = jnp.asarray([[1.0, 0.0, 1.0]])

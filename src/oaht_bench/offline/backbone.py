@@ -41,30 +41,6 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 
-#: Appendix F's sizes, as defaults rather than constants -- they are TAO's
-#: choices for TAO's environments, and every model here takes them as fields so a
-#: different environment can be given a different width without editing a module.
-DEFAULT_HIDDEN_DIM = 32
-DEFAULT_FF_DIM = 128
-DEFAULT_NUM_BLOCKS = 3
-
-
-def mask_logits(logits, avail):
-    """Suppress unavailable actions, as every absorbed policy does.
-
-    ``logits - (1 - avail) * 1e10`` (``agents/mlp_actor_critic.py:36-37``) rather
-    than ``-inf``, which would make a fully-masked row NaN after softmax.
-
-    Collection already applies this: every seat's ``get_action`` receives
-    ``avail_actions``, so a recorded action is always legal. Without it here the
-    learned policy is trained and evaluated under a weaker constraint than the
-    data was generated under -- on LBF that is 20.5% of (step, action) pairs, and
-    action 5 is unavailable 67% of the time.
-    """
-    if avail is None:
-        return logits
-    return logits - (1.0 - avail) * 1e10
-
 
 class Block(nn.Module):
     """One transformer block: self-attention, optional cross-attention, feed-forward."""
@@ -78,7 +54,9 @@ class Block(nn.Module):
     def __call__(self, x, *, context=None, causal_mask, cross_mask=None, train: bool):
         # Single-head throughout, per Appendix F.
         attn = nn.SelfAttention(
-            num_heads=1, qkv_features=self.hidden_dim, dropout_rate=self.dropout,
+            num_heads=1,
+            qkv_features=self.hidden_dim,
+            dropout_rate=self.dropout,
             deterministic=not train,
         )(x, mask=causal_mask)
         x = nn.LayerNorm()(x + nn.Dropout(self.dropout, deterministic=not train)(attn))
@@ -91,7 +69,9 @@ class Block(nn.Module):
                     "MeLIBA should construct the backbone with it disabled."
                 )
             cross = nn.MultiHeadDotProductAttention(
-                num_heads=1, qkv_features=self.hidden_dim, dropout_rate=self.dropout,
+                num_heads=1,
+                qkv_features=self.hidden_dim,
+                dropout_rate=self.dropout,
                 deterministic=not train,
             )(x, context, mask=cross_mask)
             x = nn.LayerNorm()(x + nn.Dropout(self.dropout, deterministic=not train)(cross))
@@ -118,16 +98,26 @@ class DecisionTransformer(nn.Module):
     """
 
     action_dim: int
-    hidden_dim: int = DEFAULT_HIDDEN_DIM
-    ff_dim: int = DEFAULT_FF_DIM
-    num_blocks: int = DEFAULT_NUM_BLOCKS
+    hidden_dim: int = 32
+    ff_dim: int = 128
+    num_blocks: int = 3
     use_cross_attention: bool = False
     dropout: float = 0.1
     max_timesteps: int = 4096
 
     @nn.compact
-    def __call__(self, rtg, obs, actions, *, timesteps, mask=None, context=None,
-                 context_mask=None, train: bool = False):
+    def __call__(
+        self,
+        rtg,
+        obs,
+        actions,
+        *,
+        timesteps,
+        mask=None,
+        context=None,
+        context_mask=None,
+        train: bool = False,
+    ):
         B, T = obs.shape[0], obs.shape[1]
 
         # Modality-specific linear layers, 32 nodes, no activation.

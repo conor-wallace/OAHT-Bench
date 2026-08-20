@@ -10,17 +10,17 @@
       "tier": "tier1"
     },
     "generator": {
-      "cross_play_weight": 0.05,
-      "generator": "brdiv",
-      "num_envs": 192,
+      "generator": "rpg",
       "ppo": {
-        "learning_rate": 0.0005,
-        "num_minibatches": 2
-      },
-      "total_timesteps": 135000000.0
+        "learning_rate": 0.00025
+      }
+    },
+    "logging": {
+      "use_wandb": true,
+      "wandb_project": "lbf_teammate_gen"
     },
     "job_type": "teammate_generation",
-    "label": "brdiv_lbf_12x12"
+    "label": "rpg_lbf_12x12"
   },
   "schema_version": 1
 }

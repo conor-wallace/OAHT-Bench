@@ -35,7 +35,13 @@ def _dataset(tmp_path: Path, n_ep=8, T=14, obs_dim=6, teammates=(0, 1, 2, 3)) ->
 
 
 def _job(tmp_path: Path, baseline: str, **overrides) -> TrainingJob:
+    # network.architecture selects the model; baseline drives runner dispatch. For
+    # a baseline with no network config yet (e.g. the unimplemented "taget"), fall
+    # back to a valid architecture so the *runner's* SUPPORTED gate is what refuses,
+    # not config validation.
+    architecture = baseline if baseline in ("liam", "meliba", "omis", "tao") else "liam"
     offline = OfflineTrainingConfig(
+        network={"architecture": architecture},
         context_length=6,
         stride=3,
         stage1_steps=2,
@@ -57,7 +63,7 @@ def _job(tmp_path: Path, baseline: str, **overrides) -> TrainingJob:
     )
 
 
-@pytest.mark.parametrize("baseline", ["liam", "tao"])
+@pytest.mark.parametrize("baseline", ["liam", "meliba", "omis", "tao"])
 def test_runner_trains_and_writes_parameters(tmp_path, baseline):
     """Both baselines complete and leave a loadable artifact plus metrics."""
     from oaht_bench.offline.runner import run
@@ -83,7 +89,7 @@ def test_runner_refuses_an_unimplemented_baseline(tmp_path):
     from oaht_bench.offline.runner import run
 
     with pytest.raises(NotImplementedError, match="has no runner yet"):
-        run(_job(tmp_path, "meliba"))
+        run(_job(tmp_path, "taget"))
 
 
 def test_runner_refuses_to_overwrite_a_finished_run(tmp_path):
@@ -110,7 +116,7 @@ def test_runner_saves_parameters_before_reporting():
     assert src.index('params.pkl").open("wb")') < src.index("nonfatal(")
 
 
-@pytest.mark.parametrize("baseline", ["liam", "tao"])
+@pytest.mark.parametrize("baseline", ["liam", "meliba", "omis", "tao"])
 def test_runner_logs_accuracies_and_evaluation_returns(tmp_path, baseline):
     """A falling loss is not evidence the policy plays.
 
