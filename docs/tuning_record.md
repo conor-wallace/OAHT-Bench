@@ -180,6 +180,156 @@ looking at the slope of the last quarter of training.
 
 ---
 
+## CoMeDi × LBF 12×12 — budget follow-up
+
+Continues the "budget raised" line from the table above. `total_timesteps_per_iteration=2.4e7`
+fixed the 80%-food plateau but not fully — the sweep below asks how much further
+budget buys, and stops short of a confirmed answer.
+
+**Best so far, not yet adopted:** `learning_rate=5e-4` (unchanged from upstream),
+`total_timesteps_per_iteration=9.6e7`, `num_envs=64` unchanged. Not written into
+`gen_teammate_configs.py` because the training curve is still climbing at this
+setting — see below.
+
+**Upstream was:** `learning_rate=5e-4`, `entropy_coef=0.001`,
+`total_timesteps_per_iteration=6e6`, `num_envs=48` — 160 updates/member, the
+starved baseline the table above already diagnosed.
+
+### Grid
+
+Two sweeps, one seed each:
+
+```
+comedi_lbf_competence:
+  generator.ppo.learning_rate               = 5e-4, 1e-3
+  generator.total_timesteps_per_iteration    = 2.4e7, 4.8e7
+
+comedi_lbf_budget2:
+  generator.ppo.learning_rate               = 5e-4
+  generator.total_timesteps_per_iteration    = 2.4e7, 4.8e7, 9.6e7
+```
+
+Scored by post-training cross-play at the default `evaluation_episodes=20`; the
+`48e6` and `96e6` cells were re-scored at `--episodes 100` (via `sweep.py
+rescore`, no retraining) once the 20-episode numbers turned out not to be
+trustworthy at this resolution — see Method notes.
+
+### What the sweep found
+
+**Budget still dominates, and is not yet spent.** At 100-episode fidelity:
+
+| `total_timesteps_per_iteration` | SP | XP | SP−XP |
+|---:|---:|---:|---:|
+| 2.4e7 | 0.395 *(20 ep)* | 0.207 *(20 ep)* | 0.188 |
+| 4.8e7 | 0.453 | 0.208 | 0.245 |
+| 9.6e7 | **0.465** | 0.193 | **0.272** |
+
+Each doubling still gains SP; the gain from `4.8e7 → 9.6e7` (+0.011) is real but
+roughly half the gain from `2.4e7 → 4.8e7`, consistent with the training curve:
+last-quarter slope (same diagnostic as the table above) falls from **+0.038/1k**
+at `4.8e7` to **+0.020/1k** at `9.6e7`, and % food climbs 84% → 93%, still short
+of FCP's ~97% ceiling.
+
+**`learning_rate=5e-4` beat `1e-3` at both budgets tested**, direction-consistent
+though single-seed: SP 0.393 vs 0.362 at `2.4e7`, 0.455 vs 0.441 at `4.8e7`. This
+also happens to be the upstream value — no change adopted on this axis.
+
+### What the sweep could not conclude
+
+**Not converged.** `9.6e7`'s last-quarter slope (+0.020/1k) is still ~10x
+BRDiv's converged rate (+0.002/1k, see below). Whether `1.92e8` flattens it
+further is unrun and would roughly double wall-clock again.
+
+**The learning-rate ordering is not established**, for the same single-seed
+reason the FCP entry flags for its own `learning_rate` axis.
+
+**Separation is the same unvalidated proxy** noted in the FCP entry — the
+`9.6e7` gain here is on both SP and SP−XP together, which is the more
+defensible direction, but downstream validation is still gated on `ppo_br.py`.
+
+### Method notes that came out of this
+
+- **`sweep.py rescore` was broken for all four generators, not just CoMeDi.**
+  `population/rescore.py` called `.params` / `.partner_params` / `.pop_size` on
+  the return of `population_from_run`, which is a plain `(params, population)`
+  tuple for every generator — confirmed against all four `get_*_population`
+  builders and against how `runner.py`'s live-evaluation path unpacks the same
+  call. No test exercised the rescore CLI path. Fixed by unpacking the tuple and
+  reading `partner_params` from the already-loaded checkpoint dict directly.
+- **`label` is folded into the content hash**, so renaming a sweep
+  (`comedi_lbf_competence → comedi_lbf_budget2`) gave the `2.4e7`/`4.8e7`,
+  `lr=5e-4` cells a new hash and silently retrained them instead of reusing the
+  already-trained artifacts — the same category of gap already noted under
+  "Known-open" for `LoggingConfig`/`evaluation_episodes`, just via `label`
+  instead. Keep `--name` stable when extending an existing grid rather than
+  starting a new one, or expect to repay the compute.
+- **That accidental duplicate quantified an eval-noise floor.** Two
+  independently-trained checkpoints at identical hyperparameters
+  (`train_seed=20374` fixed, not varied by either sweep) scored SP 0.4550 vs
+  0.4433 at the sweep default of 20 episodes/pair — a 0.0117 gap that looks like
+  real signal in a `collect` table. Re-scoring both at 100 episodes/pair shrank
+  it to 0.0050 (0.4484 vs 0.4534): most of the original gap was evaluation
+  sampling noise, not training-time nondeterminism. **`collect`'s numbers at the
+  20-episode default should not be trusted below roughly this resolution** —
+  re-score any finalist at higher `--episodes` before reading a ranking off it.
+
+### Budget chase, concluded: `1.92e8`
+
+One more doubling, mirroring BRDiv's own budget chase: hold `learning_rate=5e-4`
+fixed (confirmed, not re-tested), double `total_timesteps_per_iteration` again.
+
+| `total_timesteps_per_iteration` | SP | XP | SP−XP | slope /1k |
+|---:|---:|---:|---:|---:|
+| 9.6e7 | 0.465 | 0.193 | 0.272 | +0.0204 |
+| 1.92e8 | **0.472** | 0.256 | 0.217 | **+0.0046** |
+
+(SP/XP at matched 100-episode rescoring fidelity, per the eval-noise finding
+above.) Slope fell ~4.4x, into the same range BRDiv's and L-BRDiv's converged
+runs landed in (+0.001–0.004/1k) — this is CoMeDi's converged budget.
+**Adopted, pushed into `gen_teammate_configs.py`.**
+
+**Unlike every other budget doubling in this file, separation fell rather than
+rose or held.** SP's move (+0.008) is within the measured noise floor, but XP
+rose meaningfully (0.193→0.256), so separation dropped by 0.055. Read: once
+competence approaches the task ceiling, CoMeDi's members apparently converge
+toward similar competent behavior rather than staying differentiated, and
+`cross_play_weight=0.2` — set once at the original, far shorter budget and
+never revisited this session — may no longer be strong enough to hold
+specialization now that competence isn't the binding constraint. This is the
+same shape of problem BRDiv had (its diversity knob needed retuning once its
+own budget question was settled), just not yet addressed for CoMeDi. Follow-up
+sweep queued.
+
+### `cross_play_weight` follow-up: confirmed the hypothesis, rejected the trade
+
+Single point, `cross_play_weight=0.4` (double the adopted `0.2`), at the
+converged `1.92e8` budget. Not fully converged itself (slope +0.0084/1k vs
+`0.2`'s +0.0046), so treat the SP gap below as an upper bound on the true cost.
+
+| `cross_play_weight` | SP | XP | SP−XP |
+|---:|---:|---:|---:|
+| 0.2 *(adopted)* | **0.472** | 0.256 | 0.217 |
+| 0.4 | 0.430 | **0.088** | **0.342** |
+
+(100-episode rescoring, matching fidelity.) The hypothesis was right —
+doubling the weight recovers separation dramatically (+0.125, or +58%) by
+suppressing cross-play (0.256→0.088) — but at a real SP cost (-0.042, ~9%,
+well past the ~0.005–0.012 noise floor established earlier in this file), and
+`0.4302` sits below the competence floor set by `0.2` (`0.4488` at 5%
+tolerance). **Rejected; `cross_play_weight=0.2` stays adopted.** Kept
+consistent with the competence-first rule applied everywhere else in this
+file, even though the trade ratio here (9% SP for 58% separation) is far more
+favorable than BRDiv's `cross_play_weight=0.20` ever offered (a 42% SP
+collapse for a 16% separation gain) — worth a second look if the downstream
+`ppo_br.py` validation this whole file is gated on ever suggests separation is
+underweighted relative to competence in the adoption rule itself, but that's a
+change to the rule, not a case for bending it here.
+
+**Not explored:** an intermediate `0.3`, or re-testing `0.4` once it's
+actually converged rather than extrapolating from a still-climbing curve.
+
+---
+
 ## Scaling law: BRDiv and L-BRDiv need `num_envs` ∝ n²
 
 Found by raising `population_size` from 3 to 5 for comparability and watching
@@ -218,10 +368,256 @@ pairing never drops below the n=3 reference.
 **Cost:** 3× on both paired generators. LBF goes to `num_envs=192`,
 `total_timesteps=1.35e8` — roughly 50 hr each on an M1 CPU.
 
-**Not yet confirmed.** The mechanism is clear and the evidence fits, but the
-hypothesis is only verified once a BRDiv run at `num_envs=192` shows structure
-returning to the cross-play matrix. Check `Eval/AvgSPReturnCurve` exceeds
-`Eval/AvgXPReturnCurve` before trusting the population.
+**Confirmed.** `results/teammate_generation/brdiv_lbf_12x12-72cf94790359`
+(`num_envs=192`, `cross_play_weight=0.05`, the adopted config) recovers
+structure: SP 0.286, XP 0.181, separation 0.105 — self-play clearly above
+cross-play, versus SP *below* XP at `n=5, num_envs=64`. The n² diagnosis holds.
+Also notably above the n=3 reference's SP 0.237, so the fix did not just repair
+the collapse, it improved on the population BRDiv was originally tuned at.
+
+**Not converged, despite an earlier note in this file claiming otherwise.**
+The `+0.002/1k` "flat" slope quoted in an earlier draft of this entry was
+misattributed — it belongs to the *old* `n=5, num_envs=64` collapsed run in the
+table above, not to this `num_envs=192` run. The actual last-quarter slope here
+is **+0.027/1k**, comparable to CoMeDi's still-climbing `4.8e7` checkpoint
+(+0.038/1k, see above), at only 58% of the food against FCP's ~97% ceiling.
+`total_timesteps` was scaled with `num_envs` to hold the update count fixed at
+5,493 (the point of `_paired_scale`), but that count was tuned to be adequate at
+`n=3, num_envs=64` — nothing re-derives it for `n=5, num_envs=192`, and the
+curve says it isn't. `cross_play_weight` is still worth sweeping, but not yet
+at a budget where the result is trustworthy — see below.
+
+### Budget check: doubling `total_timesteps` at `cross_play_weight=0.05`
+
+`total_timesteps=1.35e8 → 2.7e8` (5,493 → 10,986 updates), `cross_play_weight`
+and `num_envs=192` held fixed, to separate the budget question from the
+diversity-weight question before sweeping the latter.
+
+| `total_timesteps` | SP | XP | SP−XP | % food | last-quarter slope /1k |
+|---:|---:|---:|---:|---:|---:|
+| 1.35e8 | 0.286 | 0.181 | 0.105 | 58.3 | +0.027 |
+| 2.7e8 | **0.313** | 0.196 | **0.117** | 58.0 | **+0.010** |
+
+Doubling gained +0.026 SP and +0.012 separation, and the slope fell to roughly a
+third of its previous value — a sharper deceleration than CoMeDi showed over
+its own first doubling (which roughly halved). `% food` stayed flat while SP
+rose, which doesn't fully square with a food-eaten proxy tracking the same
+signal 1:1 and is unexplained; not investigated further here. `+0.010/1k` is
+still well above BRDiv's originally-reported converged rate (+0.002/1k, at the
+old collapsed `n=5, num_envs=64` setting) but far closer to it than +0.027/1k
+was, so treated as adequate for the purpose of unblocking `cross_play_weight` —
+not as a converged number in its own right. One more doubling was not run.
+
+### `cross_play_weight` sweep at the old (undertrained) budget — do not read a ranking off this
+
+Run at `total_timesteps=1.35e8`, before the budget check above. Included for the
+record, since the doc's convention is to keep what a sweep could not conclude,
+not just what it could.
+
+| `cross_play_weight` | SP | XP | SP−XP |
+|---:|---:|---:|---:|
+| 0.02 | 0.260 | 0.210 | 0.050 |
+| 0.05 *(adopted)* | 0.286 | 0.181 | 0.105 |
+| 0.10 | 0.252 | 0.121 | 0.131 |
+| 0.20 | 0.171 | 0.049 | 0.121 *(below competence floor)* |
+
+`collect`, run only over the three new cells, reported `0.10` as best — but that
+ranking excludes the `0.05` baseline (different sweep name, different config
+hash, not in the same manifest) and is an artifact of that exclusion: against
+all four points together, `0.05` has the highest SP of any cell and clears its
+own competence floor; none of the other three do. More importantly, all four
+cells share the single budget just shown to be inadequate, and the fastest-
+climbing cell (`0.05`) is the current baseline — cells sitting lower on their
+own curve are not distinguishable from cells that are genuinely worse at the
+tradeoff. **Re-run at `total_timesteps=2.7e8` before trusting any ordering
+here.**
+
+### `cross_play_weight` sweep, re-run at `total_timesteps=2.7e8` — this one is trustworthy
+
+Same three cells plus the `0.05` budget-check baseline, all now at matched
+budget and all past the worst of the deceleration: last-quarter slopes sit
+between +0.003/1k and +0.010/1k, versus the −0.001 to +0.027/1k spread at the
+old budget — close enough to flat that a ranking is meaningful.
+
+| `cross_play_weight` | SP | XP | SP−XP | % food | slope /1k |
+|---:|---:|---:|---:|---:|---:|
+| 0.02 | 0.323 | 0.208 | 0.114 | 57.5 | +0.0035 |
+| 0.05 | 0.313 | 0.196 | 0.117 | 58.0 | +0.0100 |
+| **0.10** | **0.335** | 0.130 | **0.205** | 49.7 | +0.0033 |
+| 0.20 | 0.207 | 0.053 | 0.154 *(below floor)* | 39.0 | +0.0030 |
+
+**Adopted: `cross_play_weight=0.10`.** Highest SP of any cell (floor at 95% of
+0.335 is 0.318; only `0.02` and `0.10` clear it) and, among those two, nearly
+double the separation of `0.02` (0.205 vs 0.114). Under the doc's own
+competence-first-then-separation rule this isn't a close call: `0.10` wins on
+both axes at once, which the `0.05` baseline never did even at the corrected
+budget. Supersedes the `0.05` adoption from the scaling-law section above.
+
+**One loose end, not chased further.** `0.10` has the best SP-based self-play
+score but the *worst* `% food` of the top three (49.7% vs 57–58%). The two
+metrics come from different measurement paths — `% food` is a training-time
+rollout statistic, SP is the post-training population evaluation on sampled
+actions — and they agreed everywhere else in this file (FCP, the budget-check
+table above). Here they point in different directions for the winning cell.
+Plausibly the return function isn't purely food count, or the two rollouts
+sample differently enough to diverge at this specific setting; not resolved,
+and worth a look before this population is used downstream.
+
+**Single seed, same caveat as everywhere else in this file.** `0.10`'s margin
+(both SP and separation, over both other in-band and out-of-band cells) is
+large enough that it's a more defensible read than the FCP entry's
+single-seed `learning_rate` ordering, but it is still one run per cell.
+
+### Chasing SP past 0.4
+
+Motivated by a hunch that BRDiv was undertrained relative to FCP, which the
+budget check above already partly vindicated. Six further full-budget runs, all
+at `cross_play_weight=0.10` unless noted, asking two questions in sequence:
+does BRDiv's underlying PPO need the same hyperparameters FCP's did, and does
+one more budget doubling clear 0.4.
+
+**PPO knobs, at `total_timesteps=2.7e8`, against the FCP-tuned LBF values
+(`learning_rate=1e-3`, `entropy_coef=0.003`, `clip_eps=0.03`; BRDiv's inherited
+defaults were `5e-4`, `0.01`, `0.05`):**
+
+| change | SP | SP−XP | slope /1k | verdict |
+|---|---:|---:|---:|---|
+| `entropy_coef` 0.01→0.003 | 0.350 | 0.219 | +0.0042 | adopted |
+| `entropy_coef` 0.003→0.001 | 0.331 | 0.216 | — | reverted — non-monotonic, `0.003` is a local peak |
+| `learning_rate` 5e-4→1e-3 | 0.262 | 0.115 | +0.0061 | reverted — see below |
+| `clip_eps` 0.05→0.03 | 0.338 | 0.229 | +0.0096 | reverted — roughly a wash, and less converged |
+
+Only `entropy_coef=0.003` transferred from FCP; the other two didn't, and
+`learning_rate` didn't just fail to help, it actively hurt. Its training curve
+by quarter (mean return / slope-per-1k) shows why:
+
+| quarter | mean return | slope /1k |
+|---|---:|---:|
+| 1 | 0.118 | +0.077 |
+| 2 | 0.205 | +0.002 |
+| 3 | 0.220 | +0.004 |
+| 4 | 0.234 | +0.006 |
+
+A fast start that stalls hard after the first quarter and barely recovers —
+`1e-3` destabilized training rather than just taking longer, and settled into a
+lower-competence regime. Matches the direction CoMeDi's own `learning_rate`
+finding took, not FCP's; hyperparameters don't transfer cleanly across
+generators here even on the same environment.
+
+**Budget, at the winning PPO setting (`entropy_coef=0.003`, rest unchanged):**
+
+| `total_timesteps` | SP | SP−XP | slope /1k |
+|---:|---:|---:|---:|
+| 2.7e8 | 0.350 | 0.219 | +0.0042 |
+| 5.4e8 | **0.386** | **0.271** | **+0.0013** |
+
+The big one. +0.037 SP and +0.052 separation from one doubling, landing at a
+slope that finally matches BRDiv's originally-reported converged rate
+(+0.002/1k) rather than approaching it asymptotically the way CoMeDi's budget
+axis did. The undertrained-BRDiv hunch was right, and this is most of where the
+overall gain came from.
+
+**`cross_play_weight=0.07`, at the new best budget** (5.4e8, `entropy=0.003`):
+SP 0.365, SP−XP 0.172, slope +0.0026/1k — both worse than `0.10`, and equally
+converged, so not a budget artifact. This was proposed on a "lower weight
+trades separation for competence" model that, in hindsight, the data already
+contradicted: in the original `2.7e8`/`entropy=0.01` sweep, `0.10` had already
+beaten both `0.05` (0.335 vs 0.313) and `0.02` (0.335 vs 0.323) on SP, not just
+on separation. Confirmed twice now from both sides — `0.10` is a local optimum
+on this axis, not a point on a monotonic slope, and going lower is not a lever
+that works here.
+
+**Result: SP 0.386, short of the 0.4 target by 0.014.** Adopted-for-the-chase
+config: `cross_play_weight=0.10`, `entropy_coef=0.003`, `learning_rate=5e-4`
+(unchanged), `clip_eps=0.05` (unchanged), `total_timesteps=5.4e8`,
+`num_envs=192` (unchanged) — not pushed into `gen_teammate_configs.py`, per the
+same "leave it recorded" call as the rest of this entry. Net gain from the
+whole chase, against the confirmed `num_envs=192` baseline at the top of this
+section: **+0.10 SP, +0.166 separation** (SP 0.286→0.386, separation
+0.105→0.271) — real, but the last two moves tried (`clip_eps`, `xpw=0.07`) both
+came back negative or flat, which is the signal that stopped this rather than
+hitting the target number itself. `cross_play_weight=0.12` (the one direction
+on that axis not yet tried) and a third budget doubling are both still
+technically open, but the hit rate on single-point guesses was declining by the
+end of this sequence and neither was pursued.
+
+**Cost.** Six full-budget runs at `2.7e8`–`5.4e8` timesteps in this chase alone,
+on top of the eight already spent on the scaling-law confirmation and the two
+`cross_play_weight` sweeps above — BRDiv's LBF tuning is now the single most
+expensive line item in this file. Worth knowing before proposing another
+single-point guess on this generator without a stronger prior than "try it and
+see."
+
+---
+
+## L-BRDiv × LBF 12×12 — `tolerance_factor` sweep
+
+Never run at `num_envs=192` before this — the 22%-food, SP-0.212 number quoted
+earlier in this file is the old collapsed `n=5, num_envs=64` setting, same
+regime BRDiv collapsed in, not a tuned result. Rather than re-run BRDiv's whole
+incremental discovery (scaling confirmation → budget check → PPO knobs →
+budget again), this sweep started from what transferred there:
+`entropy_coef=0.003` (the one PPO knob that helped) and `total_timesteps=5.4e8`
+(the budget BRDiv actually needed to reach a flat curve), applied directly
+rather than rediscovered. `learning_rate=5e-4` and `clip_eps=0.05` are already
+L-BRDiv's defaults, matching what BRDiv confirmed rather than requiring a
+change. `lagrange_learning_rate=0.0036` is L-BRDiv-specific machinery, already
+scaled for `n=5` by `_lagrange_lr` — not a BRDiv-shared parameter, left alone.
+
+### Grid
+
+```
+generator.total_timesteps    = 5.4e8
+generator.ppo.entropy_coef   = 0.003
+generator.tolerance_factor   = 0.03, 0.1 (default), 0.3
+```
+
+One seed each. `tolerance_factor=0.1` doubles as the scaling-fix confirmation,
+since no separate baseline run existed to reuse.
+
+### What the sweep found
+
+**The transfer worked, and this generator responds very differently to its
+diversity knob than BRDiv does to `cross_play_weight`.**
+
+| `tolerance_factor` | SP | XP | SP−XP | % food | slope /1k |
+|---:|---:|---:|---:|---:|---:|
+| 0.03 | **0.396** | 0.185 | 0.211 | 71.0 | +0.0021 |
+| 0.10 *(default)* | 0.331 | 0.042 | 0.289 | 59.8 | +0.0039 |
+| 0.30 | 0.340 | 0.026 | **0.314** | 56.9 | +0.0018 |
+
+All three converged (slopes +0.002–0.004/1k, matching BRDiv's converged rate),
+so this ranking is trustworthy the same way the re-run `cross_play_weight`
+sweep was.
+
+`tolerance_factor` enforces a *minimum required margin* between self-play and
+cross-play (`SP - XP > tolerance_factor`, via Lagrangian dual ascent) rather
+than weighting a loss term, and the sweep shows that mechanism plainly: raising
+it from `0.03` to `0.3` barely moves SP (0.396→0.340) but crushes XP
+(0.185→0.026) — the constraint is satisfied by suppressing cross-play, not by
+trading away self-play competence the way BRDiv's soft weight does. This is a
+materially different failure/success mode between the two paired generators
+despite sharing the same n² scaling problem.
+
+**Adopted: `tolerance_factor=0.03`.** Clears its own competence floor (only
+cell within 5% of the best SP); the other two don't. SP 0.396 edges out
+BRDiv's own chase-best (0.386) — L-BRDiv is, at this budget, the more
+competent of the two paired generators — while trailing on separation (0.211
+vs BRDiv's 0.271). Not pushed into `gen_teammate_configs.py`, same "record
+only" call as BRDiv.
+
+### What the sweep could not conclude
+
+**Whether SP keeps climbing below `0.03`.** The trend from `0.3→0.1→0.03` is
+mostly monotonic on XP but not cleanly on SP (0.340→0.331→0.396 — a dip then a
+jump), so a fourth point below `0.03` isn't guaranteed to continue improving
+competence; it's also the point at which the constraint starts becoming
+trivially satisfiable, converging toward plain self-play with no diversity
+pressure at all. Not run.
+
+**Single seed**, same caveat as every sweep in this file — the SP gap between
+`0.03` and the other two is large enough to be a credible signal, but it's one
+run per cell.
 
 ---
 

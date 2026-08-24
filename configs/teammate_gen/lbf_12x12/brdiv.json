@@ -10,14 +10,15 @@
       "tier": "tier1"
     },
     "generator": {
-      "cross_play_weight": 0.05,
+      "cross_play_weight": 0.1,
       "generator": "brdiv",
       "num_envs": 192,
       "ppo": {
+        "entropy_coef": 0.003,
         "learning_rate": 0.0005,
         "num_minibatches": 2
       },
-      "total_timesteps": 135000000.0
+      "total_timesteps": 540000000.0
     },
     "job_type": "teammate_generation",
     "label": "brdiv_lbf_12x12"

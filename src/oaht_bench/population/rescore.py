@@ -109,17 +109,21 @@ def rescore_run(
     # Absolute: load_train_run joins relative paths against the wrong root.
     out = load_train_run(str(artifact_dir(run_dir)))
     env = LogWrapper(make_env(job.env.env_name, job.env.env_kwargs()))
-    loaded = population_from_run(job, out, env)
+    params, population = population_from_run(job, out, env)
+
+    # BRDiv/L-BRDiv save a best-response set alongside the confederates; FCP and
+    # CoMeDi don't, so this is None for them, matching runner._best_response_params.
+    partner_params = out.get("final_params_br")
 
     scores = evaluate_population(
         env,
-        loaded.params,
-        loaded,
+        params,
+        population,
         rng=jax.random.PRNGKey(job.seed),
         max_episode_steps=job.env.rollout_length,
         num_episodes=job.evaluation_episodes if episodes is None else episodes,
-        partner_params=loaded.partner_params,
-        member_indices=released_members(job, loaded.pop_size),
+        partner_params=partner_params,
+        member_indices=released_members(job, population.pop_size),
         greedy=job.evaluation_greedy if greedy is None else greedy,
     )
     if write:

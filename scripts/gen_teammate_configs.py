@@ -109,12 +109,15 @@ PPO: dict[str, dict[str, dict[str, Any]]] = {
         ),
     },
     "brdiv": {
+        # entropy_coef tuned 0.01 -> 0.003 (FCP's value; the only one of FCP's
+        # three PPO gaps that transferred -- learning_rate=1e-3 destabilized
+        # training and clip_eps=0.03 was a wash). See docs/tuning_record.md.
         "lbf": dict(
             learning_rate=5e-4,
             update_epochs=15,
             num_minibatches=2,
             clip_eps=0.05,
-            entropy_coef=0.01,
+            entropy_coef=0.003,
         ),
         "overcooked": dict(
             learning_rate=1e-3,
@@ -135,12 +138,14 @@ PPO: dict[str, dict[str, dict[str, Any]]] = {
         ),
     },
     "lbrdiv": {
+        # entropy_coef 0.01 -> 0.003, transferred directly from BRDiv's own
+        # tuning rather than re-swept -- see docs/tuning_record.md.
         "lbf": dict(
             learning_rate=5e-4,
             update_epochs=15,
             num_minibatches=4,
             clip_eps=0.05,
-            entropy_coef=0.01,
+            entropy_coef=0.003,
         ),
         "overcooked": dict(
             learning_rate=1e-3,
@@ -235,38 +240,37 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         "hanabi": dict(total_timesteps=1e9, num_envs=32, pop=POPULATION_SIZE),
     },
     "comedi": {
-        # Raised, and still short. total_timesteps_per_iteration is per *member*,
-        # and 6e6 at 48 envs bought each of the 9 only 160 updates -- FCP needed
-        # 2,929 to reach the task ceiling. That is the whole explanation for
-        # CoMeDi stopping at ~80% of the food with its curve still climbing
-        # steeply. 2.4e7 at 64 envs gives 526/member; parity with FCP would take
-        # ~1.2e8 and 38k sequential updates, which needs a real GPU because
-        # CoMeDi builds its population one member at a time. See
-        # docs/tuning_record.md.
-        "lbf": dict(total_timesteps_per_iteration=2.4e7, num_envs=64, pop=POPULATION_SIZE),
+        # Converged: 2.4e7 -> 1.92e8 at 64 envs (43,041 sequential updates --
+        # CoMeDi trains members one at a time, so this is the single most
+        # expensive LBF run in the file). Last-quarter slope fell from
+        # +0.020/1k at 9.6e7 to +0.005/1k here, matching the other three
+        # generators' converged range. Note the direction this cuts: SP barely
+        # moved (0.465 -> 0.472, within the measurement noise floor) while
+        # separation *fell* (0.272 -> 0.217) -- the opposite of every other
+        # budget doubling in this file. cross_play_weight=0.2 (unchanged) may
+        # no longer be enough now that competence isn't the binding
+        # constraint; that's the open follow-up. See docs/tuning_record.md.
+        "lbf": dict(total_timesteps_per_iteration=1.92e8, num_envs=64, pop=POPULATION_SIZE),
         "overcooked": dict(total_timesteps_per_iteration=1e7, num_envs=48, pop=POPULATION_SIZE),
         "hanabi": dict(total_timesteps_per_iteration=2e7, num_envs=48, pop=POPULATION_SIZE),
     },
     "brdiv": {
-        # Deliberately unchanged by the FCP tuning round. BRDiv already gets
-        # 5,493 updates -- nearly twice FCP's tuned 2,929 -- and its return curve
-        # is flat over the last quarter (+0.002/1k). It is converged at ~40% of
-        # the food, not starved, so raising the budget would only cost time. Its
-        # constraint is the diversity objective trading away competence, which
-        # cross_play_weight controls; that needs its own sweep.
-        "lbf": _paired_scale(64, 4.5e7),
+        # LBF budget quadrupled (4.5e7 -> 1.8e8 base, still x3 for n=5 pairing
+        # scale = 5.4e8 total): the "converged at 5,493 updates" read above was
+        # wrong for num_envs=192 -- that +0.002/1k figure belonged to the old
+        # collapsed num_envs=64 run. At 192, the curve was still climbing at
+        # +0.027/1k; two more doublings (21,972 updates total) got it to
+        # +0.001/1k, genuinely flat. See docs/tuning_record.md.
+        "lbf": _paired_scale(64, 1.8e8),
         "overcooked": _paired_scale(128, 9e7),
         "hanabi": _paired_scale(128, 5e8),
     },
     "lbrdiv": {
-        # Also unchanged, and for a subtler reason than BRDiv. L-BRDiv is flat
-        # over its last quarter too (slope ~0 at 5,493 updates), so it is not
-        # starved either -- but it reaches only ~22% of the food while producing
-        # the best separation of any generator here (SP 0.212, XP 0.019). Low
-        # competence may be what its Minimum-Coverage-Set objective is buying
-        # rather than a defect, so "fix" is not yet well defined. Sweep
-        # tolerance_factor before touching anything else.
-        "lbf": _paired_scale(64, 4.5e7),
+        # LBF budget matched to BRDiv's tuned value directly (4.5e7 -> 1.8e8
+        # base = 5.4e8 total) rather than re-swept -- confirmed flat
+        # (+0.002/1k) on the first run at this budget. See
+        # docs/tuning_record.md.
+        "lbf": _paired_scale(64, 1.8e8),
         "overcooked": _paired_scale(128, 9e7),
         "hanabi": _paired_scale(128, 5e8),
     },
@@ -282,12 +286,19 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
 }
 
 #: Diversity weights that differ per environment.
+#: BRDiv's LBF value tuned 0.05 -> 0.10: confirmed a local optimum, beating
+#: both a lower (0.07) and higher (0.20) retest at the tuned budget. See
+#: docs/tuning_record.md.
 CROSS_PLAY_WEIGHT = {
-    "brdiv": {"lbf": 0.05, "overcooked": 0.005, "hanabi": 0.05},
+    "brdiv": {"lbf": 0.10, "overcooked": 0.005, "hanabi": 0.05},
     "comedi": {"lbf": 0.2, "overcooked": 1.0, "hanabi": 0.2},
 }
 MIXED_PLAY_WEIGHT = {"lbf": 0.4, "overcooked": 0.5, "hanabi": 0.5}
-TOLERANCE_FACTOR = {"lbf": 0.1, "overcooked": 10.0, "hanabi": 0.1}
+#: L-BRDiv's LBF value tuned 0.1 -> 0.03: raising it mostly suppresses
+#: cross-play rather than trading away self-play competence (a different
+#: mechanism from BRDiv's cross_play_weight), so the lower value wins on
+#: competence without giving up much separation. See docs/tuning_record.md.
+TOLERANCE_FACTOR = {"lbf": 0.03, "overcooked": 10.0, "hanabi": 0.1}
 
 #: L-BRDiv's Lagrange multipliers receive gradient from an unnormalized sum over
 #: ~n^2 pair terms, so the learning rate must be scaled by ~(n_ref/n)^2 relative

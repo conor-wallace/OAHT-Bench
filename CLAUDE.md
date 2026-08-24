@@ -73,7 +73,7 @@ without reading the test's docstring.
 
 ```bash
 uv sync --extra dev
-uv run python -m pytest tests/ -q                       # 196 tests, ~50s
+uv run python -m pytest tests/ -q                       # 270 tests, ~8min
 uv run ruff format . && uv run ruff check . --fix
 
 uv run python scripts/check_device.py [config.json]     # GPU + memory preflight
@@ -99,9 +99,12 @@ whenever the *measurement* changes rather than the training.
   The rule is right; it cannot be paid for with environments on that task.
   Needs stratified id sampling or longer rollouts instead.
 - **The content hash includes fields that do not affect the artifact** —
-  `LoggingConfig`, `evaluation_episodes`, `evaluation_greedy`. Toggling wandb
-  therefore retrains a population into a new directory. Scoping the hash to
-  training-determining fields is the fix.
+  `LoggingConfig`, `evaluation_episodes`, `evaluation_greedy`, and `label`.
+  Toggling wandb therefore retrains a population into a new directory; so does
+  renaming a sweep (`--name`) while re-sweeping cells you already have — this
+  cost a full retrain of two CoMeDi cells before it was caught. Scoping the
+  hash to training-determining fields is the fix; until then, keep `--name`
+  stable when extending an existing grid.
 - **Checkpoints are written twice.** `save_load_utils.REPO_PATH` resolves to
   `src/oaht_bench` rather than the repo root, so every run also lands in
   `src/oaht_bench/results/`. Verified byte-identical. `rescore.artifact_dir()`
@@ -110,17 +113,53 @@ whenever the *measurement* changes rather than the training.
   equalizes the *scored* population, not the *released* one, because FCP
   snapshots during training. Cutting `num_checkpoints` to 1 would equalize it
   and would be the `FCP₋T` ablation. Open (§7.3).
+- **`sweep.py rescore` had zero test coverage and was silently broken for all
+  four generators** until fixed this session — it called `.params` on a plain
+  `(params, population)` tuple. No regression test exists for the CLI path;
+  add one before trusting further changes to `population/rescore.py`.
+- **`collect`'s default `evaluation_episodes=20` is too coarse to resolve SP
+  differences below roughly 0.01.** Confirmed by re-scoring two independently-
+  trained CoMeDi checkpoints at identical hyperparameters: their 20-episode
+  gap (0.0117) shrank to 0.0050 at 100 episodes. Re-score sweep finalists at
+  higher `--episodes` before reading a ranking off `collect`'s table.
+- **BRDiv's adopted `cross_play_weight=0.10` cell has the best self-play score
+  of any tested but the worst `% food`** of the top three in that sweep — the
+  two metrics agree everywhere else in `docs/tuning_record.md` but disagree
+  here, unexplained. Worth resolving before leaning on this population
+  downstream.
 
 ## State
 
-Branch `docs/project-plan-rev7`. Only **FCP × LBF** is tuned; the other eleven
-(generator, environment) pairs still run jax-aht's inherited hyperparameters,
-and the FCP result shows what that can cost — upstream's LBF budget left the
-population at 74% of achievable food, and CoMeDi's left each member 160 updates
-against the 2,929 FCP needed.
+Branch `docs/project-plan-rev7`. **All four generators are now tuned on LBF
+12×12**, the reference environment:
 
-Next: confirm BRDiv recovers at `num_envs=192` (check `Eval/AvgSPReturnCurve`
-exceeds `Eval/AvgXPReturnCurve` — if not, the n² diagnosis is wrong and
-`cross_play_weight` is the suspect; a grid for it sits unrun at
-`configs/sweeps/brdiv_lbf_xpw`). Then the dataset schema (§4) and the DT
-backbone (§3.1).
+| generator | adopted | SP | separation |
+|---|---|---:|---:|
+| FCP | `learning_rate=1e-3`, `entropy_coef=0.003`, `total_timesteps=24e6`, `num_envs=64` | ~0.48 | at ceiling (~97% food) |
+| CoMeDi | `learning_rate=5e-4`, `total_timesteps_per_iteration=1.92e8`, `cross_play_weight=0.2` | 0.472 | 0.217 |
+| BRDiv | `cross_play_weight=0.10`, `entropy_coef=0.003`, `total_timesteps=5.4e8` | 0.386 | 0.271 |
+| L-BRDiv | `tolerance_factor=0.03`, `entropy_coef=0.003`, `total_timesteps=5.4e8` (shared with BRDiv) | 0.396 | 0.211 |
+
+Each row is the end of its own chase, with rejected alternatives worth reading
+before re-deriving them — full detail in `docs/tuning_record.md`. Two things
+worth knowing before touching these further:
+
+- **BRDiv and L-BRDiv plateau well under FCP's SP** (~0.39 vs ~0.48). Six
+  PPO/budget variations were tried on BRDiv alone before concluding this looks
+  like a limit from the n²-divided training data and the diversity
+  constraint itself, not an undertuned knob.
+- **Every adoption call used competence-first-then-separation**, consistently
+  — including turning down a CoMeDi `cross_play_weight` cell that traded 9%
+  SP for 58% more separation, a far better ratio than BRDiv's own sweep ever
+  offered. Separation is still an unvalidated proxy (see Known-open); if
+  downstream validation ever suggests it's underweighted, that's a change to
+  the adoption rule, not a case for bending it after the fact case-by-case.
+
+Overcooked and Hanabi are untuned for all four generators (still on jax-aht's
+inherited hyperparameters) — Overcooked BRDiv/L-BRDiv additionally don't fit
+any GPU yet at all (see Known-open).
+
+Next: the dataset schema (§4) and the DT backbone (§3.1) — LBF tuning was the
+gate for starting this, and it's now clear. Overcooked/Hanabi tuning can
+follow the same playbook once the schema work starts consuming LBF
+populations for real and there's a concrete reason to need it sooner.
