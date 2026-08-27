@@ -15,8 +15,8 @@ The builders take only ``(job, out, env)`` and touch only ``agents`` and
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, TypedDict
 
 import chex
@@ -27,6 +27,7 @@ from oaht_bench.agents.mlp_actor_critic_agent import (
     MLPActorCriticPolicy,
 )
 from oaht_bench.agents.population_interface import AgentPopulation
+from oaht_bench.agents.rnn_actor_critic_agent import RNNActorCriticPolicy
 from oaht_bench.configs.job import TeammateGenerationJob
 from oaht_bench.envs.protocols import TrainingEnv
 from oaht_bench.population.members import get_member_params
@@ -88,11 +89,28 @@ def get_fcp_population(
     partner_params = out['checkpoints'] # shape is (num_seeds, partner_pop_size, num_ckpts, ...)
     flattened_partner_params = jax.tree.map(lambda x: x.reshape(num_seeds, fcp_pop_size, *x.shape[3:]), partner_params)
 
-    partner_policy = MLPActorCriticPolicy(
-        action_dim=env.action_space(env.agents[1]).n,
-        obs_dim=env.observation_space(env.agents[1]).shape[0],
-        activation=gen.network.activation,
-    )
+    # Dispatch matches initialize_agents.py's EGO_ACTOR_TYPE branching --
+    # this is the same choice made at training time, reconstructed here so a
+    # saved checkpoint can be scored without re-importing the trainer. RNN's
+    # gru_hidden_dim isn't a network config field (MlpNetwork.to_agent_dict()
+    # doesn't emit GRU_HIDDEN_DIM), so training used initialize_rnn_agent's
+    # default of 64; matched here for the same reason, not independently
+    # chosen. CoMeDi/BRDiv/L-BRDiv don't get this dispatch: there's no RNN
+    # variant of ActorWithConditionalCriticPolicy, so actor_type="rnn" isn't
+    # a valid choice for them yet (see docs/tuning_record.md).
+    if gen.actor_type == "rnn":
+        partner_policy = RNNActorCriticPolicy(
+            action_dim=env.action_space(env.agents[1]).n,
+            obs_dim=env.observation_space(env.agents[1]).shape[0],
+            activation=gen.network.activation,
+            gru_hidden_dim=64,
+        )
+    else:
+        partner_policy = MLPActorCriticPolicy(
+            action_dim=env.action_space(env.agents[1]).n,
+            obs_dim=env.observation_space(env.agents[1]).shape[0],
+            activation=gen.network.activation,
+        )
 
     # Create partner population
     partner_population = AgentPopulation(

@@ -21,7 +21,6 @@
     },
     "generator": {
       "generator": "fcp",
-      "num_envs": 32,
       "ppo": {
         "anneal_lr": true,
         "clip_eps": 0.2,
@@ -29,7 +28,7 @@
         "learning_rate": 0.0005,
         "update_epochs": 4
       },
-      "total_timesteps": 1000000000.0
+      "total_timesteps": 2000000000.0
     },
     "job_type": "teammate_generation",
     "label": "fcp_hanabi"

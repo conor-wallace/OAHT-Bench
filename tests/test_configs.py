@@ -670,7 +670,15 @@ def test_overcooked_configs_enable_reward_shaping():
     from oaht_bench.configs import load_job
 
     for path in _shipped_configs():
-        if not path.parent.name.startswith("overcooked"):
+        # v1 only: OvercookedV2Config has no do_reward_shaping field.
+        # Whether v2 populations should train against shaped or sparse
+        # reward is a real, open question -- v2's own SHAPED_REWARDS
+        # mechanism exists (settings.py) but isn't folded into the
+        # returned reward by the wrapper (see overcooked_v2_wrapper.py),
+        # deliberately left undecided rather than defaulted silently.
+        if not path.parent.name.startswith("overcooked") or path.parent.name.startswith(
+            "overcooked_v2"
+        ):
             continue
         env = load_job(path).env
         assert env.do_reward_shaping is True

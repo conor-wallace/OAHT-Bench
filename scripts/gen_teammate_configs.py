@@ -42,6 +42,12 @@ OUT_ROOT = REPO_ROOT / "configs" / "teammate_gen"
 
 #: Which environment family a preset belongs to, for looking up tuning below.
 def _family(preset_name: str) -> str:
+    # Checked before the general "overcooked" prefix -- v1 and v2 are
+    # different environments (partial observability, a generalized recipe
+    # system, no shared absorbed code; see PROVENANCE.md) and must not
+    # silently share PPO/budget tuning just because they share a name prefix.
+    if preset_name.startswith("overcooked_v2"):
+        return "overcooked_v2"
     if preset_name.startswith("overcooked"):
         return "overcooked"
     if "hanabi" in preset_name:
@@ -70,6 +76,26 @@ PPO: dict[str, dict[str, dict[str, Any]]] = {
             clip_eps=0.1,
             entropy_coef=0.05,
         ),
+        # UNTUNED, and deliberately NOT copied from v1's "overcooked" entry
+        # above (unlike every other family here) -- v2 uses partial
+        # observability (agent_view_size=2 on the registered presets) and
+        # therefore an RNN policy (actor_type="rnn" in SCALE below), so v1's
+        # MLP/full-observability-tuned values aren't a meaningful prior.
+        # Starting from upstream's own reference instead: JaxMARL's only
+        # validated overcooked_v2 config, baselines/IPPO/config/
+        # ippo_rnn_overcooked_v2.yaml (LR, CLIP_EPS, ENT_COEF, ANNEAL_LR).
+        # gamma/gae_lambda/max_grad_norm below already match its 0.99/0.95;
+        # max_grad_norm differs (theirs is 0.25) and is left at this
+        # generator's own default rather than copied blind. See
+        # docs/tuning_record.md once a sweep exists.
+        "overcooked_v2": dict(
+            learning_rate=2.5e-4,
+            update_epochs=4,
+            num_minibatches=64,
+            clip_eps=0.2,
+            entropy_coef=0.01,
+            anneal_lr=True,
+        ),
         "hanabi": dict(
             learning_rate=5e-4,
             update_epochs=4,
@@ -90,6 +116,15 @@ PPO: dict[str, dict[str, dict[str, Any]]] = {
             entropy_coef=0.001,
         ),
         "overcooked": dict(
+            learning_rate=1e-3,
+            update_epochs=15,
+            num_minibatches=8,
+            clip_eps=0.01,
+            entropy_coef=0.05,
+        ),
+        # UNTUNED. Copied from v1's "overcooked" entry above as a starting
+        # point, not a validated choice for v2 -- see the fcp entry's note.
+        "overcooked_v2": dict(
             learning_rate=1e-3,
             update_epochs=15,
             num_minibatches=8,
@@ -126,6 +161,15 @@ PPO: dict[str, dict[str, dict[str, Any]]] = {
             clip_eps=0.01,
             entropy_coef=0.05,
         ),
+        # UNTUNED. Copied from v1's "overcooked" entry above as a starting
+        # point, not a validated choice for v2 -- see the fcp entry's note.
+        "overcooked_v2": dict(
+            learning_rate=1e-3,
+            update_epochs=15,
+            num_minibatches=8,
+            clip_eps=0.01,
+            entropy_coef=0.05,
+        ),
         "hanabi": dict(
             learning_rate=5e-4,
             update_epochs=4,
@@ -148,6 +192,15 @@ PPO: dict[str, dict[str, dict[str, Any]]] = {
             entropy_coef=0.003,
         ),
         "overcooked": dict(
+            learning_rate=1e-3,
+            update_epochs=15,
+            num_minibatches=8,
+            clip_eps=0.01,
+            entropy_coef=0.05,
+        ),
+        # UNTUNED. Copied from v1's "overcooked" entry above as a starting
+        # point, not a validated choice for v2 -- see the fcp entry's note.
+        "overcooked_v2": dict(
             learning_rate=1e-3,
             update_epochs=15,
             num_minibatches=8,
@@ -237,7 +290,38 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # docs/tuning_record.md.
         "lbf": dict(total_timesteps=24e6, num_envs=64, pop=POPULATION_SIZE),
         "overcooked": dict(total_timesteps=4e6, num_envs=8, pop=POPULATION_SIZE),
-        "hanabi": dict(total_timesteps=1e9, num_envs=32, pop=POPULATION_SIZE),
+        # UNTUNED. Copied from v1's "overcooked" budget as a starting point.
+        # Tuned against an external reference, not just an internal slope
+        # reading: the original Overcooked-v2 paper reports ~163 return on
+        # counter_circuit. num_envs=64 (not upstream's 256 -- OOMs on this
+        # device, confirmed by an actual run, not just check_device.py's
+        # estimate). total_timesteps=6e7 (2,343 updates) reaches SP=205.20,
+        # 126% of the paper's number, and the training curve had already
+        # decelerated hard by then (quarter 3->4: 187->191) -- a separate,
+        # since-lost 1e8 run (died before checkpointing when an SSH
+        # connection dropped, but its metrics.jsonl survived) landed at only
+        # 200->207 over the same quarters despite 67% more budget, so 6e7
+        # is judged close enough to where more budget stops paying for
+        # itself rather than fully flat. actor_type="rnn" +
+        # agent_view_size=2 (on the registered presets): partial
+        # observability is v2's headline feature and requires memory to be
+        # useful -- an MLP cannot make good use of a partial observation.
+        # CoMeDi/BRDiv/L-BRDiv do NOT have this option yet:
+        # initialize_agents.py's RNN path only covers the plain-actor case
+        # FCP uses, not the conditional/double-critic architectures those
+        # three need, so they stay on "mlp" pending that work -- meaning
+        # they'd currently see agent_view_size=2 with no mechanism to cope
+        # with it if run on this preset today. See docs/tuning_record.md.
+        "overcooked_v2": dict(
+            total_timesteps=6e7, num_envs=64, pop=POPULATION_SIZE, actor_type="rnn"
+        ),
+        # Tuned. num_envs 32 -> 64 (the LBF batch-size lesson), total_timesteps
+        # 1e9 -> 2e9 to hold jax-aht's own reference update count (244,141)
+        # fixed at the new batch size -- raw total_timesteps doesn't carry over
+        # across a num_envs change. SP flat past 1e9; converged by 2e9 (slope
+        # +0.004/1k); 5e9 bought no more competence and its separation edge is
+        # unconfirmed at one seed. See docs/tuning_record.md.
+        "hanabi": dict(total_timesteps=2e9, num_envs=64, pop=POPULATION_SIZE),
     },
     "comedi": {
         # Converged: 2.4e7 -> 1.92e8 at 64 envs (43,041 sequential updates --
@@ -252,6 +336,8 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # constraint; that's the open follow-up. See docs/tuning_record.md.
         "lbf": dict(total_timesteps_per_iteration=1.92e8, num_envs=64, pop=POPULATION_SIZE),
         "overcooked": dict(total_timesteps_per_iteration=1e7, num_envs=48, pop=POPULATION_SIZE),
+        # UNTUNED. Copied from v1's "overcooked" budget as a starting point.
+        "overcooked_v2": dict(total_timesteps_per_iteration=1e7, num_envs=48, pop=POPULATION_SIZE),
         "hanabi": dict(total_timesteps_per_iteration=2e7, num_envs=48, pop=POPULATION_SIZE),
     },
     "brdiv": {
@@ -263,6 +349,13 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # +0.001/1k, genuinely flat. See docs/tuning_record.md.
         "lbf": _paired_scale(64, 1.8e8),
         "overcooked": _paired_scale(128, 9e7),
+        # UNTUNED, and likely broken as-is: this is exactly the config
+        # CLAUDE.md's Known-open section already flags as not fitting any GPU
+        # for v1 (384 envs x ~1040-float obs x 400-step rollouts ~= 11.9 GiB
+        # of observations alone at n^2 scaling). v2's obs is comparable in
+        # size or larger (partial observability adds channels, doesn't
+        # shrink them), so expect the same failure, not a smaller one.
+        "overcooked_v2": _paired_scale(128, 9e7),
         "hanabi": _paired_scale(128, 5e8),
     },
     "lbrdiv": {
@@ -272,6 +365,13 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # docs/tuning_record.md.
         "lbf": _paired_scale(64, 1.8e8),
         "overcooked": _paired_scale(128, 9e7),
+        # UNTUNED, and likely broken as-is: this is exactly the config
+        # CLAUDE.md's Known-open section already flags as not fitting any GPU
+        # for v1 (384 envs x ~1040-float obs x 400-step rollouts ~= 11.9 GiB
+        # of observations alone at n^2 scaling). v2's obs is comparable in
+        # size or larger (partial observability adds channels, doesn't
+        # shrink them), so expect the same failure, not a smaller one.
+        "overcooked_v2": _paired_scale(128, 9e7),
         "hanabi": _paired_scale(128, 5e8),
     },
     "rpg": {
@@ -289,16 +389,18 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
 #: BRDiv's LBF value tuned 0.05 -> 0.10: confirmed a local optimum, beating
 #: both a lower (0.07) and higher (0.20) retest at the tuned budget. See
 #: docs/tuning_record.md.
+#: overcooked_v2 entries below are UNTUNED, copied from v1's as starting
+#: points -- same caveat as the PPO/SCALE dicts above.
 CROSS_PLAY_WEIGHT = {
-    "brdiv": {"lbf": 0.10, "overcooked": 0.005, "hanabi": 0.05},
-    "comedi": {"lbf": 0.2, "overcooked": 1.0, "hanabi": 0.2},
+    "brdiv": {"lbf": 0.10, "overcooked": 0.005, "overcooked_v2": 0.005, "hanabi": 0.05},
+    "comedi": {"lbf": 0.2, "overcooked": 1.0, "overcooked_v2": 1.0, "hanabi": 0.2},
 }
-MIXED_PLAY_WEIGHT = {"lbf": 0.4, "overcooked": 0.5, "hanabi": 0.5}
+MIXED_PLAY_WEIGHT = {"lbf": 0.4, "overcooked": 0.5, "overcooked_v2": 0.5, "hanabi": 0.5}
 #: L-BRDiv's LBF value tuned 0.1 -> 0.03: raising it mostly suppresses
 #: cross-play rather than trading away self-play competence (a different
 #: mechanism from BRDiv's cross_play_weight), so the lower value wins on
 #: competence without giving up much separation. See docs/tuning_record.md.
-TOLERANCE_FACTOR = {"lbf": 0.03, "overcooked": 10.0, "hanabi": 0.1}
+TOLERANCE_FACTOR = {"lbf": 0.03, "overcooked": 10.0, "overcooked_v2": 10.0, "hanabi": 0.1}
 
 #: L-BRDiv's Lagrange multipliers receive gradient from an unnormalized sum over
 #: ~n^2 pair terms, so the learning rate must be scaled by ~(n_ref/n)^2 relative
@@ -322,6 +424,13 @@ def build(generator: str, preset_name: str, num_checkpoints: int = 5):
         ppo=ppo,
         network=MlpNetwork(),
     )
+    # Only overridden when SCALE explicitly names one (currently just FCP x
+    # overcooked_v2, for its RNN policy -- see docs/tuning_record.md). Every
+    # other (generator, family) keeps that generator's own default
+    # (CoMeDi/BRDiv/L-BRDiv default to their conditional/double-critic actor
+    # types, not "mlp"), so this must not apply a blanket default here.
+    if "actor_type" in scale:
+        common["actor_type"] = scale["actor_type"]
 
     if generator == "fcp":
         return FcpConfig(total_timesteps=scale["total_timesteps"], **common)

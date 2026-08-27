@@ -25,6 +25,10 @@ dependencies = [
     "optax==0.2.4",
     "orbax-checkpoint==0.11.1",
     "jumanji==1.1.0",
+    # jaxmarl==0.1.0 -- the first release with overcooked_v2 -- declares
+    # jax<=0.4.38 and can't be installed alongside jax==0.5.3 above, so
+    # overcooked_v2 is absorbed separately rather than a version bump. See
+    # PROVENANCE.md.
     "jaxmarl==0.0.7",
     "distrax",
     "gymnax",

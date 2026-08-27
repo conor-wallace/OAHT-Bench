@@ -23,16 +23,25 @@ ALL_PRESETS = preset_names()
 
 
 def test_presets_cover_the_committed_scope():
-    """Seven results configurations plus one debug configuration (§12.1)."""
-    assert set(preset_names("tier1")) == {"lbf_12x12", "overcooked_counter_circuit", "hanabi"}
-    assert len(preset_names("tier2")) == 4  # the remaining Overcooked layouts
+    """Seven v1 results configurations plus one debug configuration (§12.1),
+    plus overcooked_v2 (PROVENANCE.md) mirroring v1's five layouts at the
+    same tiers."""
+    assert set(preset_names("tier1")) == {
+        "lbf_12x12",
+        "overcooked_counter_circuit",
+        "overcooked_v2_counter_circuit",
+        "hanabi",
+    }
+    assert len(preset_names("tier2")) == 8  # v1's 4 remaining layouts + v2's mirror
     assert preset_names("debug") == ["mini_hanabi"]
 
 
 def test_tier1_overcooked_is_not_a_non_discriminative_layout():
-    """ZSC-Eval reports forced_coord and asymm_advantages fail to separate methods."""
-    tier1_overcooked = [n for n in preset_names("tier1") if n.startswith("overcooked")]
-    assert tier1_overcooked == ["overcooked_counter_circuit"]
+    """ZSC-Eval reports forced_coord and asymm_advantages fail to separate
+    methods in v1; overcooked_v2_counter_circuit mirrors v1's tier assignment
+    (§4.5 -- not independently verified for v2 yet)."""
+    tier1_overcooked = sorted(n for n in preset_names("tier1") if n.startswith("overcooked"))
+    assert tier1_overcooked == ["overcooked_counter_circuit", "overcooked_v2_counter_circuit"]
 
 
 @pytest.mark.parametrize("name", ALL_PRESETS)

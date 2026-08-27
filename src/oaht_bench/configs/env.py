@@ -37,6 +37,24 @@ OvercookedLayout = Literal[
     "forced_coord",
 ]
 
+#: The five layout names v2 ships that share v1's names and core scenario --
+#: deliberately not the full v2 roster (23 layouts, including recipe-variant
+#: and demo layouts), so the first pass stays directly comparable to v1
+#: rather than opening a second, larger layout-selection question at the same
+#: time as the environment integration itself.
+OvercookedV2Layout = Literal[
+    "counter_circuit",
+    "coord_ring",
+    "cramped_room",
+    "asymm_advantages",
+    "forced_coord",
+]
+
+#: Same two layouts as v1's _ASYMMETRIC_OVERCOOKED_LAYOUTS -- not verified to
+#: mean the same thing in v2 beyond sharing the name and general shape; worth
+#: a real check before symmetric_roles is load-bearing for v2 (§4.5).
+_ASYMMETRIC_OVERCOOKED_V2_LAYOUTS = frozenset({"asymm_advantages", "forced_coord"})
+
 
 class EnvConfigBase(VersionedConfig):
     """Fields shared by every environment configuration."""
@@ -214,6 +232,94 @@ class OvercookedV1Config(EnvConfigBase):
         return kwargs
 
 
+class OvercookedV2Config(EnvConfigBase):
+    """Overcooked-v2 (JaxMARL, absorbed -- PROVENANCE.md), selected by layout.
+
+    Covers the constructor args most likely to matter for teammate generation
+    and dataset collection. Deliberately excludes ``observation_type``
+    (FEATURIZED is a different obs encoding, out of scope for the first
+    pass), ``start_cooking_interaction``, ``op_ingredient_permutations``,
+    ``initial_state_buffer``, and ``force_path_planning`` -- all real
+    ``OvercookedV2.__init__`` parameters, left at their environment defaults
+    rather than exposed here until something needs them.
+    """
+
+    env_name: Literal["overcooked-v2"] = "overcooked-v2"
+    layout: OvercookedV2Layout
+    agent_view_size: int | None = Field(
+        default=None,
+        description="Partial observability radius; None is full-grid "
+        "observability. The registered presets set this to 2, matching "
+        "upstream's only validated reference config (baselines/IPPO/config/"
+        "ippo_rnn_overcooked_v2.yaml) -- this is v2's headline new feature "
+        "(README: 'configurable agent view radius') and the reason to use "
+        "v2 at all rather than v1. Left settable to None here, not removed, "
+        "since a full-observability run is still a legitimate comparison "
+        "point later. Requires actor_type='rnn' or similar to be useful -- "
+        "an MLP cannot make good use of a partial observation; see "
+        "docs/tuning_record.md.",
+    )
+    random_reset: bool = Field(
+        default=True,
+        description="Randomize agent positions, inventories, and pot state on "
+        "reset. v1's random_obj_state does the inventory/pot half of this; v2 "
+        "folds both into one flag. Defaulted on to match v1's convention "
+        "(random_obj_state=True in jax-aht's task configs) rather than the "
+        "environment's own default (False).",
+    )
+    random_agent_positions: bool = Field(
+        default=False,
+        description="Randomize agent start positions independently of "
+        "random_reset (v2-native; v1 has no equivalent). Off by default: "
+        "changes the coordination problem itself, not just initial state "
+        "diversity, and should be an explicit choice, not a silent default.",
+    )
+    negative_rewards: bool = Field(
+        default=False,
+        description="Penalize incorrect deliveries. Off by default, matching "
+        "v1's sparse-plus-shaping reward having no penalty term either.",
+    )
+    sample_recipe_on_delivery: bool = Field(
+        default=False,
+        description="Resample the target recipe after each delivery instead "
+        "of only on reset. Off by default: a fixed recipe per episode is the "
+        "closer analogue to v1, which has exactly one recipe.",
+    )
+    indicate_successful_delivery: bool = Field(
+        default=False,
+        description="Add a successful-delivery indicator to the observation.",
+    )
+
+    @property
+    def turn_based(self) -> bool:
+        return False
+
+    @property
+    def symmetric_roles(self) -> bool:
+        """See _ASYMMETRIC_OVERCOOKED_V2_LAYOUTS -- inherited from v1's
+        layout list by name, not independently verified for v2 (§4.5)."""
+        return self.layout not in _ASYMMETRIC_OVERCOOKED_V2_LAYOUTS
+
+    def env_kwargs(self) -> dict[str, Any]:
+        # max_steps deliberately not derived from rollout_length -- neither
+        # LBF's nor Hanabi's env_kwargs() do that either. rollout_length is
+        # the training loop's ROLLOUT_LENGTH (task_config()); it isn't passed
+        # to the environment constructor for any environment family here.
+        # OvercookedV2's own max_steps default (400) matches v1's effective
+        # one, so it's left unset.
+        kwargs: dict[str, Any] = {
+            "layout": self.layout,
+            "random_reset": self.random_reset,
+            "random_agent_positions": self.random_agent_positions,
+            "negative_rewards": self.negative_rewards,
+            "sample_recipe_on_delivery": self.sample_recipe_on_delivery,
+            "indicate_successful_delivery": self.indicate_successful_delivery,
+        }
+        if self.agent_view_size is not None:
+            kwargs["agent_view_size"] = self.agent_view_size
+        return kwargs
+
+
 class HanabiConfig(EnvConfigBase):
     """Hanabi (JaxMARL), via jax-aht's wrapper. Turn-based and action-masked."""
 
@@ -265,7 +371,7 @@ class HanabiConfig(EnvConfigBase):
 #: Discriminated union. Pydantic selects the member by ``env_name``, so a JSON
 #: config naming an environment gets that environment's validation rules.
 EnvConfig = Annotated[
-    LbfConfig | OvercookedV1Config | HanabiConfig,
+    LbfConfig | OvercookedV1Config | OvercookedV2Config | HanabiConfig,
     Field(discriminator="env_name"),
 ]
 
@@ -278,10 +384,10 @@ EnvConfig = Annotated[
 # experiment files reference by name.
 # --------------------------------------------------------------------------
 
-_PRESETS: dict[str, LbfConfig | OvercookedV1Config | HanabiConfig] = {}
+_PRESETS: dict[str, LbfConfig | OvercookedV1Config | OvercookedV2Config | HanabiConfig] = {}
 
 
-def _register(cfg: LbfConfig | OvercookedV1Config | HanabiConfig):
+def _register(cfg: LbfConfig | OvercookedV1Config | OvercookedV2Config | HanabiConfig):
     if cfg.name in _PRESETS:
         raise ValueError(
             f"Duplicate env preset {cfg.name!r}. Names appear in dataset metadata "
@@ -353,8 +459,37 @@ for _layout, (_tier, _notes) in _OVERCOOKED_TIERS.items():
     )
 del _layout, _tier, _notes
 
+#: Same tier assignment as v1's -- not re-derived from v2-specific evidence
+#: (no populations trained on any v2 layout yet), just carried over so the
+#: two versions are comparable on the same layout at the same tier until
+#: there's a reason to diverge.
+_OVERCOOKED_V2_TIERS: dict[str, tuple[Tier, str]] = {
+    "counter_circuit": ("tier1", "Full resource-sharing; discriminates between methods in v1."),
+    "coord_ring": ("tier2", "Full resource-sharing; Tier 1 fallback."),
+    "cramped_room": ("tier2", "Standard easy reference layout."),
+    "asymm_advantages": ("tier2", "ZSC-Eval: fails to differentiate algorithms in v1."),
+    "forced_coord": ("tier2", "ZSC-Eval: fails to differentiate algorithms in v1."),
+}
+
+for _layout, (_tier, _notes) in _OVERCOOKED_V2_TIERS.items():
+    _register(
+        OvercookedV2Config(
+            name=f"overcooked_v2_{_layout}",
+            layout=_layout,  # type: ignore[arg-type]
+            rollout_length=400,
+            tier=_tier,
+            notes=_notes,
+            # Partial observability is v2's headline feature over v1 and the
+            # reason to use it -- agent_view_size=2 matches upstream's only
+            # validated reference config. Requires an RNN policy
+            # (actor_type='rnn' on the generator config) to be meaningful.
+            agent_view_size=2,
+        )
+    )
+del _layout, _tier, _notes
+
 #: Read-only view of the canonical presets.
-PRESETS: Mapping[str, LbfConfig | OvercookedV1Config | HanabiConfig] = MappingProxyType(_PRESETS)
+PRESETS: Mapping[str, LbfConfig | OvercookedV1Config | OvercookedV2Config | HanabiConfig] = MappingProxyType(_PRESETS)
 
 
 def get_preset(name: str):

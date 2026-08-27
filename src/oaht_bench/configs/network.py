@@ -77,3 +77,22 @@ class OmisNetworkConfig(BaseOfflineAhtNetworkConfig):
 
 class TaoNetworkConfig(BaseOfflineAhtNetworkConfig):
     architecture: Literal["tao"] = "tao"
+
+
+class PctBcNetworkConfig(BaseOfflineAhtNetworkConfig):
+    """%BC: the shared backbone, no modeling module — the floor every other
+    trajectory-view baseline is measured against (§6)."""
+
+    architecture: Literal["pct_bc"] = "pct_bc"
+    top_return_quantile: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=1.0,
+        description="Train only on episodes in the top fraction by ego return "
+        "(the '%' in %BC — e.g. 0.1 keeps the best 10%). 1.0 is plain BC on the "
+        "whole dataset, and the default: filtering is this baseline's one "
+        "option, not its definition. A data-selection knob rather than a "
+        "network shape one, but this is where every other baseline's own "
+        "knobs live, so it stays here rather than on the shared "
+        "OfflineTrainingConfig every baseline reads.",
+    )

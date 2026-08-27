@@ -84,6 +84,12 @@ class Windows:
     #: episode-level notion: two overlapping windows of one episode are not two
     #: trajectories.
     episode_id: np.ndarray
+    #: (N,) — the ego's total return over its *whole* source episode (not the
+    #: window's return-to-go, which is truncated to the window and, when
+    #: ``normalize``, rescaled). Constant across every window cut from the same
+    #: episode. %BC's data-selection filter needs an episode-level quantity;
+    #: nothing else in this module did before it.
+    episode_return: np.ndarray
     #: (N,) — which population member was the teammate. TAO's InfoNCE positives
     #: are defined by this label; it is the field §4.2 anticipated.
     teammate_id: np.ndarray
@@ -153,11 +159,14 @@ def make_windows(
         teammate_index = others[0]
 
     rtg = return_to_go(batch.rewards[:, ego], batch.valid)
+    # The whole-episode ego return, the canonical form (schema.py's own
+    # ``describe()`` uses it) rather than re-derived from ``rtg``.
+    episode_returns = batch.episode_returns()[:, ego]
     T = context_length
     ego_o, ego_a, ego_g = [], [], []
     mate_o, mate_no, mate_a, mate_r = [], [], [], []
     ego_av, mate_av = [], []
-    steps, masks, ids, eps = [], [], [], []
+    steps, masks, ids, eps, ep_rets = [], [], [], [], []
     # Teammate observations shifted one step; the final step repeats, which the
     # mask covers since a window never ends on a step the episode did not take.
     next_obs = np.concatenate(
@@ -203,6 +212,7 @@ def make_windows(
             masks.append(m)
             ids.append(batch.member_ids[ep, teammate_index])
             eps.append(ep)
+            ep_rets.append(episode_returns[ep])
 
     stacked_ego_obs = np.stack(ego_o).astype(np.float32)
     stacked_mate_obs = np.stack(mate_o).astype(np.float32)
@@ -239,5 +249,6 @@ def make_windows(
         timesteps=np.stack(steps).astype(np.int32),
         mask=stacked_mask,
         episode_id=np.asarray(eps, dtype=np.int32),
+        episode_return=np.asarray(ep_rets, dtype=np.float32),
         teammate_id=np.asarray(ids, dtype=np.int32),
     )

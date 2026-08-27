@@ -34,6 +34,43 @@ common                 -> oaht_bench.common
 ego_agent_training     -> oaht_bench.algorithms
 ```
 
+## JaxMARL (`overcooked_v2`)
+
+- Upstream: `https://github.com/FLAIROx/JaxMARL`
+- Version / commit: `v0.1.0`, `66f41e5a36131d86bf5791d6bbe501275ed2cd30`
+- License: Apache-2.0 (see `LICENSES/jaxmarl-LICENSE`)
+
+Not absorbed via `jax-aht`, and not from the same tree as jax-aht's Overcooked-v1
+wrapper, which imports the pinned `jaxmarl==0.0.7` package directly rather than
+absorbing its source. `overcooked_v2` doesn't exist in `0.0.7`; it first appears
+in `0.1.0`, which declares `jax<=0.4.38` and therefore cannot be installed
+alongside this project's `jax==0.5.3` pin (see `pyproject.toml`). So its source is
+absorbed at the `0.1.0` tag instead of bumping the package, leaving `jaxmarl` at
+`0.0.7` — and therefore Overcooked-v1 and Hanabi, both of which import it
+directly — untouched.
+
+| upstream path | local path | contents |
+|---|---|---|
+| `jaxmarl/environments/overcooked_v2/{__init__,common,layouts,overcooked,settings,utils}.py` | `src/oaht_bench/envs/overcooked_v2/` | The OvercookedV2 environment, absorbed whole. |
+
+Not absorbed:
+- `interactive.py` — a human-play CLI (`jaxmarl/viz/overcooked_v2_visualizer.py` and
+  pygame), no consumer in this training pipeline.
+
+`OvercookedV2(MultiAgentEnv)` subclasses the pinned `jaxmarl==0.0.7` package's
+`jaxmarl.environments.multi_agent_env.MultiAgentEnv` directly — checked before
+absorbing that `0.0.7`'s and `0.1.0`'s versions of that module, and of
+`jaxmarl.environments.spaces`, differ only in docstrings (`multi_agent_env.py`)
+or not at all (`spaces.py`), so nothing from `0.1.0` needed absorbing for those.
+Import rewrite applied to the four absorbed files that reference sibling
+modules: `jaxmarl.environments.overcooked_v2 -> oaht_bench.envs.overcooked_v2`.
+
+`OvercookedV2` does not override `get_avail_actions` (raises
+`NotImplementedError` on the base class) — matching Overcooked-v1, whose own
+wrapper doesn't get real masking from the environment either, since the action
+set has no state-dependent restrictions. The wrapper supplies the same
+all-actions-available stub v1's does, not a new mechanism.
+
 # Clean-room reimplementations (not absorbed)
 
 Some algorithms are reimplemented from their papers rather than absorbed, because

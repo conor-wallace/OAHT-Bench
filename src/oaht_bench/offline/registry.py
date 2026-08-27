@@ -113,4 +113,8 @@ def get_policy(config: OfflineTrainingConfig) -> type[BaseAhtPolicy]:
         from oaht_bench.offline.tao import TaoPolicy
 
         return TaoPolicy
+    if architecture == "pct_bc":
+        from oaht_bench.offline.pct_bc import PctBcPolicy
+
+        return PctBcPolicy
     raise NotImplementedError(f"no BaseAhtPolicy is registered for architecture {architecture!r}.")

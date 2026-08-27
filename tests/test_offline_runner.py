@@ -39,7 +39,7 @@ def _job(tmp_path: Path, baseline: str, **overrides) -> TrainingJob:
     # a baseline with no network config yet (e.g. the unimplemented "taget"), fall
     # back to a valid architecture so the *runner's* SUPPORTED gate is what refuses,
     # not config validation.
-    architecture = baseline if baseline in ("liam", "meliba", "omis", "tao") else "liam"
+    architecture = baseline if baseline in ("liam", "meliba", "omis", "tao", "pct_bc") else "liam"
     offline = OfflineTrainingConfig(
         network={"architecture": architecture},
         context_length=6,
@@ -79,6 +79,57 @@ def test_runner_trains_and_writes_parameters(tmp_path, baseline):
 
     summary = json.loads((run_dir / "training_summary.json").read_text())
     assert summary["baseline"] == baseline
+
+
+def test_pct_bc_stage_one_trains_nothing(tmp_path):
+    """%BC's whole point is having no representation stage -- pinned directly
+    rather than left as an inference from the loss tests.
+
+    Stage 2 still has to look like every other baseline's: an accuracy metric,
+    a loadable artifact.
+    """
+    from oaht_bench.offline.runner import run
+
+    run_dir = run(_job(tmp_path, "pct_bc"))
+    assert (run_dir / "params.pkl").exists()
+
+    records = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
+    tags = {k for r in records for k in r if "/" in k}
+    assert not any(t.startswith("Stage1/") for t in tags)
+    assert "Stage2/action_accuracy" in tags
+
+
+def test_pct_bc_filters_to_the_top_quantile_of_episodes_by_return(tmp_path):
+    """The '%' in %BC: only episodes above the return threshold contribute
+    windows, and filtering is by episode, not by window, so a long episode's
+    overlapping fragments cannot dominate the quantile.
+    """
+    from oaht_bench.offline.dataset import make_windows
+    from oaht_bench.offline.pct_bc import _filter_by_return
+
+    n_ep, T, obs_dim = 4, 6, 3
+    rewards = np.zeros((n_ep, 2, T), dtype=np.float32)
+    for ep in range(n_ep):
+        rewards[ep, 0] = float(ep)  # episode ep's ego return is exactly ep
+    batch = EpisodeBatch(
+        obs=np.zeros((n_ep, 2, T, obs_dim), dtype=np.float32),
+        actions=np.zeros((n_ep, 2, T), dtype=np.int32),
+        rewards=rewards,
+        dones=np.zeros((n_ep, T), dtype=bool),
+        valid=np.ones((n_ep, T), dtype=bool),
+        avail_actions=np.ones((n_ep, 2, T, 4), dtype=np.float32),
+        member_ids=np.zeros((n_ep, 2), dtype=np.int32),
+        ego_index=0,
+        meta={"generator": "test"},
+    )
+    windows = make_windows(batch, context_length=T, stride=T, normalize=False)
+    assert set(np.unique(windows.episode_id)) == {0, 1, 2, 3}
+
+    kept = _filter_by_return(windows, top_return_quantile=0.5)
+    kept_episodes = set(np.unique(windows.episode_id[kept]))
+    assert kept_episodes == {2, 3}, "top 50% of 4 episodes by return should be episodes 2 and 3"
+
+    assert len(_filter_by_return(windows, top_return_quantile=1.0)) == len(windows)
 
 
 def test_runner_refuses_an_unimplemented_baseline(tmp_path):

@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 
 #: Baselines this runner can train. The roster in ``BaselineName`` is larger;
 #: the rest raise rather than silently training something else.
-SUPPORTED = ("liam", "meliba", "omis", "tao")
+SUPPORTED = ("liam", "meliba", "omis", "tao", "pct_bc")
 
 
 def _resolve_dims(cfg, obs_dim: int, action_dim: int):

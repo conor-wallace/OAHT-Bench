@@ -621,6 +621,208 @@ run per cell.
 
 ---
 
+## FCP × Hanabi — budget
+
+Never run before this. jax-aht's inherited config is `total_timesteps=1e9`,
+`num_envs=32` (244,141 updates). `num_envs=64` adopted first, matching the
+batch-size lesson from LBF — which immediately means `total_timesteps` numbers
+don't carry over raw: `1e9` at the new batch size is only 122,070 updates, half
+of jax-aht's actual reference. Bracketed the corrected reference point (`2e9`)
+rather than reusing the raw upstream number, per the same "`num_envs` is not a
+throughput knob" lesson the LBF FCP entry already established.
+
+### Grid
+
+```
+generator.num_envs         = 64
+generator.total_timesteps  = 1e9, 2e9, 5e9
+```
+
+One seed each.
+
+### What the sweep found
+
+| `total_timesteps` | updates | SP | XP | SP−XP | slope /1k |
+|---:|---:|---:|---:|---:|---:|
+| 1e9 | 122,070 | 19.02 | 3.68 | 15.34 | +0.0111 |
+| 2e9 | 244,140 | 19.97 | 5.19 | 14.78 | +0.0039 |
+| 5e9 | 610,351 | 19.37 | 2.69 | **16.68** | +0.0023 |
+
+**Competence is flat past `1e9`**, within about a point on Hanabi's 25-point
+scale across a 5x budget range — not a clean monotonic climb, but no further
+gain either. Slope drops into a converged range (< +0.004/1k) by `2e9`.
+
+**Separation is not monotonic, and reversed rather than continuing a trend.**
+Going `1e9 → 2e9`, XP rose and separation fell — the same "competence
+saturates, cross-play catches up" shape CoMeDi showed on its own LBF budget
+doubling, and it looked like a trend worth flagging mid-sweep. It didn't
+continue: at `5e9`, XP fell back below even the `1e9` value and separation hit
+its highest point of the three. Single seed — treated as noise around a
+roughly flat separation level (14.8–16.7), the same caution applied to every
+other non-monotonic result in this file, not a real trend in either direction.
+
+### Adopted: `total_timesteps=2e9`, `num_envs=64`
+
+Not the best of the three on any single metric (`5e9` has the best separation,
+`1e9` is cheapest) — chosen because it matches jax-aht's own reference update
+count almost exactly (244,140 vs upstream's 244,141 at `num_envs=32`), is fully
+converged (slope +0.0039/1k), and costs a quarter of `5e9` for differences that
+are within noise rather than a signal favoring more spend. Pushed into
+`gen_teammate_configs.py`.
+
+### What the sweep could not conclude
+
+**PPO hyperparameters untouched.** Unlike LBF, no `entropy_coef` /
+`learning_rate` / `clip_eps` sweep was run here — this entry is budget only.
+LBF's tuned PPO values were checked against Hanabi's inherited ones at smoke
+scale before this sweep and not carried forward (see the discussion of why
+LBF's hyperparameters don't transfer across environments); Hanabi's PPO stays
+jax-aht's inherited settings.
+
+**CoMeDi, BRDiv, and L-BRDiv have not been started on Hanabi.** Only FCP is
+tuned here. Deliberately parked in favor of Overcooked-v2 integration — see
+`CLAUDE.md`'s State section.
+
+**Whether `5e9`'s separation is real** is exactly the kind of question this
+file usually resolves with a second seed, not run here given the cost — `5e9`
+alone is 610,351 updates, the largest single run in this file.
+
+---
+
+## FCP × Overcooked-v2 — budget, against an external reference
+
+The first fully-completed result on Overcooked-v2, absorbed this session
+(`PROVENANCE.md` — from `jaxmarl==0.1.0`, not a version bump, since that
+release's `overcooked_v2` declares `jax<=0.4.38` and can't install alongside
+this project's `jax==0.5.3`). Two decisions and one real infrastructure gap
+came before any budget question was answerable at all:
+
+- **Reward shaping**: v2's `rewards` (from `step_env`) is already the correct
+  base task reward; `shaped_reward` is diagnostic-only, not folded into
+  training. Independently confirmed against ICRL4AHT's own overcooked_v2
+  wrapper (read for understanding only — their repo has no license, so
+  nothing was copied; same clean-room principle as AD-RPG), whose own comment
+  states the same thing about the same field.
+- **Partial observability, not full**: `agent_view_size=2` on every
+  registered `overcooked_v2_*` preset, matching upstream's only validated
+  reference config (`baselines/IPPO/config/ippo_rnn_overcooked_v2.yaml`).
+  This is v2's headline feature over v1 and the reason to use v2 at all
+  rather than a full-observability run comparable to v1's — but it requires
+  a policy with memory to be useful, which is why the next point mattered.
+- **The crossplay evaluation harness could not score an RNN policy at all**,
+  discovered by actually running one: `population/loading.py`'s
+  `get_fcp_population` hardcoded `MLPActorCriticPolicy` regardless of
+  `actor_type`. Fixed by dispatching on `actor_type`, scoped to FCP only —
+  `run_episodes.py` and `AgentPopulation` were *already* fully polymorphic
+  over policy type (hidden-state threading, generic `init_hstate`/
+  `get_action` dispatch), designed for this from the start and simply never
+  wired at the loading layer. CoMeDi/BRDiv/L-BRDiv still can't use
+  `actor_type="rnn"`: there is no RNN variant of
+  `ActorWithConditionalCriticPolicy`, so they stay on `"mlp"` and therefore
+  cannot make good use of `agent_view_size=2` if pointed at these presets
+  today.
+
+### Grid
+
+Two stages. First, a device-safe bracket translating upstream's own
+reference update count (`NUM_ENVS=256`, `TOTAL_TIMESTEPS=3e7` → 293 updates)
+down to `num_envs=64` (256 OOMs on this GPU — confirmed by an actual crash,
+not just `check_device.py`'s estimate) while holding the update count fixed,
+the same `num_envs`-isn't-a-throughput-knob rule as everywhere else in this
+file:
+
+```
+generator.num_envs         = 64  (fixed for both stages)
+generator.total_timesteps  = 3.75e6, 7.5e6, 1.5e7   # stage 1: 146/292/585 updates
+generator.total_timesteps  = 3e7, 6e7, 1e8           # stage 2: 1,171/2,343/3,906 updates
+```
+
+`agent_view_size=2`, `actor_type="rnn"` fixed throughout. PPO hyperparameters
+taken from upstream's reference config rather than v1's MLP-tuned ones,
+since partial observability + RNN makes v1's values an irrelevant prior.
+
+### What the sweep found
+
+**Stage 1 was nowhere close, by an external measure this file doesn't
+usually have.** The original Overcooked-v2 paper reports **~163** return on
+`counter_circuit`. The largest stage-1 cell (585 updates) was still climbing
+with no sign of leveling off across all four quarters of its own training
+(47.55 → 58.50 → 64.61 → 71.69) — under half the reference at the top of the
+bracket. This is a clearer "still starved" signal than the slope diagnostic
+alone usually gives, and it's why stage 2 jumped straight to a much larger
+bracket anchored on upstream's raw `total_timesteps` number rather than
+another small increment.
+
+**A run was lost, and the lesson from it was still worth keeping.** The
+`1e8` cell was launched in the foreground of an SSH session that dropped
+overnight — the process died with it, and since `save_train_run` only writes
+once at the very end, no checkpoint exists (~7 hours of GPU time,
+unrecoverable as a scored population). But `metrics.jsonl` streams
+incrementally and survived, 92.7% through (3,620 of 3,906 updates) before
+the connection dropped:
+
+| quarter | mean return |
+|---|---:|
+| 1 | 106.29 |
+| 2 | 193.42 |
+| 3 | 199.82 |
+| 4 | 201.11 |
+
+Crossed the 163 reference at **train_step 716 — 18.3% of the target
+budget** — and was clearly decelerating by quarter 3 (+1.29 from quarter 3
+to 4, versus +87 from quarter 1 to 2). Lesson, separate from the tuning
+result itself: **run anything that needs to survive a dropped connection
+inside `tmux`/`screen`**, not a plain foreground process. Costly enough to
+be worth stating plainly rather than filing away.
+
+**`6e7`, rerun properly (inside `screen`), confirms the lost run's shape and
+gives a real, scored result.**
+
+| | SP | XP | SP−XP |
+|---|---:|---:|---:|
+| `6e7` (2,343 updates) | **205.20** | 90.25 | 114.95 |
+
+SP is **126% of the paper's reference**. Its own training curve (quarters:
+77.90 → 168.68 → 187.44 → 190.67, final 200.00) decelerates the same way the
+lost `1e8` run's did, and lands within a few points of where that run's own
+quarters 3–4 sat (199.82 / 201.11) despite 67% less budget — `1e8`'s entire
+advantage over `6e7` is on the order of 5–10 points on a ~200 scale. Neither
+`3e7` nor `1e8` was run to completion at this fidelity; the comparison
+above is what the adoption call rests on.
+
+### Adopted: `total_timesteps=6e7`, `num_envs=64`, `actor_type="rnn"`, `agent_view_size=2`
+
+Not the largest budget tried, and not confirmed flat by its own slope
+(+3.49/1k, still mildly positive) — adopted because it already clears an
+external, published reference by a wide margin, and the lost `1e8` run's
+curve shows the remaining headroom past this point is small relative to its
+cost. Pushed into `gen_teammate_configs.py`.
+
+### What the sweep could not conclude
+
+**Whether `6e7` is actually converged, or just close enough.** `1e8` was
+never scored at this fidelity — its checkpoint didn't survive — so the
+comparison above is curve-shape evidence, not a second scored data point.
+
+**The `num_envs=64` vs. upstream's `256` batch-size question, still open.**
+Flagged before this bracket ran and not resolved by it: FCP × LBF found
+batch size matters independently of update count, and this environment's
+budget was chased entirely by adding more (smaller-batch) updates rather
+than testing whether more batch would have gotten here cheaper.
+`check_device.py` showed real headroom left at `num_envs=64` (16% of the
+device budget) — `~128` is a plausible next value to test, deliberately not
+conflated into this budget-only sweep.
+
+**Separation (114.95) has no comparison point yet** — the first crossplay
+reading FCP has ever produced on this environment. Whether that's large,
+small, or typical for this generator/task is unknown.
+
+**CoMeDi/BRDiv/L-BRDiv remain untouched on Overcooked-v2**, and can't
+meaningfully use `agent_view_size=2` until an RNN-compatible
+conditional/double-critic policy exists.
+
+---
+
 ## Not yet tuned
 
 All four on Overcooked and Hanabi still run at hyperparameters ported from

@@ -22,6 +22,7 @@ from oaht_bench.configs.network import (
     LiamNetworkConfig,
     MelibaNetworkConfig,
     OmisNetworkConfig,
+    PctBcNetworkConfig,
     TaoNetworkConfig,
 )
 from oaht_bench.configs.teammate_gen import GeneratorConfig
@@ -30,7 +31,11 @@ from oaht_bench.configs.teammate_gen import GeneratorConfig
 #: BaseAhtPolicy contract; the other three carry a config so their runs validate
 #: while they stay on the runner's inline path (transitional).
 OfflineNetworkConfig = Annotated[
-    LiamNetworkConfig | MelibaNetworkConfig | OmisNetworkConfig | TaoNetworkConfig,
+    LiamNetworkConfig
+    | MelibaNetworkConfig
+    | OmisNetworkConfig
+    | TaoNetworkConfig
+    | PctBcNetworkConfig,
     Field(discriminator="architecture"),
 ]
 

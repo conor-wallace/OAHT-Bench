@@ -110,6 +110,15 @@ def make_env(env_name: str, env_kwargs: dict = {}):
         env_kwargs_copy["layout"] = layout
         env = OvercookedWrapper(**env_kwargs_copy)
 
+    elif env_name == 'overcooked-v2':
+        # No augmented_layouts-style preprocessing needed here, unlike v1:
+        # OvercookedV2.__init__ already resolves a string layout name via
+        # its own overcooked_v2_layouts lookup (PROVENANCE.md), so
+        # env_kwargs passes straight through.
+        from oaht_bench.envs.overcooked_v2.overcooked_v2_wrapper import OvercookedV2Wrapper
+
+        env = OvercookedV2Wrapper(**env_kwargs)
+
     elif env_name == 'hanabi':
         default_env_kwargs = {
             "num_agents": 2,

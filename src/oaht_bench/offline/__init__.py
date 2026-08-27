@@ -52,6 +52,7 @@ from oaht_bench.offline.omis import (
     omis_representation_loss,
     omis_search,
 )
+from oaht_bench.offline.pct_bc import PctBcNetwork, PctBcPolicy, pct_bc_loss
 from oaht_bench.offline.registry import BaseAhtPolicy, get_policy
 from oaht_bench.offline.sampler import TeammateIndex, sample_stage1, sample_stage2
 from oaht_bench.offline.tao import (
@@ -82,6 +83,9 @@ __all__ = [
     "OmisModel",
     "OmisPolicy",
     "OpponentPolicyEncoder",
+    "PctBcNetwork",
+    "PctBcPolicy",
+    "pct_bc_loss",
     "TaoNetwork",
     "TaoPolicy",
     "TeammateIndex",
