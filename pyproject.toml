@@ -78,6 +78,7 @@ include = [
     "src/oaht_bench/cli.py",
     "src/oaht_bench/configs/**/*.py",
     "src/oaht_bench/common/logging.py",
+    "src/oaht_bench/data/epsilon_sampler.py",
     "src/oaht_bench/envs/factory.py",
     "src/oaht_bench/envs/protocols.py",
     "src/oaht_bench/offline/**/*.py",
