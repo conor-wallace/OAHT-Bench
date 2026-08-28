@@ -43,6 +43,10 @@ ActorType = Literal[
     # observability on Overcooked-v2 for BRDiv/L-BRDiv. See
     # docs/tuning_record.md.
     "rnn_actor_with_conditional_critic",
+    # CoMeDiRuntime.warmup()'s RNN analogue of pseudo_actor_with_conditional_critic
+    # -- the network-shape-only variant a plain self-play IPPO trainer can drive
+    # before any real population exists to condition on.
+    "pseudo_rnn_actor_with_conditional_critic",
 ]
 
 

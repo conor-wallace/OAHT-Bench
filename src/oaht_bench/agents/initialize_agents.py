@@ -3,7 +3,8 @@ import jax
 from oaht_bench.agents.mlp_actor_critic_agent import MLPActorCriticPolicy, ActorWithDoubleCriticPolicy, \
     ActorWithConditionalCriticPolicy, PseudoActorWithDoubleCriticPolicy, \
     PseudoActorWithConditionalCriticPolicy
-from oaht_bench.agents.rnn_actor_critic_agent import RNNActorCriticPolicy
+from oaht_bench.agents.rnn_actor_critic_agent import RNNActorCriticPolicy, RNNActorWithConditionalCriticPolicy, \
+    PseudoRNNActorWithConditionalCriticPolicy
 from oaht_bench.agents.s5_actor_critic_agent import S5ActorCriticPolicy
 from oaht_bench.algorithms.liam_agent import LIAMPolicy, initialize_liam_encoder_decoder
 from oaht_bench.algorithms.meliba_agent import MeLIBAPolicy, initialize_meliba_encoder_decoder
@@ -113,14 +114,29 @@ def initialize_pseudo_actor_with_double_critic(config, env, rng):
     return policy, init_params
 
 def initialize_actor_with_conditional_critic(config, env, rng):
-    """Initialize an actor with conditional critic with the given config."""
-    policy = ActorWithConditionalCriticPolicy(
+    """Initialize an actor with conditional critic with the given config.
+
+    Dispatches on ACTOR_TYPE the same way initialize_rnn_agent's callers do --
+    a single fix-point for both of this function's callers (CoMeDi.py and
+    common/agent_loader_from_config.py), since neither builds the policy
+    directly. agent_loader_from_config.py doesn't set ACTOR_TYPE, so the
+    .get() default keeps it on the MLP path unaffected.
+    """
+    policy_cls = (
+        RNNActorWithConditionalCriticPolicy
+        if config.get("ACTOR_TYPE", "actor_with_conditional_critic") == "rnn_actor_with_conditional_critic"
+        else ActorWithConditionalCriticPolicy
+    )
+    kwargs = dict(
         action_dim=env.action_space(env.agents[0]).n,
         obs_dim=config.get("POLICY_INPUT_DIM", env.observation_space(env.agents[0]).shape[0]),
         pop_size=config["POP_SIZE"],
         activation=config.get("ACTIVATION", "tanh"),
         fc_hidden_dim=config.get("FC_HIDDEN_DIM", 64),
     )
+    if policy_cls is RNNActorWithConditionalCriticPolicy:
+        kwargs["gru_hidden_dim"] = config.get("GRU_HIDDEN_DIM", 64)
+    policy = policy_cls(**kwargs)
     rng, init_rng = jax.random.split(rng)
     init_params = policy.init_params(init_rng)
 
@@ -134,6 +150,21 @@ def initialize_pseudo_actor_with_conditional_critic(config, env, rng):
         pop_size=config["POP_SIZE"],
         activation=config.get("ACTIVATION", "tanh"),
         fc_hidden_dim=config.get("FC_HIDDEN_DIM", 64),
+    )
+    rng, init_rng = jax.random.split(rng)
+    init_params = policy.init_params(init_rng)
+
+    return policy, init_params
+
+def initialize_pseudo_rnn_actor_with_conditional_critic(config, env, rng):
+    """Initialize the RNN analogue of a pseudo actor with conditional critic."""
+    policy = PseudoRNNActorWithConditionalCriticPolicy(
+        action_dim=env.action_space(env.agents[0]).n,
+        obs_dim=config.get("POLICY_INPUT_DIM", env.observation_space(env.agents[0]).shape[0]),
+        pop_size=config["POP_SIZE"],
+        activation=config.get("ACTIVATION", "tanh"),
+        fc_hidden_dim=config.get("FC_HIDDEN_DIM", 64),
+        gru_hidden_dim=config.get("GRU_HIDDEN_DIM", 64),
     )
     rng, init_rng = jax.random.split(rng)
     init_params = policy.init_params(init_rng)

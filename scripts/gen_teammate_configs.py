@@ -336,8 +336,24 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # constraint; that's the open follow-up. See docs/tuning_record.md.
         "lbf": dict(total_timesteps_per_iteration=1.92e8, num_envs=64, pop=POPULATION_SIZE),
         "overcooked": dict(total_timesteps_per_iteration=1e7, num_envs=48, pop=POPULATION_SIZE),
-        # UNTUNED. Copied from v1's "overcooked" budget as a starting point.
-        "overcooked_v2": dict(total_timesteps_per_iteration=1e7, num_envs=48, pop=POPULATION_SIZE),
+        # UNTUNED budget, but actor_type is no longer a guess: CoMeDi's RNN
+        # conditional critic (RNNActorWithConditionalCriticPolicy) landed this
+        # session, mirroring BRDiv/L-BRDiv's own RNN support -- see
+        # docs/tuning_record.md. CoMeDi never reassigns which population
+        # member plays a role mid-rollout, so unlike BRDiv/L-BRDiv it has no
+        # n^2-pairing memory constraint and needs no num_envs reduction;
+        # num_envs=64 matches both CoMeDi's own LBF value and FCP's tuned
+        # Overcooked-v2 value, keeping the ratio derivation below apples to
+        # apples. total_timesteps_per_iteration derived the same way as
+        # BRDiv/L-BRDiv's: on LBF, CoMeDi's total_timesteps_per_iteration
+        # (1.92e8) is 8x FCP's total_timesteps (24e6) at the same num_envs=64.
+        # Applying 8x to FCP's tuned Overcooked-v2 budget (6e7) gives 4.8e8.
+        "overcooked_v2": dict(
+            total_timesteps_per_iteration=4.8e8,
+            num_envs=64,
+            pop=POPULATION_SIZE,
+            actor_type="rnn_actor_with_conditional_critic",
+        ),
         "hanabi": dict(total_timesteps_per_iteration=2e7, num_envs=48, pop=POPULATION_SIZE),
     },
     "brdiv": {

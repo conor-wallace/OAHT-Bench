@@ -133,7 +133,14 @@ def get_comedi_population(
     # partner_params has shape (num_seeds, comedi_pop_size, ...)
     partner_params = out['final_params_conf']
 
-    partner_policy = ActorWithConditionalCriticPolicy(
+    # Same dispatch as get_fcp_population/get_brdiv_population above, and the
+    # same construction CoMeDi.py itself now uses -- see docs/tuning_record.md.
+    policy_cls = (
+        RNNActorWithConditionalCriticPolicy
+        if job.generator.actor_type == "rnn_actor_with_conditional_critic"
+        else ActorWithConditionalCriticPolicy
+    )
+    partner_policy = policy_cls(
         action_dim=env.action_space(env.agents[1]).n,
         obs_dim=env.observation_space(env.agents[1]).shape[0],
         pop_size=comedi_pop_size, # used to create onehot agent id

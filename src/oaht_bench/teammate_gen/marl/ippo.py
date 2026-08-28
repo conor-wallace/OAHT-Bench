@@ -15,7 +15,8 @@ import optax
 from flax.training.train_state import TrainState
 
 from oaht_bench.agents.initialize_agents import initialize_s5_agent, initialize_mlp_agent, \
-    initialize_rnn_agent, initialize_pseudo_actor_with_double_critic, initialize_pseudo_actor_with_conditional_critic
+    initialize_rnn_agent, initialize_pseudo_actor_with_double_critic, initialize_pseudo_actor_with_conditional_critic, \
+    initialize_pseudo_rnn_actor_with_conditional_critic
 from oaht_bench.common.plot_utils import get_stats, get_metric_names
 from oaht_bench.common.save_load_utils import save_train_run
 from oaht_bench.envs import make_env
@@ -34,6 +35,8 @@ def initialize_agent(actor_type, algorithm_config, env, init_rng):
         policy, init_params = initialize_pseudo_actor_with_double_critic(algorithm_config, env, init_rng)
     elif actor_type == "pseudo_actor_with_conditional_critic":
         policy, init_params = initialize_pseudo_actor_with_conditional_critic(algorithm_config, env, init_rng)
+    elif actor_type == "pseudo_rnn_actor_with_conditional_critic":
+        policy, init_params = initialize_pseudo_rnn_actor_with_conditional_critic(algorithm_config, env, init_rng)
     return policy, init_params
 
 def make_train(runtime, env, logger, progress_callback=None):

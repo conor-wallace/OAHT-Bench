@@ -172,3 +172,27 @@ class RNNActorWithConditionalCriticPolicy(AgentPolicy):
         dummy_x = (dummy_obs, dummy_id, dummy_done, dummy_avail)
 
         return self.network.init(rng, init_hstate.reshape(batch_size, -1), dummy_x)
+
+
+class PseudoRNNActorWithConditionalCriticPolicy(RNNActorWithConditionalCriticPolicy):
+    """Enables RNNActorWithConditionalCriticPolicy to act as an RNNActorCriticPolicy,
+    by passing in a dummy agent id -- the RNN analogue of
+    PseudoActorWithConditionalCriticPolicy (mlp_actor_critic_agent.py).
+
+    CoMeDi trains its first population member via a plain self-play IPPO
+    trainer (make_ppo_train/initialize_agent's "pseudo_*" branches) that
+    knows nothing about population ids, before any real population exists to
+    condition on. That trainer calls get_action_value_policy the same way
+    for every actor type, so the dummy id has to be substituted here rather
+    than by the caller. Needed so the warmup member's params share the same
+    network shape as the conditional-critic members added afterward -- an
+    RNN main phase with an MLP-shaped warmup member would fail to add to the
+    same BufferedPopulation. See docs/tuning_record.md.
+    """
+
+    def get_action_value_policy(self, params, obs, done, avail_actions, hstate, rng,
+                                aux_obs=None, env_state=None):
+        dummy_agent_id = jnp.zeros(obs.shape[:-1] + (self.pop_size,))
+        return super().get_action_value_policy(
+            params, obs, done, avail_actions, hstate, rng, dummy_agent_id, env_state
+        )

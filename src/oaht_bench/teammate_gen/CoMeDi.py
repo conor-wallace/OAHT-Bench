@@ -4,7 +4,12 @@ https://openreview.net/forum?id=MljeRycu9s
 Command to run CoMeDi only on LBF:
 python teammate_generation/run.py algorithm=comedi/lbf/lbf_7x7_nolevels task=lbf/lbf_7x7_nolevels label=test_comedi run_heldout_eval=false train_ego=false
 
-Limitations: does not support recurrent actors.
+Recurrent actors (actor_type="rnn_actor_with_conditional_critic") are
+supported via RNNActorWithConditionalCriticPolicy, mirroring BRDiv.py/
+LBRDiv.py's own RNN support. Unlike those two, CoMeDi never reassigns which
+population member plays a role mid-rollout, so there is no per-actor vmap
+axis to solve here -- see the hstate threading through _env_step_conf_ego/
+_env_step_conf_br/_env_step_mixed and docs/tuning_record.md.
 '''
 from functools import partial
 import logging
@@ -136,6 +141,23 @@ def train_comedi_partners(
                 obsv_mp, env_state_mp = jax.vmap(env.reset, in_axes=(0,))(reset_rngs_mps)
                 obsv_mp2, env_state_mp2 = jax.vmap(env.reset, in_axes=(0,))(reset_rngs_mps2)
 
+                # RNN hidden state, one stream per (rollout phase, agent role) --
+                # None for the MLP conditional critic (AgentPolicy's default),
+                # a real (1, num_envs, hidden) array for the RNN one. Unlike
+                # BRDiv/L-BRDiv, CoMeDi never reassigns which population member
+                # plays a role mid-rollout, so there is no per-actor vmap-axis
+                # concern here -- these are single shared-params calls the same
+                # way run_episodes.py already handles RNN policies. zero_hstate
+                # is also what _create_minibatches gets below, matching BRDiv's
+                # own convention of always replaying the PPO loss from a fresh
+                # hidden state rather than the one actually carried during
+                # rollout collection. See docs/tuning_record.md.
+                zero_hstate = policy.init_hstate(config.num_envs)
+                xp_conf_h = xp_ego_h = zero_hstate
+                sp_conf_h = sp_br_h = zero_hstate
+                mp_conf_h = mp_ego_h = mp_br_h = zero_hstate
+                smp_conf_h = smp_br_h = zero_hstate
+
                 # build a pytree that can hold the parameters for all checkpoints.
                 ckpt_and_eval_interval = config.num_updates // max(1, config.num_checkpoints - 1)
                 num_ckpts = config.num_checkpoints
@@ -172,6 +194,10 @@ def train_comedi_partners(
                         last_dones_sp,
                         last_dones_mp,
                         last_dones_mp2,
+                        xp_conf_h, xp_ego_h,
+                        sp_conf_h, sp_br_h,
+                        mp_conf_h, mp_ego_h, mp_br_h,
+                        smp_conf_h, smp_br_h,
                         rng, update_steps,
                         num_prev_trained_conf
                     ) = update_runner_state
@@ -206,7 +232,7 @@ def train_comedi_partners(
                         agent_0 = confederate, agent_1 = ego
                         Returns updated runner_state and a Transition for the confederate.
                         """
-                        train_state, xp_param, xp_id, env_state, last_obs, last_dones, rng = runner_state
+                        train_state, xp_param, xp_id, env_state, last_obs, last_dones, rng, conf_h, ego_h = runner_state
                         rng, act_rng, partner_rng, step_rng = jax.random.split(rng, 4)
 
                         obs_0 = last_obs["agent_0"]
@@ -227,12 +253,12 @@ def train_comedi_partners(
 
                         # Agent_0 (confederate) action using policy interface
                         aux_obs = jnp.repeat(xp_one_hot_id, config.num_envs, axis=1)
-                        act_0, val_0, pi_0, _ = policy.get_action_value_policy(
+                        act_0, val_0, pi_0, new_conf_h = policy.get_action_value_policy(
                             params=train_state.params,
                             obs=obs_0.reshape(1, config.num_envs, -1),
                             done=last_dones["agent_0"].reshape(1, config.num_envs),
                             avail_actions=jax.lax.stop_gradient(avail_actions_0),
-                            hstate=None,
+                            hstate=conf_h,
                             rng=act_rng,
                             aux_obs=aux_obs
                         )
@@ -243,12 +269,12 @@ def train_comedi_partners(
                         val_0 = val_0.squeeze()
 
                         # Agent_1 (ego) action using policy interface
-                        act_1, _, _, _ = policy.get_action_value_policy(
+                        act_1, _, _, new_ego_h = policy.get_action_value_policy(
                             params=xp_param,
                             obs=obs_1.reshape(1, config.num_envs, -1),
                             done=last_dones["agent_1"].reshape(1, config.num_envs),
                             avail_actions=jax.lax.stop_gradient(avail_actions_1),
-                            hstate=None,
+                            hstate=ego_h,
                             rng=partner_rng,
                             aux_obs=aux_obs
                         )
@@ -278,7 +304,7 @@ def train_comedi_partners(
                             info=info_0,
                             avail_actions=avail_actions_0
                         )
-                        new_runner_state = (train_state, xp_param, xp_id, env_state_next, obs_next, done, rng)
+                        new_runner_state = (train_state, xp_param, xp_id, env_state_next, obs_next, done, rng, new_conf_h, new_ego_h)
                         return new_runner_state, transition
 
                     def _env_step_conf_br(runner_state, unused):
@@ -286,7 +312,7 @@ def train_comedi_partners(
                         agent_0 = confederate, agent_1 = best response
                         Returns updated runner_state, and Transitions for the confederate and best response.
                         """
-                        train_state, env_state, last_obs, last_dones, rng, current_trained_pop_id, reset_traj_batch = runner_state
+                        train_state, env_state, last_obs, last_dones, rng, current_trained_pop_id, reset_traj_batch, conf_h, br_h = runner_state
                         rng, conf_rng, br_rng, step_rng = jax.random.split(rng, 4)
 
                         def gather_sampled(data_pytree, flat_indices, first_nonbatch_dim: int):
@@ -326,6 +352,23 @@ def train_comedi_partners(
                             dones_0 = jnp.where(needs_resample, sampled_conf_done, last_dones["agent_0"])
                             dones_1 = jnp.where(needs_resample, sampled_br_done, last_dones["agent_1"])
 
+                            # Reset to a fresh hidden state on the same envs whose
+                            # obs/done got substituted above, rather than gathering
+                            # a hstate recorded during the MP rollout that produced
+                            # reset_traj_batch -- ResetTransition.conf_hstate/
+                            # partner_hstate are deliberately left unpopulated
+                            # (see _env_step_mixed below) and this matches BRDiv's
+                            # own "reset to init on resample" convention instead.
+                            # A resumed env's hidden state won't reflect where in
+                            # the episode it actually is; see docs/tuning_record.md.
+                            if conf_h is not None:
+                                conf_h = jnp.where(
+                                    needs_resample[jnp.newaxis, :, jnp.newaxis], zero_hstate, conf_h
+                                )
+                                br_h = jnp.where(
+                                    needs_resample[jnp.newaxis, :, jnp.newaxis], zero_hstate, br_h
+                                )
+
                         else:
 
                             # Reset conf-br data collection from conf-ego states
@@ -347,12 +390,12 @@ def train_comedi_partners(
                         )
 
                         aux_obs = jnp.repeat(sp_one_hot_id, config.num_envs, 1)
-                        act_0, val_0, pi_0, _ = policy.get_action_value_policy(
+                        act_0, val_0, pi_0, new_conf_h = policy.get_action_value_policy(
                             params=train_state.params,
                             obs=obs_0.reshape(1, config.num_envs, -1),
                             done=dones_0.reshape(1, config.num_envs),
                             avail_actions=jax.lax.stop_gradient(avail_actions_0),
-                            hstate=None,
+                            hstate=conf_h,
                             rng=conf_rng,
                             aux_obs=aux_obs
                         )
@@ -363,12 +406,12 @@ def train_comedi_partners(
                         val_0 = val_0.squeeze()
 
                         # Agent 1 (best response) action
-                        act_1, val_1, pi_1, _ = policy.get_action_value_policy(
+                        act_1, val_1, pi_1, new_br_h = policy.get_action_value_policy(
                             params=train_state.params,
                             obs=obs_1.reshape(1, config.num_envs, -1),
                             done=dones_1.reshape(1, config.num_envs),
                             avail_actions=jax.lax.stop_gradient(avail_actions_1),
-                            hstate=None,
+                            hstate=br_h,
                             rng=br_rng,
                             aux_obs=aux_obs
                         )
@@ -413,8 +456,8 @@ def train_comedi_partners(
                             info=info_1,
                             avail_actions=avail_actions_1
                         )
-                        # Pass reset_traj_batch and init_br_hstate through unchanged in the state tuple
-                        new_runner_state = (train_state, env_state_next, obs_next, done, rng, current_trained_pop_id, reset_traj_batch)
+                        # Pass reset_traj_batch through unchanged in the state tuple
+                        new_runner_state = (train_state, env_state_next, obs_next, done, rng, current_trained_pop_id, reset_traj_batch, new_conf_h, new_br_h)
                         return new_runner_state, (transition_0, transition_1)
 
                     def _env_step_mixed(runner_state, unused):
@@ -422,7 +465,7 @@ def train_comedi_partners(
                         agent_0 = confederate, agent_1 = ego OR best response
                         Returns a ResetTransition for resetting to env states encountered here.
                         """
-                        train_state_conf, ego_param, env_state, last_obs, last_dones, rng, current_trained_pop_id = runner_state
+                        train_state_conf, ego_param, env_state, last_obs, last_dones, rng, current_trained_pop_id, conf_h, ego_h, br_h = runner_state
                         rng, act_rng, ego_act_rng, br_act_rng, partner_choice_rng, step_rng = jax.random.split(rng, 6)
 
                         obs_0 = last_obs["agent_0"]
@@ -444,12 +487,12 @@ def train_comedi_partners(
                         aux_obs = jnp.repeat(xp_one_hot_id, config.num_envs, axis=1)
 
                         # Agent_0 (confederate) action using policy interface
-                        act_0, val_0, pi_0, _ = policy.get_action_value_policy(
+                        act_0, val_0, pi_0, new_conf_h = policy.get_action_value_policy(
                             params=train_state_conf.params,
                             obs=obs_0.reshape(1, config.num_envs, -1),
                             done=last_dones["agent_0"].reshape(1, config.num_envs),
                             avail_actions=jax.lax.stop_gradient(avail_actions_0),
-                            hstate=None,
+                            hstate=conf_h,
                             rng=act_rng,
                             aux_obs=aux_obs
                         )
@@ -459,22 +502,26 @@ def train_comedi_partners(
                         logp_0 = logp_0.squeeze()
                         val_0 = val_0.squeeze()
 
-                        ### Compute both the ego action and the best response action
-                        act_ego, _, _, _ = policy.get_action_value_policy(
+                        ### Compute both the ego action and the best response action.
+                        # Both computed (and their hstate evolved) every step
+                        # regardless of which one partner_choice picks below --
+                        # a skipped branch would leave that stream's hidden state
+                        # stale relative to the observations it should have seen.
+                        act_ego, _, _, new_ego_h = policy.get_action_value_policy(
                             params=ego_param,
                             obs=obs_1.reshape(1, config.num_envs, -1),
                             done=last_dones["agent_1"].reshape(1, config.num_envs),
                             avail_actions=jax.lax.stop_gradient(avail_actions_1),
-                            hstate=None,
+                            hstate=ego_h,
                             rng=ego_act_rng,
                             aux_obs=aux_obs
                         )
-                        act_br, _, _, _ = policy.get_action_value_policy(
+                        act_br, _, _, new_br_h = policy.get_action_value_policy(
                             params=train_state.params,
                             obs=obs_1.reshape(1, config.num_envs, -1),
                             done=last_dones["agent_1"].reshape(1, config.num_envs),
                             avail_actions=jax.lax.stop_gradient(avail_actions_1),
-                            hstate=None,
+                            hstate=br_h,
                             rng=br_act_rng,
                             aux_obs=aux_obs
                         )
@@ -503,36 +550,41 @@ def train_comedi_partners(
                             partner_obs=obs_1,
                             conf_done=last_dones["agent_0"],
                             partner_done=last_dones["agent_1"],
+                            # Deliberately left unpopulated: _env_step_conf_br's
+                            # reset-to-sampled-state branch resets hidden state to
+                            # zero_hstate on resample rather than gathering a
+                            # value recorded here, matching BRDiv's own
+                            # reset-to-init convention -- see that branch's
+                            # comment and docs/tuning_record.md.
                             conf_hstate=None,
-                            # we record the best response hstate because we use it to reset the best response
                             partner_hstate=None
                         )
-                        new_runner_state = (train_state_conf, ego_param, env_state_next, obs_next, done, rng, current_trained_pop_id)
+                        new_runner_state = (train_state_conf, ego_param, env_state_next, obs_next, done, rng, current_trained_pop_id, new_conf_h, new_ego_h, new_br_h)
                         return new_runner_state, reset_transition
 
                     # Do XP rollout (based on train_state params and the param in pop_buffer identified in Step 1)
-                    runner_state_xp = (train_state, xp_param, max_means_id, env_state_xp, obsv_xp, last_dones_xp, rng_xp)
+                    runner_state_xp = (train_state, xp_param, max_means_id, env_state_xp, obsv_xp, last_dones_xp, rng_xp, xp_conf_h, xp_ego_h)
                     runner_state_xp, traj_batch_xp = jax.lax.scan(
                         _env_step_conf_ego, runner_state_xp, None, config.rollout_length)
-                    (train_state, xp_param, max_means_id, env_state_xp, last_obs_xp, last_dones_xp, rng_xp) = runner_state_xp
+                    (train_state, xp_param, max_means_id, env_state_xp, last_obs_xp, last_dones_xp, rng_xp, xp_conf_h, xp_ego_h) = runner_state_xp
 
                     # Do self-play (based on train_state params) rollout like in the IPPO code
-                    runner_state_sp = (train_state, env_state_sp, obsv_sp, last_dones_sp, rng_sp, num_prev_trained_conf, None)
+                    runner_state_sp = (train_state, env_state_sp, obsv_sp, last_dones_sp, rng_sp, num_prev_trained_conf, None, sp_conf_h, sp_br_h)
                     runner_state_sp, (traj_batch_sp_agent0, traj_batch_sp_agent1) = jax.lax.scan(
                         _env_step_conf_br, runner_state_sp, None, config.rollout_length)
-                    (train_state, env_state_sp, last_obs_sp, last_dones_sp, rng_sp, num_prev_trained_conf, mp_traj_batch) = runner_state_sp
+                    (train_state, env_state_sp, last_obs_sp, last_dones_sp, rng_sp, num_prev_trained_conf, mp_traj_batch, sp_conf_h, sp_br_h) = runner_state_sp
 
                     # Step 4
                     # Do MP rollout (based on train_state params and the param in pop_buffer identified in Step 1)
-                    runner_state_mp = (train_state, xp_param, env_state_mp, obsv_mp, last_dones_mp, rng_mp, num_prev_trained_conf)
+                    runner_state_mp = (train_state, xp_param, env_state_mp, obsv_mp, last_dones_mp, rng_mp, num_prev_trained_conf, mp_conf_h, mp_ego_h, mp_br_h)
                     runner_state_mp, traj_batch_mp = jax.lax.scan(
                         _env_step_mixed, runner_state_mp, None, config.rollout_length)
-                    (train_state, xp_param, env_state_mp, last_obs_mp, last_dones_mp, rng_mp, num_prev_trained_conf) = runner_state_mp
+                    (train_state, xp_param, env_state_mp, last_obs_mp, last_dones_mp, rng_mp, num_prev_trained_conf, mp_conf_h, mp_ego_h, mp_br_h) = runner_state_mp
 
-                    runner_state_smp = (train_state, env_state_mp2, obsv_mp2, last_dones_mp2, rng_mp2, num_prev_trained_conf, traj_batch_mp)
+                    runner_state_smp = (train_state, env_state_mp2, obsv_mp2, last_dones_mp2, rng_mp2, num_prev_trained_conf, traj_batch_mp, smp_conf_h, smp_br_h)
                     runner_state_smp, (traj_batch_smp0, traj_batch_smp1) = jax.lax.scan(
                         _env_step_conf_br, runner_state_smp, None, config.rollout_length)
-                    (train_state, env_state_mp2, last_obs_mp2, last_dones_mp2, rng_mp2, num_prev_trained_conf, mp2_traj_batch) = runner_state_smp
+                    (train_state, env_state_mp2, last_obs_mp2, last_dones_mp2, rng_mp2, num_prev_trained_conf, mp2_traj_batch, smp_conf_h, smp_br_h) = runner_state_smp
 
                     def _calculate_gae(traj_batch, last_val):
                         def _get_advantages(gae_and_next_value, transition):
@@ -590,25 +642,25 @@ def train_comedi_partners(
 
                     # 5a) Compute conf advantages for XP (conf-ego) interaction
                     advantages_xp_conf, targets_xp_conf = _compute_advantages_and_targets(
-                        env_state_xp, policy, train_state.params, None,
+                        env_state_xp, policy, train_state.params, xp_conf_h,
                         last_obs_xp, last_dones_xp, traj_batch_xp, "agent_0", value_idx=max_means_id)
 
                     # 5b) Compute conf and br advantages for SP (conf-br) interaction
                     advantages_sp_conf, targets_sp_conf = _compute_advantages_and_targets(
-                        env_state_sp, policy, train_state.params, None,
+                        env_state_sp, policy, train_state.params, sp_conf_h,
                         last_obs_sp, last_dones_sp, traj_batch_sp_agent0, "agent_0", value_idx=num_prev_trained_conf)
 
                     advantages_sp_br, targets_sp_br = _compute_advantages_and_targets(
-                        env_state_sp, policy, train_state.params, None,
+                        env_state_sp, policy, train_state.params, sp_br_h,
                         last_obs_sp, last_dones_sp, traj_batch_sp_agent1, "agent_1", value_idx=num_prev_trained_conf)
 
                     # 5c) Compute advantages from MP interactions
                     advantages_mp_conf, targets_mp_conf = _compute_advantages_and_targets(
-                        env_state_mp2, policy, train_state.params, None,
+                        env_state_mp2, policy, train_state.params, smp_conf_h,
                         last_obs_mp2, last_dones_mp2, traj_batch_smp0, "agent_0", value_idx=num_prev_trained_conf)
 
                     advantages_mp_br, targets_mp_br = _compute_advantages_and_targets(
-                        env_state_mp2, policy, train_state.params, None,
+                        env_state_mp2, policy, train_state.params, smp_br_h,
                         last_obs_mp2, last_dones_mp2, traj_batch_smp1, "agent_1", value_idx=num_prev_trained_conf)
 
                     def _update_epoch(update_state, unused):
@@ -639,17 +691,17 @@ def train_comedi_partners(
 
                         def _update_minbatch_conf(train_state_conf, batch_infos):
                             minbatch_xp, minbatch_sp1, minbatch_sp2, minbatch_mp1,  minbatch_mp2, xp_id, sp_id = batch_infos
-                            _, traj_batch_xp, advantages_xp, returns_xp = minbatch_xp
-                            _, traj_batch_sp1, advantages_sp1, returns_sp1 = minbatch_sp1
-                            _, traj_batch_sp2, advantages_sp2, returns_sp2 = minbatch_sp2
-                            _, traj_batch_mp1, advantages_mp1, returns_mp1 = minbatch_mp1
-                            _, traj_batch_mp2, advantages_mp2, returns_mp2 = minbatch_mp2
+                            hstate_xp, traj_batch_xp, advantages_xp, returns_xp = minbatch_xp
+                            hstate_sp1, traj_batch_sp1, advantages_sp1, returns_sp1 = minbatch_sp1
+                            hstate_sp2, traj_batch_sp2, advantages_sp2, returns_sp2 = minbatch_sp2
+                            hstate_mp1, traj_batch_mp1, advantages_mp1, returns_mp1 = minbatch_mp1
+                            hstate_mp2, traj_batch_mp2, advantages_mp2, returns_mp2 = minbatch_mp2
 
-                            def _loss_fn_conf(params, traj_batch_xp, gae_xp, target_v_xp,
-                                            traj_batch_sp, gae_sp, target_v_sp,
-                                            traj_batch_sp2, gae_sp2, target_v_sp2,
-                                            traj_batch_mp, gae_mp, target_v_mp,
-                                            traj_batch_mp2, gae_mp2, target_v_mp2):
+                            def _loss_fn_conf(params, traj_batch_xp, gae_xp, target_v_xp, hstate_xp,
+                                            traj_batch_sp, gae_sp, target_v_sp, hstate_sp,
+                                            traj_batch_sp2, gae_sp2, target_v_sp2, hstate_sp2,
+                                            traj_batch_mp, gae_mp, target_v_mp, hstate_mp,
+                                            traj_batch_mp2, gae_mp2, target_v_mp2, hstate_mp2):
                                 # get policy and value of confederate versus ego and best response agents respectively
                                 xp_one_hot_id = jnp.eye(config.population_size)[xp_id]
                                 xp_one_hot_id = jnp.expand_dims(
@@ -674,7 +726,7 @@ def train_comedi_partners(
                                     obs=traj_batch_xp.obs,
                                     done=traj_batch_xp.done,
                                     avail_actions=traj_batch_xp.avail_actions,
-                                    hstate=None,
+                                    hstate=hstate_xp,
                                     rng=jax.random.PRNGKey(0), # only used for action sampling, which is not used here
                                     aux_obs=aux_obs_xp
                                 )
@@ -686,7 +738,7 @@ def train_comedi_partners(
                                     obs=traj_batch_sp.obs,
                                     done=traj_batch_sp.done,
                                     avail_actions=traj_batch_sp.avail_actions,
-                                    hstate=None,
+                                    hstate=hstate_sp,
                                     rng=jax.random.PRNGKey(0), # only used for action sampling, which is not used here
                                     aux_obs=aux_obs_sp
                                 )
@@ -696,7 +748,7 @@ def train_comedi_partners(
                                     obs=traj_batch_sp2.obs,
                                     done=traj_batch_sp2.done,
                                     avail_actions=traj_batch_sp2.avail_actions,
-                                    hstate=None,
+                                    hstate=hstate_sp2,
                                     rng=jax.random.PRNGKey(0), # only used for action sampling, which is not used here
                                     aux_obs=aux_obs_sp
                                 )
@@ -706,7 +758,7 @@ def train_comedi_partners(
                                     obs=traj_batch_mp.obs,
                                     done=traj_batch_mp.done,
                                     avail_actions=traj_batch_mp.avail_actions,
-                                    hstate=None,
+                                    hstate=hstate_mp,
                                     rng=jax.random.PRNGKey(0), # only used for action sampling, which is not used here
                                     aux_obs=aux_obs_sp
                                 )
@@ -716,7 +768,7 @@ def train_comedi_partners(
                                     obs=traj_batch_mp2.obs,
                                     done=traj_batch_mp2.done,
                                     avail_actions=traj_batch_mp2.avail_actions,
-                                    hstate=None,
+                                    hstate=hstate_mp2,
                                     rng=jax.random.PRNGKey(0), # only used for action sampling, which is not used here
                                     aux_obs=aux_obs_sp
                                 )
@@ -766,11 +818,11 @@ def train_comedi_partners(
                             grad_fn = jax.value_and_grad(_loss_fn_conf, has_aux=True)
                             (loss_val, aux_vals), grads = grad_fn(
                                 train_state_conf.params,
-                                traj_batch_xp, advantages_xp, returns_xp,
-                                traj_batch_sp1, advantages_sp1, returns_sp1,
-                                traj_batch_sp2, advantages_sp2, returns_sp2,
-                                traj_batch_mp1, advantages_mp1, returns_mp1,
-                                traj_batch_mp2, advantages_mp2, returns_mp2)
+                                traj_batch_xp, advantages_xp, returns_xp, hstate_xp,
+                                traj_batch_sp1, advantages_sp1, returns_sp1, hstate_sp1,
+                                traj_batch_sp2, advantages_sp2, returns_sp2, hstate_sp2,
+                                traj_batch_mp1, advantages_mp1, returns_mp1, hstate_mp1,
+                                traj_batch_mp2, advantages_mp2, returns_mp2, hstate_mp2)
                             train_state_conf = train_state_conf.apply_gradients(grads=grads)
                             return train_state_conf, (loss_val, aux_vals)
 
@@ -788,25 +840,29 @@ def train_comedi_partners(
 
                         rng, perm_rng_xp, perm_rng_sp_conf, perm_rng_sp_br, perm_rng_mp2_conf, perm_rng_mp2_br = jax.random.split(rng, 6)
 
-                        # Create minibatches for each agent and interaction type
+                        # Create minibatches for each agent and interaction type.
+                        # zero_hstate (not the per-stream hstate carried during
+                        # rollout collection) matches BRDiv's own convention of
+                        # always replaying the PPO loss from a fresh hidden state
+                        # -- see the comment where zero_hstate is defined.
                         minibatches_xp = _create_minibatches(
-                            traj_batch_xp, advantages_xp_conf, targets_xp_conf, None,
+                            traj_batch_xp, advantages_xp_conf, targets_xp_conf, zero_hstate,
                             config.num_envs, config.ppo.num_minibatches, perm_rng_xp
                         )
                         minibatches_sp_conf = _create_minibatches(
-                            traj_batch_sp_conf, advantages_sp_conf, targets_sp_conf, None,
+                            traj_batch_sp_conf, advantages_sp_conf, targets_sp_conf, zero_hstate,
                             config.num_envs, config.ppo.num_minibatches, perm_rng_sp_conf
                         )
                         minibatches_sp_br = _create_minibatches(
-                            traj_batch_sp_br, advantages_sp_br, targets_sp_br, None,
+                            traj_batch_sp_br, advantages_sp_br, targets_sp_br, zero_hstate,
                             config.num_envs, config.ppo.num_minibatches, perm_rng_sp_br
                         )
                         minibatches_mp_conf = _create_minibatches(
-                            traj_batch_mp_conf, advantages_mp_conf, targets_mp_conf, None,
+                            traj_batch_mp_conf, advantages_mp_conf, targets_mp_conf, zero_hstate,
                             config.num_envs, config.ppo.num_minibatches, perm_rng_mp2_conf
                         )
                         minibatches_mp_br = _create_minibatches(
-                            traj_batch_mp_br, advantages_mp_br, targets_mp_br, None,
+                            traj_batch_mp_br, advantages_mp_br, targets_mp_br, zero_hstate,
                             config.num_envs, config.ppo.num_minibatches, perm_rng_mp2_br
                         )
 
@@ -861,6 +917,10 @@ def train_comedi_partners(
                         env_state_mp2, last_obs_mp2,
                         last_dones_xp, last_dones_sp,
                         last_dones_mp, last_dones_mp2,
+                        xp_conf_h, xp_ego_h,
+                        sp_conf_h, sp_br_h,
+                        mp_conf_h, mp_ego_h, mp_br_h,
+                        smp_conf_h, smp_br_h,
                         rng, update_steps+1, num_prev_trained_conf
                     )
 
@@ -946,6 +1006,10 @@ def train_comedi_partners(
                     env_state_mp2, obsv_mp2,
                     init_done_xp, init_done_sp,
                     init_done_mp, init_done_mp2,
+                    xp_conf_h, xp_ego_h,
+                    sp_conf_h, sp_br_h,
+                    mp_conf_h, mp_ego_h, mp_br_h,
+                    smp_conf_h, smp_br_h,
                     rng, update_steps,
                     num_existing_agents
                 )

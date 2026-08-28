@@ -863,27 +863,120 @@ base to the actual `num_envs=96` (holding `num_updates` constant) gives
 
 ### What this could not conclude yet
 
-**SP-vs-XP at `num_envs=96` is still an open empirical question.** The
-smoke tests that verified the RNN plumbing only ran 2e6 timesteps (52
-updates) — far too little to say anything about collapse risk. A real
-`6.75e8`-timestep run is in progress to answer this; this section will be
-updated once it finishes.
+**SP-vs-XP at `num_envs=96` is still an open empirical question, and the
+first real attempt was inconclusive.** The smoke tests that verified the RNN
+plumbing only ran 2e6 timesteps (52 updates) — far too little to say
+anything about collapse risk. A real `6.75e8`-timestep BRDiv run was
+launched and killed at 44% (7,737 of 17,578 updates, ~19.5 hours in) before
+reaching its crossplay evaluation, once its own training-return curve
+(`Train/base_return`) showed a hard plateau: decile means climbed
+4.5 → 9.4 → 12.1 → 13.0 → 14.9 → 16.3 → 16.8 → 17.2 → 16.4 → 18.0 through the
+44% mark, with the final ~2,000 updates flat within noise (15.8–18.3, no
+consistent slope) and the single highest episode return across the whole run
+only 40 — roughly an order of magnitude below FCP's own Overcooked-v2 curve
+at a comparable fraction of training (which had already cleared 78 in its
+*first* quarter). This is consistent with the collapse risk `num_envs=96`
+(3.84 envs/pairing) was flagged for, but it's curve-shape evidence from an
+incomplete run, not a scored SP/XP result — the run was never rescoreable
+since BRDiv only checkpoints once at the very end. Whether `num_envs=96` is
+actually unworkable for BRDiv/L-BRDiv on this task, or whether a longer
+warm-up would still have turned the corner, is unresolved.
+
+**"Train longer at `num_envs=96`" is not a fix for this, if it is a
+collapse.** Envs-per-pairing is `num_envs / population_size²`, a property of
+the rollout, not of how many updates run — doubling `total_timesteps` at a
+fixed `num_envs=96` still gives only 3.84 environments' worth of data per
+confederate/best-response pairing on every update. The two real levers are a
+bigger GPU (to actually reach `num_envs=192`, 7.68 envs/pairing) or reducing
+the per-env memory footprint on this GPU (smaller GRU hidden dim, or
+stratified pairing sampling instead of independent uniform draws per env, per
+the Overcooked-v1 Known-open note in `CLAUDE.md`) so more envs fit at once.
+Neither has been tried yet.
 
 **Whether `6.75e8` is the right budget, as opposed to a defensible one.**
 The 7.5x ratio and the FCP Overcooked-v2 budget it's built on both carry
 their own uncertainty (see FCP × Overcooked-v2's own "could not conclude"
 above) — this derivation propagates that uncertainty rather than resolving
-it, and has not itself been swept.
+it, and has not itself been swept. Moot until the `num_envs=96` question
+above is resolved one way or the other.
+
+## CoMeDi × Overcooked-v2 — RNN support and budget derivation
+
+The same gap BRDiv/L-BRDiv had: `agent_view_size=2` partial observability
+needs a policy with memory, and CoMeDi had no RNN-compatible conditional
+critic. Landed the same session as the above, reusing
+`RNNActorWithConditionalCriticPolicy`.
+
+**RNN support.** Wired `actor_type` dispatch through
+`initialize_actor_with_conditional_critic` (`agents/initialize_agents.py`),
+the shared helper both CoMeDi.py and `common/agent_loader_from_config.py`
+call — a single fix-point rather than two. Unlike BRDiv/L-BRDiv, CoMeDi
+never reassigns which population member plays a role mid-rollout (no
+per-env independent id sampling), so none of BRDiv's per-actor `jax.vmap`
+axis handling was needed; the existing shape conventions in CoMeDi.py's
+rollout functions already matched what the RNN policy expects, and the real
+work was threading a real hidden state through four rollout functions
+(`_env_step_conf_ego`, `_env_step_conf_br` at two call sites,
+`_env_step_mixed`) plus GAE bootstrapping and PPO minibatching/loss, all of
+which already had the right parameter slots sitting unused as `None`.
+
+Two bugs surfaced only by actually running training, not by reading:
+
+- **The warmup phase needed its own RNN variant.** CoMeDi trains its first
+  population member via a plain self-play IPPO trainer
+  (`make_ppo_train`/`initialize_agent`) that predates any real population to
+  condition on, hardcoded to `actor_type="pseudo_actor_with_conditional_critic"`
+  regardless of the main phase's setting. An RNN main phase with an
+  MLP-shaped warmup member fails when the warmup member's params go into the
+  same `BufferedPopulation` as the RNN-shaped members added afterward. Fixed
+  with a new `PseudoRNNActorWithConditionalCriticPolicy` and
+  `CoMeDiRuntime.warmup()` now picks the matching pseudo type.
+- **`CoMeDiRuntime.to_agent_dict()` didn't include `ACTOR_TYPE` at all.**
+  `initialize_actor_with_conditional_critic`'s new dispatch reads
+  `config.get("ACTOR_TYPE", ...)` from the dict it's handed; CoMeDi.py calls
+  it with `config.to_agent_dict()` for two things — the population buffer's
+  dummy policy and each new confederate's real policy — and that dict was
+  silently falling back to the MLP default regardless of `actor_type`, while
+  the warmup phase (which reads `actor_type` through a separate typed
+  argument in `make_train`, not this dict) correctly built RNN-shaped
+  params. `BufferedPopulation.add_agent` failed on the resulting dict-key
+  mismatch on the very first real training run.
+
+Verified via an LBF smoke test (small budget, `actor_type=
+"rnn_actor_with_conditional_critic"`) — trained, checkpointed, and scored
+successfully — the full 309-test suite, and a separate independent review
+pass over the diff (shape/broadcast correctness, MLP-mode backward
+compatibility, tuple-ordering consistency across every rollout function,
+and the reset-branch semantics), which found no further issues.
+
+**Budget, derived the same way as BRDiv/L-BRDiv's.** On LBF, CoMeDi's
+`total_timesteps_per_iteration` (`1.92e8`) is 8x FCP's `total_timesteps`
+(`24e6`) at the same `num_envs=64`. Applying 8x to FCP's tuned Overcooked-v2
+budget (`6e7`) gives `4.8e8`. Unlike BRDiv/L-BRDiv, CoMeDi has no
+per-env independent id sampling and therefore no n²-pairing memory
+constraint, so `num_envs` didn't need to shrink to fit this GPU —
+`num_envs=64` (`check_device.py`: 16% of the device budget) matches both
+CoMeDi's own LBF value and FCP's Overcooked-v2 value, keeping the ratio
+derivation consistent with how it was built. Pushed into
+`gen_teammate_configs.py`.
+
+### What this could not conclude yet
+
+**Untested at the real budget.** Only the small LBF smoke test has actually
+trained with this code path; the derived `4.8e8` Overcooked-v2 budget has
+not been run.
+
+**The 8x ratio and the FCP budget it's built on both carry the same
+uncertainty already noted for BRDiv/L-BRDiv's derivation** — propagated,
+not resolved, here either.
 
 ## Not yet tuned
 
-CoMeDi on Overcooked-v2, and all four on Overcooked-v1 and Hanabi, still run
-at hyperparameters ported from jax-aht's per-environment Hydra configs (CoMeDi
-additionally has no RNN-compatible conditional critic yet, unlike BRDiv/
-L-BRDiv above). Those encode real tuning and are a reasonable starting point,
-but the FCP result above shows what inheriting them can cost: upstream's LBF
-budget left the population at 74% of the achievable food, and CoMeDi's left
-each member with 160 updates.
+All four on Overcooked-v1 and Hanabi still run at hyperparameters ported
+from jax-aht's per-environment Hydra configs. Those encode real tuning and
+are a reasonable starting point, but the FCP result above shows what
+inheriting them can cost: upstream's LBF budget left the population at 74%
+of the achievable food, and CoMeDi's left each member with 160 updates.
 
 ## AD-RPG × LBF 12×12 (untuned; a falsification, not a tuned baseline)
 

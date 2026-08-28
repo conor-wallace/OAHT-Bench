@@ -203,11 +203,22 @@ class CoMeDiRuntime(BaseConfig):
         ``TOTAL_TIMESTEPS`` and ``ACTOR_TYPE``. Making it a method states which
         two values differ, instead of leaving a mutated copy for a reader to
         diff against the original.
+
+        The pseudo actor type must match the main phase's network shape --
+        the warmup member's params go into the same BufferedPopulation as
+        every conditional-critic member added afterward, so an RNN main phase
+        needs the RNN pseudo variant, not the MLP one. See
+        docs/tuning_record.md.
         """
+        pseudo_actor_type = (
+            "pseudo_rnn_actor_with_conditional_critic"
+            if self.actor_type == "rnn_actor_with_conditional_critic"
+            else "pseudo_actor_with_conditional_critic"
+        )
         return PpoRuntime.from_config(
             ppo=self.ppo,
             network=self.network,
-            actor_type="pseudo_actor_with_conditional_critic",
+            actor_type=pseudo_actor_type,
             rollout_length=self.rollout_length,
             num_envs=self.num_envs,
             total_timesteps=self.total_timesteps_per_iteration,
@@ -217,8 +228,24 @@ class CoMeDiRuntime(BaseConfig):
         )
 
     def to_agent_dict(self) -> dict[str, Any]:
-        """Keys the absorbed agent initializers read."""
-        return {**self.network.to_agent_dict(), "POP_SIZE": self.population_size}
+        """Keys the absorbed agent initializers read.
+
+        Unlike make_train's own initialize_agent (ippo.py), which takes
+        actor_type as a separate typed argument, CoMeDi.py calls
+        initialize_actor_with_conditional_critic directly with this dict --
+        ACTOR_TYPE has to be a key in it, or that dispatch silently falls
+        back to the MLP default regardless of self.actor_type. Caught by a
+        real training run: the warmup phase (routed through PpoRuntime's own
+        to_agent_dict, which doesn't need this since make_train reads
+        actor_type separately) built RNN-shaped params while this one built
+        MLP-shaped params for the same population, and BufferedPopulation's
+        add_agent failed on the mismatch. See docs/tuning_record.md.
+        """
+        return {
+            **self.network.to_agent_dict(),
+            "POP_SIZE": self.population_size,
+            "ACTOR_TYPE": self.actor_type,
+        }
 
 
 class RpgRuntime(BaseConfig):
