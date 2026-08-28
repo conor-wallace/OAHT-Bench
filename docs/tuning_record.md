@@ -823,13 +823,67 @@ conditional/double-critic policy exists.
 
 ---
 
+## BRDiv/L-BRDiv × Overcooked-v2 — RNN support and budget derivation
+
+FCP's Overcooked-v2 result above left BRDiv/L-BRDiv stuck: `agent_view_size=2`
+partial observability needs a policy with memory to be useful, and there was
+no RNN variant of `ActorWithConditionalCriticPolicy` for either generator to
+use. Two things had to happen before a budget question was even askable.
+
+**RNN support.** Added `RNNActorWithConditionalCriticPolicy`
+(`agents/rnn_actor_critic.py`, `rnn_actor_critic_agent.py`), matching
+`ActorWithConditionalCriticPolicy`'s convention with a GRU actor path, and
+wired `actor_type` dispatch through `configs/teammate_gen.py` and
+`population/loading.py` the same way FCP's was. This exercised BRDiv.py's and
+LBRDiv.py's `_env_step` hstate-threading code for the first time — both
+carried a "not tested with recurrent actors" warning, and both actually broke
+on first run: a `needs_resample` broadcast mismatch, and a `jax.vmap` axis
+mismatch. BRDiv vmaps `forward_pass_conf`/`forward_pass_br` per-actor (each
+of the `num_envs` actors can be paired with a different population member,
+so params vary per actor), but the RNN policy's hstate carries its actor axis
+at position 1, not 0 — fixed with an explicit `in_axes`/`out_axes` on that
+vmap. Verified via an isolated smoke test for each generator (trains and
+checkpoints end-to-end) and the full suite (309 passed, no regressions).
+
+**GPU memory.** `_paired_scale`'s usual reference point gives `num_envs=192`
+(7.7 envs/pairing, matching LBF's established-safe reference) — `check_device.py`
+puts that at 99% of this 6GB GPU's memory, confirmed by an actual OOM.
+`num_envs=96` (3.84 envs/pairing — between the known-collapse point 2.6 from
+the LBF `n=5` incident and LBF's established-safe 7.7) fits at 49% and both
+generators train cleanly at that size.
+
+**Budget, derived rather than guessed.** On LBF, BRDiv/L-BRDiv's budget
+(`_paired_scale(64, 1.8e8)`) is 7.5x FCP's at the same `num_envs=64`
+(`1.8e8 / 24e6`) — a ratio independent of the pairing multiplier, which
+scales `num_envs` and `total_timesteps` together and cancels out of
+`num_updates`. Applying 7.5x to FCP's tuned Overcooked-v2 budget (`6e7` at
+`num_envs=64`) gives a base of `4.5e8`, then ×1.5 to move from that 64-env
+base to the actual `num_envs=96` (holding `num_updates` constant) gives
+`6.75e8`. Pushed into `gen_teammate_configs.py`.
+
+### What this could not conclude yet
+
+**SP-vs-XP at `num_envs=96` is still an open empirical question.** The
+smoke tests that verified the RNN plumbing only ran 2e6 timesteps (52
+updates) — far too little to say anything about collapse risk. A real
+`6.75e8`-timestep run is in progress to answer this; this section will be
+updated once it finishes.
+
+**Whether `6.75e8` is the right budget, as opposed to a defensible one.**
+The 7.5x ratio and the FCP Overcooked-v2 budget it's built on both carry
+their own uncertainty (see FCP × Overcooked-v2's own "could not conclude"
+above) — this derivation propagates that uncertainty rather than resolving
+it, and has not itself been swept.
+
 ## Not yet tuned
 
-All four on Overcooked and Hanabi still run at hyperparameters ported from
-jax-aht's per-environment Hydra configs. Those encode real tuning and are a
-reasonable starting point, but the FCP result above shows what inheriting them
-can cost: upstream's LBF budget left the population at 74% of the achievable
-food, and CoMeDi's left each member with 160 updates.
+CoMeDi on Overcooked-v2, and all four on Overcooked-v1 and Hanabi, still run
+at hyperparameters ported from jax-aht's per-environment Hydra configs (CoMeDi
+additionally has no RNN-compatible conditional critic yet, unlike BRDiv/
+L-BRDiv above). Those encode real tuning and are a reasonable starting point,
+but the FCP result above shows what inheriting them can cost: upstream's LBF
+budget left the population at 74% of the achievable food, and CoMeDi's left
+each member with 160 updates.
 
 ## AD-RPG × LBF 12×12 (untuned; a falsification, not a tuned baseline)
 
