@@ -174,14 +174,36 @@ class DatasetCollectionJob(JobBase):
 
     job_type: Literal["dataset_collection"] = "dataset_collection"
     env: EnvConfig
-    population_path: str = Field(
+    population_path: str | list[str] = Field(
         description="Teammate-generation run directory, or the saved_train_run "
         "inside it. The run's own job.json says which generator produced it, so "
-        "the population is rebuilt the same way scoring rebuilds it."
+        "the population is rebuilt the same way scoring rebuilds it.\n\n"
+        "A *list* of run directories selects pooled mode (§4, dataset_design.md): "
+        "the released members of every listed generator are flattened into one "
+        "roster and seated across populations, driven by the ε sampler against "
+        "'pooled_matrix_path'. The list order must match the roster order the "
+        "matrix was computed with. A single string keeps the original "
+        "single-population path (designed pairing within one generator)."
     )
-    variant: Literal["random", "medium", "expert", "replay_full", "mixed"] = Field(
+    variant: Literal["random", "medium", "expert", "replay_full", "mixed", "br_vs_worst"] = Field(
         description="D4RL-style data regime (§4.3). 'replay_full' is deliberately "
-        "not D4RL's 'medium-replay', which stops at medium performance."
+        "not D4RL's 'medium-replay', which stops at medium performance. The ε "
+        "variants ('expert', 'mixed', 'br_vs_worst') are target distributions over "
+        "the pooled ego-response-quality spectrum and need pooled mode."
+    )
+    pooled_matrix_path: str | None = Field(
+        default=None,
+        description="Path to the pooled cross-play matrix "
+        "(populations/<env>/pooled_crossplay.npz) that the ε sampler reads in "
+        "pooled mode. Required when population_path is a list; ignored otherwise.",
+    )
+    allow_self_pairing: bool = Field(
+        default=True,
+        description="Pooled mode only. Whether the ego may be the same roster "
+        "entry as the teammate (only possible for homogeneous self-play policies). "
+        "True makes 'expert' the genuine top of the spectrum for FCP/CoMeDi, whose "
+        "best response to a member is usually itself; False forces a "
+        "cross-population responder. The §4 self-pairing decision, as a knob.",
     )
     mismatch_fraction: float = Field(
         default=0.0,

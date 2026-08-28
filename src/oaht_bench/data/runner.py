@@ -20,10 +20,12 @@ from oaht_bench.common.save_load_utils import load_train_run
 from oaht_bench.configs import load_job, save_job
 from oaht_bench.configs.job import DatasetCollectionJob
 from oaht_bench.data.collect import collect_episode, pad_and_stack
+from oaht_bench.data.epsilon_sampler import EPSILON_TARGETS, load_pooled, plan_for_variant
 from oaht_bench.data.schema import EpisodeBatch
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper
-from oaht_bench.population import artifact_dir, get_member_params, population_from_run, released_members
+from oaht_bench.population import artifact_dir, population_from_run, released_members
+from oaht_bench.population.pooled_crossplay import build_roster
 
 log = logging.getLogger(__name__)
 
@@ -96,12 +98,16 @@ def _seat_plan(eligible: list[int], num_episodes: int, mismatch_fraction: float,
     return [plan[i] for i in rng.permutation(len(plan))]
 
 
-# comment: I imagine that at the dataset generation phase that we will already have ALL of the populations
-# comment: I think it makes sense to add option to the DatasetCollectionJob config that allows population_path to be a list of paths to [fcp, comedi, brdiv, and lbrdiv] populations
-# comment: To take this further, it also makes sense to combine members of one population with members of another to REALLY mix performance
-# comment: Anyway, this central run function should really be the entrypoint for dataset generation and should probably call different private runner functions depending on the dataset variant in the job config 
 def run(job: DatasetCollectionJob) -> Path:
-    """Collect a dataset and return the run directory."""
+    """Collect a dataset and return the run directory.
+
+    Dispatches on the shape of ``population_path``: a single string keeps the
+    original within-one-generator path (:func:`_collect_single`), a *list* selects
+    pooled mode (:func:`_collect_pooled`), where the released members of every
+    listed generator are flattened into one roster and the ε sampler seats them
+    across populations against the pooled cross-play matrix. Both share this
+    preamble (idempotence guard, config snapshot) and the summary tail.
+    """
     run_dir = Path(job.run_dir())
     existing = run_dir / "dataset.npz"
     if existing.exists():
@@ -115,6 +121,34 @@ def run(job: DatasetCollectionJob) -> Path:
     save_job(job, run_dir / "job.json", minimal=False)
 
     env = LogWrapper(make_env(job.env.env_name, job.env.env_kwargs()))
+    if isinstance(job.population_path, (list, tuple)):
+        batch = _collect_pooled(job, env)
+    else:
+        batch = _collect_single(job, env)
+
+    batch.save(run_dir / "dataset.npz")
+    (run_dir / "dataset_summary.json").write_text(
+        json.dumps(
+            {
+                "episodes": batch.num_episodes,
+                "agents": batch.num_agents,
+                "mean_length": float(batch.episode_lengths().mean()),
+                "mean_ego_return": float(batch.episode_returns()[:, 0].mean()),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    log.info("Dataset:\n%s", batch.describe())
+    return run_dir
+
+
+def _collect_single(job: DatasetCollectionJob, env) -> EpisodeBatch:
+    """The original path: seat one generator's designed pairing per episode.
+
+    ``population_path`` is a single run directory. Only 'expert' is implemented
+    here; the ε variants need the pooled roster and go through pooled mode.
+    """
     loaded, gen_job = _load_population(job, env)
     num_seats = len(env.agents)
 
@@ -126,10 +160,11 @@ def run(job: DatasetCollectionJob) -> Path:
         # Other D4RL-style regimes (§4.3) draw from the wider ladder; not yet
         # implemented, so fail rather than silently collect 'expert' data.
         raise NotImplementedError(
-            f"variant={job.variant!r} is not implemented yet; only 'expert' is. "
-            f"The other regimes need the competence ladder (§4.3), which for FCP "
-            f"is the checkpoint axis and for the others needs training snapshots "
-            f"that are not currently saved."
+            f"variant={job.variant!r} is not implemented in single-population "
+            f"mode; only 'expert' is. The ε variants ('br_vs_worst', 'mixed') "
+            f"need pooled mode -- pass a list of population_paths and a "
+            f"pooled_matrix_path. The τ variants ('medium', 'replay_full') need "
+            f"the competence ladder (§4.3), not yet saved."
         )
 
     rng = jax.random.PRNGKey(job.seed)
@@ -168,7 +203,7 @@ def run(job: DatasetCollectionJob) -> Path:
             log.info("collected %d/%d episodes", ep + 1, job.num_episodes)
 
     stacked = pad_and_stack(episodes)
-    batch = EpisodeBatch(
+    return EpisodeBatch(
         **stacked,
         member_ids=np.stack(member_ids),
         ego_index=0,
@@ -184,18 +219,112 @@ def run(job: DatasetCollectionJob) -> Path:
             "eligible_members": [int(m) for m in eligible],
         },
     )
-    batch.save(run_dir / "dataset.npz")
-    (run_dir / "dataset_summary.json").write_text(
-        json.dumps(
-            {
-                "episodes": batch.num_episodes,
-                "agents": batch.num_agents,
-                "mean_length": float(batch.episode_lengths().mean()),
-                "mean_ego_return": float(batch.episode_returns()[:, 0].mean()),
-            },
-            indent=2,
+
+
+def _pooled_matrix_hash(path: Path) -> str:
+    """Content hash of the pooled matrix, so a dataset records which one it read."""
+    import hashlib
+
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
+
+
+def _collect_pooled(job: DatasetCollectionJob, env) -> EpisodeBatch:
+    """Pooled mode: seat the ε sampler's cross-population plan (§3, dataset_design).
+
+    The released members of every ``population_path`` are flattened into one
+    roster (:func:`~oaht_bench.population.pooled_crossplay.build_roster`, the same
+    flattening the matrix was built with), and the ε sampler turns the variant's
+    target quality distribution into concrete ``(ego, teammate)`` roster indices
+    read off ``pooled_matrix_path``. Each episode seats ``roster[ego]`` in seat 0
+    against ``roster[teammate]`` in the rest.
+
+    ``member_ids`` here are *roster* indices, not per-population member indices;
+    the roster manifest in ``meta`` maps each back to ``(generator, member,
+    role)``, and ``ego_response_quality`` carries the per-episode ε -- the stable
+    descriptor the trajectory-view baselines read (``dataset_design.md`` §2).
+    These live in ``meta`` until the flat-transition schema (§2, deferred)
+    promotes them to columns.
+    """
+    if job.variant not in EPSILON_TARGETS:
+        raise NotImplementedError(
+            f"variant={job.variant!r} has no ε target; pooled mode implements "
+            f"{sorted(EPSILON_TARGETS)}. τ variants need the competence ladder (§4)."
         )
-        + "\n"
+    if job.pooled_matrix_path is None:
+        raise ValueError(
+            "pooled mode (population_path is a list) needs pooled_matrix_path, "
+            "the populations/<env>/pooled_crossplay.npz for these populations."
+        )
+    if job.mismatch_fraction:
+        # Pairing correctness is orthogonal to ε and not yet layered onto the
+        # pooled seating; fail rather than silently ignore a requested split.
+        raise NotImplementedError(
+            "mismatch_fraction is not yet supported in pooled mode; the ε bands "
+            "define the seating. Leave it at 0."
+        )
+
+    pop_dirs = [Path(p) for p in job.population_path]
+    roster = build_roster(pop_dirs, env)
+    pooled = load_pooled(job.pooled_matrix_path)
+    # Guard the emitted indices against a matrix computed for a different or
+    # reordered roster -- otherwise a stale matrix silently seats the wrong pair.
+    pooled.check_roster(roster)
+
+    plan = plan_for_variant(
+        pooled,
+        job.variant,
+        job.num_episodes,
+        rng=np.random.default_rng(job.seed),
+        allow_self_pairing=job.allow_self_pairing,
     )
-    log.info("Dataset:\n%s", batch.describe())
-    return run_dir
+    num_seats = len(env.agents)
+
+    rng = jax.random.PRNGKey(job.seed)
+    episodes, member_ids, epsilons, targets = [], [], [], []
+    for ep, seating in enumerate(tqdm(plan, desc="Generating pooled dataset")):
+        rng, ep_rng = jax.random.split(rng)
+        ego, mate = roster[seating.ego], roster[seating.teammate]
+        # Ego in seat 0, the teammate in every other seat (two-player today).
+        seats = [(ego.params, ego.policy_cls)] + [
+            (mate.params, mate.policy_cls) for _ in range(num_seats - 1)
+        ]
+        episodes.append(
+            collect_episode(
+                ep_rng,
+                env,
+                seats,
+                max_episode_steps=job.env.rollout_length,
+                greedy=False,  # sampled: matches training and deployment (see crossplay)
+            )
+        )
+        member_ids.append(np.asarray([seating.ego] + [seating.teammate] * (num_seats - 1)))
+        epsilons.append(seating.epsilon)
+        targets.append(seating.target)
+        if (ep + 1) % 10 == 0:
+            log.info("collected %d/%d episodes", ep + 1, job.num_episodes)
+
+    stacked = pad_and_stack(episodes)
+    return EpisodeBatch(
+        **stacked,
+        member_ids=np.stack(member_ids),
+        ego_index=0,
+        meta={
+            "config_hash": job.content_hash(),
+            "env": job.env.name,
+            "variant": job.variant,
+            "mode": "pooled",
+            "populations": [str(p) for p in pop_dirs],
+            "pooled_matrix_path": str(job.pooled_matrix_path),
+            "pooled_matrix_hash": _pooled_matrix_hash(job.pooled_matrix_path),
+            "allow_self_pairing": job.allow_self_pairing,
+            # member_ids are indices into this roster manifest.
+            "roster": [
+                {"generator": e.generator, "member": int(e.member), "role": e.role}
+                for e in roster
+            ],
+            # Per-episode labels, aligned with the episode axis, until the
+            # flat-transition schema promotes them to columns (§2).
+            "ego_response_quality": [float(x) for x in epsilons],
+            "target_epsilon": [float(x) for x in targets],
+        },
+    )
