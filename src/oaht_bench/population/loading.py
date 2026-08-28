@@ -27,7 +27,10 @@ from oaht_bench.agents.mlp_actor_critic_agent import (
     MLPActorCriticPolicy,
 )
 from oaht_bench.agents.population_interface import AgentPopulation
-from oaht_bench.agents.rnn_actor_critic_agent import RNNActorCriticPolicy
+from oaht_bench.agents.rnn_actor_critic_agent import (
+    RNNActorCriticPolicy,
+    RNNActorWithConditionalCriticPolicy,
+)
 from oaht_bench.configs.job import TeammateGenerationJob
 from oaht_bench.envs.protocols import TrainingEnv
 from oaht_bench.population.members import get_member_params
@@ -159,7 +162,14 @@ def get_brdiv_population(
     # partner_params has shape (num_seeds, brdiv_pop_size, ...)
     partner_params = out['final_params_conf']
 
-    partner_policy = ActorWithConditionalCriticPolicy(
+    # Same dispatch as get_fcp_population above, and the same construction
+    # BRDiv.py itself now uses -- see docs/tuning_record.md.
+    policy_cls = (
+        RNNActorWithConditionalCriticPolicy
+        if job.generator.actor_type == "rnn_actor_with_conditional_critic"
+        else ActorWithConditionalCriticPolicy
+    )
+    partner_policy = policy_cls(
         action_dim=env.action_space(env.agents[1]).n,
         obs_dim=env.observation_space(env.agents[1]).shape[0],
         pop_size=brdiv_pop_size, # used to create onehot agent id
@@ -188,7 +198,14 @@ def get_lbrdiv_population(
     # partner_params has shape (num_seeds, pop_size, ...)
     partner_params = out['final_params_conf']
 
-    partner_policy = ActorWithConditionalCriticPolicy(
+    # Same dispatch as get_fcp_population/get_brdiv_population above, and the
+    # same construction LBRDiv.py itself now uses -- see docs/tuning_record.md.
+    policy_cls = (
+        RNNActorWithConditionalCriticPolicy
+        if job.generator.actor_type == "rnn_actor_with_conditional_critic"
+        else ActorWithConditionalCriticPolicy
+    )
+    partner_policy = policy_cls(
         action_dim=env.action_space(env.agents[1]).n,
         obs_dim=env.observation_space(env.agents[1]).shape[0],
         pop_size=pop_size, # used to create onehot agent id

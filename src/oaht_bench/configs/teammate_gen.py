@@ -39,6 +39,10 @@ ActorType = Literal[
     "pseudo_actor_with_double_critic",
     "actor_with_conditional_critic",
     "pseudo_actor_with_conditional_critic",
+    # RNNActorWithConditionalCritic (agents/rnn_actor_critic.py): partial
+    # observability on Overcooked-v2 for BRDiv/L-BRDiv. See
+    # docs/tuning_record.md.
+    "rnn_actor_with_conditional_critic",
 ]
 
 
@@ -206,6 +210,12 @@ class BrDivConfig(GeneratorBase):
     """BRDiv: maximize best-response diversity over the conf x br cross-play matrix."""
 
     generator: Literal["brdiv"] = "brdiv"
+    # No actor_type axis existed for BRDiv/L-BRDiv before overcooked_v2's RNN
+    # support -- BRDiv.py/LBRDiv.py hardcoded ActorWithConditionalCriticPolicy
+    # directly at the construction site, not driven by ACTOR_TYPE the way FCP
+    # and CoMeDi already were. "rnn_actor_with_conditional_critic" is the only
+    # other value either file's construction site currently understands.
+    actor_type: ActorType = "actor_with_conditional_critic"
     total_timesteps: float = Field(default=4.5e7, gt=0)
     cross_play_weight: float = Field(
         default=1.0,
@@ -220,6 +230,7 @@ class BrDivConfig(GeneratorBase):
     def to_algorithm_dict(self) -> dict[str, Any]:
         return {
             **self._base_algorithm_dict(),
+            "ACTOR_TYPE": self.actor_type,
             "TOTAL_TIMESTEPS": self.total_timesteps,
             "XP_LOSS_WEIGHTS": self.cross_play_weight,
         }
@@ -229,6 +240,8 @@ class LBrDivConfig(GeneratorBase):
     """L-BRDiv: BRDiv's objective with the weights learned as Lagrange multipliers."""
 
     generator: Literal["lbrdiv"] = "lbrdiv"
+    # See BrDivConfig.actor_type -- same gap, same fix.
+    actor_type: ActorType = "actor_with_conditional_critic"
     total_timesteps: float = Field(default=4.5e7, gt=0)
     tolerance_factor: float = Field(
         default=0.1, description="Require self-play minus cross-play > this."
@@ -247,6 +260,7 @@ class LBrDivConfig(GeneratorBase):
     def to_algorithm_dict(self) -> dict[str, Any]:
         return {
             **self._base_algorithm_dict(),
+            "ACTOR_TYPE": self.actor_type,
             "TOTAL_TIMESTEPS": self.total_timesteps,
             "TOLERANCE_FACTOR": self.tolerance_factor,
             "LAGRANGE_LR": self.lagrange_learning_rate,

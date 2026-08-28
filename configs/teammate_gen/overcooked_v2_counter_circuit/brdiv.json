@@ -10,16 +10,17 @@
       "tier": "tier1"
     },
     "generator": {
+      "actor_type": "rnn_actor_with_conditional_critic",
       "cross_play_weight": 0.005,
       "generator": "brdiv",
-      "num_envs": 384,
+      "num_envs": 96,
       "ppo": {
         "clip_eps": 0.01,
         "entropy_coef": 0.05,
         "learning_rate": 0.001,
         "num_minibatches": 8
       },
-      "total_timesteps": 270000000.0
+      "total_timesteps": 675000000.0
     },
     "job_type": "teammate_generation",
     "label": "brdiv_overcooked_v2_counter_circuit"

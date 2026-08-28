@@ -10,9 +10,10 @@
       "tier": "tier1"
     },
     "generator": {
+      "actor_type": "rnn_actor_with_conditional_critic",
       "generator": "lbrdiv",
       "lagrange_learning_rate": 0.0036,
-      "num_envs": 384,
+      "num_envs": 96,
       "ppo": {
         "clip_eps": 0.01,
         "entropy_coef": 0.05,
@@ -20,7 +21,7 @@
         "num_minibatches": 8
       },
       "tolerance_factor": 10.0,
-      "total_timesteps": 270000000.0
+      "total_timesteps": 675000000.0
     },
     "job_type": "teammate_generation",
     "label": "lbrdiv_overcooked_v2_counter_circuit"

@@ -349,13 +349,32 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # +0.001/1k, genuinely flat. See docs/tuning_record.md.
         "lbf": _paired_scale(64, 1.8e8),
         "overcooked": _paired_scale(128, 9e7),
-        # UNTUNED, and likely broken as-is: this is exactly the config
-        # CLAUDE.md's Known-open section already flags as not fitting any GPU
-        # for v1 (384 envs x ~1040-float obs x 400-step rollouts ~= 11.9 GiB
-        # of observations alone at n^2 scaling). v2's obs is comparable in
-        # size or larger (partial observability adds channels, doesn't
-        # shrink them), so expect the same failure, not a smaller one.
-        "overcooked_v2": _paired_scale(128, 9e7),
+        # num_envs is NOT _paired_scale(64, ...)'s default. _paired_scale(64,
+        # ...) gives num_envs=192 (7.7 envs/pairing, matching LBF's
+        # established-safe reference) but check_device.py puts that at 99%
+        # of this 6GB GPU's memory -- confirmed OOM. 96 (3.84 envs/pairing,
+        # between the known-collapse point 2.6 and LBF's 7.7) fits and both
+        # BRDiv and L-BRDiv now train and checkpoint end-to-end at this size
+        # with the RNN conditional critic (hstate-threading bugs in
+        # _env_step's per-actor vmap fixed this session -- see
+        # docs/tuning_record.md). SP-vs-XP has not yet been checked at this
+        # budget scale (only a 2e6-timestep smoke test so far) -- still open.
+        #
+        # total_timesteps derived the same way FCP's overcooked_v2 budget was
+        # derived from its LBF one, not guessed: on LBF, BRDiv/L-BRDiv's base
+        # (pre-pairing-multiplier, num_envs=64) budget is total_timesteps=1.8e8
+        # vs FCP's 24e6 at the same num_envs -- a 7.5x ratio, independent of
+        # the pairing multiplier (which scales num_envs and total_timesteps
+        # together and cancels out of num_updates). Applying 7.5x to FCP's
+        # tuned overcooked_v2 budget (6e7 at num_envs=64) gives a base of
+        # 4.5e8, then x1.5 to move from the 64-env base to our actual 96
+        # (holding num_updates constant) gives 6.75e8.
+        "overcooked_v2": {
+            "num_envs": 96,
+            "total_timesteps": 6.75e8,
+            "pop": POPULATION_SIZE,
+            "actor_type": "rnn_actor_with_conditional_critic",
+        },
         "hanabi": _paired_scale(128, 5e8),
     },
     "lbrdiv": {
@@ -365,13 +384,32 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # docs/tuning_record.md.
         "lbf": _paired_scale(64, 1.8e8),
         "overcooked": _paired_scale(128, 9e7),
-        # UNTUNED, and likely broken as-is: this is exactly the config
-        # CLAUDE.md's Known-open section already flags as not fitting any GPU
-        # for v1 (384 envs x ~1040-float obs x 400-step rollouts ~= 11.9 GiB
-        # of observations alone at n^2 scaling). v2's obs is comparable in
-        # size or larger (partial observability adds channels, doesn't
-        # shrink them), so expect the same failure, not a smaller one.
-        "overcooked_v2": _paired_scale(128, 9e7),
+        # num_envs is NOT _paired_scale(64, ...)'s default. _paired_scale(64,
+        # ...) gives num_envs=192 (7.7 envs/pairing, matching LBF's
+        # established-safe reference) but check_device.py puts that at 99%
+        # of this 6GB GPU's memory -- confirmed OOM. 96 (3.84 envs/pairing,
+        # between the known-collapse point 2.6 and LBF's 7.7) fits and both
+        # BRDiv and L-BRDiv now train and checkpoint end-to-end at this size
+        # with the RNN conditional critic (hstate-threading bugs in
+        # _env_step's per-actor vmap fixed this session -- see
+        # docs/tuning_record.md). SP-vs-XP has not yet been checked at this
+        # budget scale (only a 2e6-timestep smoke test so far) -- still open.
+        #
+        # total_timesteps derived the same way FCP's overcooked_v2 budget was
+        # derived from its LBF one, not guessed: on LBF, BRDiv/L-BRDiv's base
+        # (pre-pairing-multiplier, num_envs=64) budget is total_timesteps=1.8e8
+        # vs FCP's 24e6 at the same num_envs -- a 7.5x ratio, independent of
+        # the pairing multiplier (which scales num_envs and total_timesteps
+        # together and cancels out of num_updates). Applying 7.5x to FCP's
+        # tuned overcooked_v2 budget (6e7 at num_envs=64) gives a base of
+        # 4.5e8, then x1.5 to move from the 64-env base to our actual 96
+        # (holding num_updates constant) gives 6.75e8.
+        "overcooked_v2": {
+            "num_envs": 96,
+            "total_timesteps": 6.75e8,
+            "pop": POPULATION_SIZE,
+            "actor_type": "rnn_actor_with_conditional_critic",
+        },
         "hanabi": _paired_scale(128, 5e8),
     },
     "rpg": {

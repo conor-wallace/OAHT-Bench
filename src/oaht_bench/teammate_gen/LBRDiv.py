@@ -7,7 +7,9 @@ python teammate_generation/run.py algorithm=lbrdiv/lbf/lbf_7x7_nolevels task=lbf
 Suggested Debug command:
 python teammate_generation/run.py algorithm=lbrdiv/lbf/lbf_7x7_nolevels task=lbf/lbf_7x7_nolevels logger.mode=disabled label=debug algorithm.TOTAL_TIMESTEPS=1e5 algorithm.PARTNER_POP_SIZE=2 train_ego=false run_heldout_eval=false
 
-Limitations: does not support recurrent actors.
+Recurrent actors (actor_type="rnn_actor_with_conditional_critic") are
+supported via RNNActorWithConditionalCriticPolicy, mirroring BRDiv.py's fix
+-- see the in_axes=(...,1,...) vmap calls below and docs/tuning_record.md.
 '''
 import time
 import logging
@@ -22,6 +24,7 @@ from flax.training.train_state import TrainState
 import wandb
 
 from oaht_bench.agents.mlp_actor_critic_agent import ActorWithConditionalCriticPolicy
+from oaht_bench.agents.rnn_actor_critic_agent import RNNActorWithConditionalCriticPolicy
 from oaht_bench.agents.population_interface import AgentPopulation
 from oaht_bench.common.plot_utils import get_metric_names
 from oaht_bench.common.run_episodes import run_episodes
@@ -108,26 +111,34 @@ def train_lbrdiv_partners(
             )
 
             def forward_pass_conf(params, obs, id, done, avail_actions, hstate, rng):
+                # Both newaxis calls give obs/done/avail_actions/id a
+                # (seq_len=1, batch=1, ...) shape. For the MLP conditional
+                # critic this extra dim is a harmless no-op (Dense applies
+                # elementwise regardless of leading dims, and the caller
+                # squeezes it back out). For the RNN variant it is load-
+                # bearing: ScannedRNN's internal `dones[:, None]` requires a
+                # real batch axis per scanned step, not just a bare seq_len
+                # axis -- see docs/tuning_record.md.
                 act, val, pi, new_hstate = conf_policy.get_action_value_policy(
                     params=params,
-                    obs=obs[jnp.newaxis, ...],
-                    done=done[jnp.newaxis, ...],
-                    avail_actions=avail_actions,
+                    obs=obs[jnp.newaxis, jnp.newaxis, ...],
+                    done=done[jnp.newaxis, jnp.newaxis, ...],
+                    avail_actions=avail_actions[jnp.newaxis, jnp.newaxis, ...],
                     hstate=hstate,
                     rng=rng,
-                    aux_obs=id[jnp.newaxis, ...]
+                    aux_obs=id[jnp.newaxis, jnp.newaxis, ...]
                 )
                 return act, val, pi, new_hstate
 
             def forward_pass_br(params, obs, id, done, avail_actions, hstate, rng):
                 act, val, pi, new_hstate = br_policy.get_action_value_policy(
                     params=params,
-                    obs=obs[jnp.newaxis, ...],
-                    done=done[jnp.newaxis, ...],
-                    avail_actions=avail_actions,
+                    obs=obs[jnp.newaxis, jnp.newaxis, ...],
+                    done=done[jnp.newaxis, jnp.newaxis, ...],
+                    avail_actions=avail_actions[jnp.newaxis, jnp.newaxis, ...],
                     hstate=hstate,
                     rng=rng,
-                    aux_obs=id[jnp.newaxis, ...]
+                    aux_obs=id[jnp.newaxis, jnp.newaxis, ...]
                 )
                 return act, val, pi, new_hstate
 
@@ -160,11 +171,18 @@ def train_lbrdiv_partners(
                     last_br_ids             # Else, keep index from previous step
                 )
 
-                # Reset the hidden states for resampled conf and br if they are not None
-                # WARNING: (L)BRDiv was not tested with recurrent actors, so the code for if the hstate is not None may not work
+                # Reset the hidden states for resampled conf and br if they are not None.
+                # needs_resample is (num_actors,); hstate is (1, num_actors,
+                # gru_hidden_dim) (RNNActorWithConditionalCriticPolicy's
+                # convention, matching RNNActorCriticPolicy's). Broadcast
+                # needs_resample against the last two axes explicitly rather
+                # than relying on jnp.where's default alignment, which pairs
+                # trailing dims and would try to broadcast num_actors against
+                # gru_hidden_dim instead. Mirrors BRDiv.py's fix -- see
+                # docs/tuning_record.md.
                 if last_conf_h is not None:
                     updated_conf_h = jnp.where(
-                        needs_resample,
+                        needs_resample[jnp.newaxis, :, jnp.newaxis],
                         init_conf_hstate,
                         last_conf_h
                     )
@@ -173,7 +191,7 @@ def train_lbrdiv_partners(
 
                 if last_br_h is not None:
                     updated_br_h = jnp.where(
-                        needs_resample,
+                        needs_resample[jnp.newaxis, :, jnp.newaxis],
                         init_br_hstate,
                         last_br_h
                     )
@@ -195,17 +213,43 @@ def train_lbrdiv_partners(
 
                 # Agent_0 action
                 act0_rng = jax.random.split(act0_rng, config.num_envs)
-                act_0, val_0, pi_0, new_conf_h = jax.vmap(forward_pass_conf)(updated_conf_params,
-                        last_obs["agent_0"], updated_br_onehot_ids, last_done["agent_0"], avail_actions_0,
-                        updated_conf_h, act0_rng)
+                if updated_conf_h is not None:
+                    # forward_pass_conf's RNN branch needs an hstate shaped
+                    # (1, batch=1, hidden) per vmapped-out actor, matching
+                    # RNNActorWithConditionalCriticPolicy's (1, batch, hidden)
+                    # convention -- so vmap over axis 1 (the actor axis) of a
+                    # (1, num_conf_actors, 1, hidden) array instead of the
+                    # default axis 0, which is reserved for that convention's
+                    # own leading "1". out_axes puts the actor axis for the
+                    # returned hstate back at position 1 so it matches
+                    # updated_conf_h's own layout for the next step. Mirrors
+                    # BRDiv.py's fix -- see docs/tuning_record.md.
+                    conf_h_in = updated_conf_h[:, :, jnp.newaxis, :]
+                    act_0, val_0, pi_0, new_conf_h = jax.vmap(
+                        forward_pass_conf, in_axes=(0, 0, 0, 0, 0, 1, 0), out_axes=(0, 0, 0, 1)
+                    )(updated_conf_params, last_obs["agent_0"], updated_br_onehot_ids,
+                      last_done["agent_0"], avail_actions_0, conf_h_in, act0_rng)
+                    new_conf_h = new_conf_h[:, :, 0, :]
+                else:
+                    act_0, val_0, pi_0, new_conf_h = jax.vmap(forward_pass_conf)(updated_conf_params,
+                            last_obs["agent_0"], updated_br_onehot_ids, last_done["agent_0"], avail_actions_0,
+                            updated_conf_h, act0_rng)
                 logp_0 = pi_0.log_prob(act_0)
                 act_0, val_0, logp_0 = act_0.squeeze(), val_0.squeeze(), logp_0.squeeze()
 
                 # Agent_1 action
                 act1_rng = jax.random.split(act1_rng, config.num_envs)
-                act_1, val_1, pi_1, new_br_h = jax.vmap(forward_pass_br)(updated_br_params,
-                        last_obs["agent_1"], updated_conf_onehot_ids, last_done["agent_1"], avail_actions_1,
-                        updated_br_h, act1_rng)
+                if updated_br_h is not None:
+                    br_h_in = updated_br_h[:, :, jnp.newaxis, :]
+                    act_1, val_1, pi_1, new_br_h = jax.vmap(
+                        forward_pass_br, in_axes=(0, 0, 0, 0, 0, 1, 0), out_axes=(0, 0, 0, 1)
+                    )(updated_br_params, last_obs["agent_1"], updated_conf_onehot_ids,
+                      last_done["agent_1"], avail_actions_1, br_h_in, act1_rng)
+                    new_br_h = new_br_h[:, :, 0, :]
+                else:
+                    act_1, val_1, pi_1, new_br_h = jax.vmap(forward_pass_br)(updated_br_params,
+                            last_obs["agent_1"], updated_conf_onehot_ids, last_done["agent_1"], avail_actions_1,
+                            updated_br_h, act1_rng)
                 logp_1 = pi_1.log_prob(act_1)
                 act_1, val_1, logp_1 = act_1.squeeze(), val_1.squeeze(), logp_1.squeeze()
 
@@ -518,30 +562,40 @@ def train_lbrdiv_partners(
                 traj_batch_conf, traj_batch_br = traj_batch
 
                 # Compute advantage for confederate agent from interaction with br policy
+                # Positional (not kwargs) so the RNN branch below can specify
+                # in_axes/out_axes for hstate -- jax.vmap doesn't accept a
+                # per-argument in_axes over a mix of kwargs. Same hstate
+                # actor-axis handling as the vmap calls in _env_step above.
                 avail_actions_0 = jax.vmap(env.get_avail_actions)(last_env_state.env_state)["agent_0"].astype(jnp.float32)
-                _, last_val_conf, _, _ = jax.vmap(forward_pass_conf)(
-                    params=last_conf_params,
-                    obs=last_obs["agent_0"],
-                    id=last_br_one_hots,
-                    done=last_done["agent_0"],
-                    avail_actions=avail_actions_0,
-                    hstate=last_conf_h,
-                    rng=jax.random.split(jax.random.PRNGKey(0), config.num_envs)  # Dummy key since we're just extracting the value
-                )
+                dummy_rng = jax.random.split(jax.random.PRNGKey(0), config.num_envs)  # Dummy key since we're just extracting the value
+                if last_conf_h is not None:
+                    last_conf_h_in = last_conf_h[:, :, jnp.newaxis, :]
+                    _, last_val_conf, _, _ = jax.vmap(
+                        forward_pass_conf, in_axes=(0, 0, 0, 0, 0, 1, 0), out_axes=(0, 0, 0, 1)
+                    )(last_conf_params, last_obs["agent_0"], last_br_one_hots, last_done["agent_0"],
+                      avail_actions_0, last_conf_h_in, dummy_rng)
+                else:
+                    _, last_val_conf, _, _ = jax.vmap(forward_pass_conf)(
+                        last_conf_params, last_obs["agent_0"], last_br_one_hots, last_done["agent_0"],
+                        avail_actions_0, last_conf_h, dummy_rng
+                    )
                 last_val_conf = last_val_conf.squeeze()
                 advantages_conf, targets_conf = _calculate_gae(traj_batch_conf, last_val_conf)
 
                 # Compute advantage for br policy from interaction with confederate agent
                 avail_actions_1 = jax.vmap(env.get_avail_actions)(last_env_state.env_state)["agent_1"].astype(jnp.float32)
-                _, last_val_br, _, _ = jax.vmap(forward_pass_br)(
-                    params=last_br_params,
-                    obs=last_obs["agent_1"],
-                    id=last_conf_one_hots,
-                    done=last_done["agent_1"],
-                    avail_actions=avail_actions_1,
-                    hstate=last_br_h,
-                    rng=jax.random.split(jax.random.PRNGKey(0), config.num_envs)  # Dummy key since we're just extracting the value
-                )
+                dummy_rng = jax.random.split(jax.random.PRNGKey(0), config.num_envs)  # Dummy key since we're just extracting the value
+                if last_br_h is not None:
+                    last_br_h_in = last_br_h[:, :, jnp.newaxis, :]
+                    _, last_val_br, _, _ = jax.vmap(
+                        forward_pass_br, in_axes=(0, 0, 0, 0, 0, 1, 0), out_axes=(0, 0, 0, 1)
+                    )(last_br_params, last_obs["agent_1"], last_conf_one_hots, last_done["agent_1"],
+                      avail_actions_1, last_br_h_in, dummy_rng)
+                else:
+                    _, last_val_br, _, _ = jax.vmap(forward_pass_br)(
+                        last_br_params, last_obs["agent_1"], last_conf_one_hots, last_done["agent_1"],
+                        avail_actions_1, last_br_h, dummy_rng
+                    )
                 last_val_br = last_val_br.squeeze()
                 advantages_br, targets_br = _calculate_gae(traj_batch_br, last_val_br)
 
@@ -1003,13 +1057,20 @@ def run_lbrdiv(job: TeammateGenerationJob, wandb_logger: RunLogger) -> PairedPop
     rng = jax.random.PRNGKey(gen.train_seed)
     rngs = jax.random.split(rng, gen.num_seeds)
 
-    # Initialize br and conf policies
-    conf_policy = ActorWithConditionalCriticPolicy(
+    # Initialize br and conf policies. actor_type="rnn_actor_with_conditional_critic"
+    # is the only other value _env_step/hstate handling below understands --
+    # everything else stays on the non-recurrent policy. See docs/tuning_record.md.
+    policy_cls = (
+        RNNActorWithConditionalCriticPolicy
+        if gen.actor_type == "rnn_actor_with_conditional_critic"
+        else ActorWithConditionalCriticPolicy
+    )
+    conf_policy = policy_cls(
         action_dim=env.action_space(env.agents[0]).n,
         obs_dim=env.observation_space(env.agents[0]).shape[0],
         pop_size=gen.population_size,
     )
-    br_policy = ActorWithConditionalCriticPolicy(
+    br_policy = policy_cls(
         action_dim=env.action_space(env.agents[0]).n,
         obs_dim=env.observation_space(env.agents[0]).shape[0],
         pop_size=gen.population_size,
