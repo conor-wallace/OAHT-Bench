@@ -1,0 +1,76 @@
+{
+  "ENV_KWARGS": {
+    "agent_view_size": 2,
+    "indicate_successful_delivery": false,
+    "layout": "counter_circuit",
+    "negative_rewards": false,
+    "random_agent_positions": false,
+    "random_reset": true,
+    "sample_recipe_on_delivery": false
+  },
+  "ENV_NAME": "overcooked-v2",
+  "ROLLOUT_LENGTH": 400,
+  "TASK_NAME": "overcooked_v2_counter_circuit",
+  "algorithm": {
+    "ACTIVATION": "tanh",
+    "ACTOR_TYPE": "rnn",
+    "ALG": "fcp",
+    "ANNEAL_LR": true,
+    "CLIP_EPS": 0.2,
+    "ENT_COEF": 0.01,
+    "ENV_KWARGS": {
+      "agent_view_size": 2,
+      "indicate_successful_delivery": false,
+      "layout": "counter_circuit",
+      "negative_rewards": false,
+      "random_agent_positions": false,
+      "random_reset": true,
+      "sample_recipe_on_delivery": false
+    },
+    "ENV_NAME": "overcooked-v2",
+    "FC_HIDDEN_DIM": 64,
+    "GAE_LAMBDA": 0.95,
+    "GAMMA": 0.99,
+    "LR": 0.00025,
+    "MAX_GRAD_NORM": 1.0,
+    "NUM_CHECKPOINTS": 5,
+    "NUM_ENVS": 64,
+    "NUM_EVAL_EPISODES": 20,
+    "NUM_MINIBATCHES": 64,
+    "NUM_SEEDS": 1,
+    "PARTNER_POP_SIZE": 5,
+    "ROLLOUT_LENGTH": 400,
+    "TOTAL_TIMESTEPS": 60000000.0,
+    "TRAIN_SEED": 20374,
+    "UPDATE_EPOCHS": 4,
+    "VF_COEF": 0.5
+  },
+  "label": "fcp_overcooked_v2_budget2__total_timesteps=60000000.0",
+  "local_logger": {
+    "save_eval_out": true,
+    "save_train_out": true
+  },
+  "logger": {
+    "log_eval_out": true,
+    "log_train_out": true,
+    "verbose": false
+  },
+  "name": "overcooked_v2_counter_circuit/fcp/fcp_overcooked_v2_budget2__total_timesteps=60000000.0",
+  "run_dir": "results/teammate_generation/fcp_overcooked_v2_budget2__total_timesteps=60000000.0-9c5a490a552a",
+  "run_heldout_eval": false,
+  "task": {
+    "ENV_KWARGS": {
+      "agent_view_size": 2,
+      "indicate_successful_delivery": false,
+      "layout": "counter_circuit",
+      "negative_rewards": false,
+      "random_agent_positions": false,
+      "random_reset": true,
+      "sample_recipe_on_delivery": false
+    },
+    "ENV_NAME": "overcooked-v2",
+    "ROLLOUT_LENGTH": 400,
+    "TASK_NAME": "overcooked_v2_counter_circuit"
+  },
+  "train_ego": false
+}
