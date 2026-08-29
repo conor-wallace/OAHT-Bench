@@ -1,26 +1,25 @@
-"""On-disk shape of a collected dataset (§4.1).
+"""In-memory shape of a collected dataset (§4.1).
 
 **Agent-count generality is a schema decision, not a runtime one.** Every
 environment currently instantiates two seats and three of the four generators
 assert ``num_agents == 2``, so nothing can populate a third seat today. But the
 runtime is one module and cheap to change, whereas the schema is what every
-baseline reads and what gets released — changing it later means regenerating
-every dataset and invalidating published artifacts.
+baseline reads — changing it later means regenerating every dataset.
 
 So per-agent quantities carry a leading ``agent`` axis rather than being split
 into ``agent_0_*`` / ``agent_1_*`` fields, and the ego seat is recorded
 explicitly instead of assumed to be index 0. Two-player is then just
 ``num_agents == 2`` and no consumer has to be rewritten when it isn't.
 
-Stored as a single ``.npz`` per collection run, because the arrays are
-rectangular once episodes are padded to a common length and a dataset should be
-loadable without this package installed.
+This is the padded, read-side shape :func:`~oaht_bench.offline.dataset.make_windows`
+consumes. It is not serialised: the on-disk store is a flat-transition Flashbax
+Vault (:mod:`oaht_bench.dataset.vault`), and :func:`~oaht_bench.dataset.vault.read_vault`
+reconstructs this batch from it. Padding is a read-side artifact, not a stored one.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -85,41 +84,4 @@ class EpisodeBatch:
             f"max {self.obs.shape[2]}\n"
             f"return        ego {ret[:, self.ego_index].mean():.4f}, "
             f"joint {ret.sum(axis=1).mean():.4f}"
-        )
-
-    def save(self, path: Path) -> Path:
-        """Write as a single compressed ``.npz``."""
-        import json
-
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(
-            path,
-            obs=self.obs,
-            actions=self.actions,
-            rewards=self.rewards,
-            dones=self.dones,
-            valid=self.valid,
-            avail_actions=self.avail_actions,
-            member_ids=self.member_ids,
-            ego_index=np.asarray(self.ego_index),
-            meta=np.asarray(json.dumps(self.meta, sort_keys=True, default=str)),
-        )
-        return path
-
-    @classmethod
-    def load(cls, path: Path) -> EpisodeBatch:
-        import json
-
-        z = np.load(Path(path), allow_pickle=False)
-        return cls(
-            obs=z["obs"],
-            actions=z["actions"],
-            rewards=z["rewards"],
-            dones=z["dones"],
-            valid=z["valid"],
-            avail_actions=z["avail_actions"],
-            member_ids=z["member_ids"],
-            ego_index=int(z["ego_index"]),
-            meta=json.loads(str(z["meta"])),
         )

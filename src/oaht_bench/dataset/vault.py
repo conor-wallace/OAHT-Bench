@@ -23,11 +23,19 @@ Flat layout (Flashbax experience is ``(B, T, …)``; ``B=1`` for one stream):
     member_ids     (1, N, A)            terminals    (1, N)   episode_id (1, N)
     ego_response_quality (1, N)  -- broadcast per episode, present in pooled mode
 
-``N`` is the total number of *real* transitions (padding is dropped on write and
-re-derived on read from ``episode_id``). Dataset-level metadata -- env, variant,
+``N`` is the total number of transitions. Collection is already ragged -- each
+episode is real steps only -- so :func:`write_vault` concatenates them straight
+into the buffer; padding never exists on the write side. It is a *read-side*
+reconstruction: :func:`read_vault` groups transitions by ``episode_id`` and pads
+back to a common length only because :func:`~oaht_bench.offline.dataset.make_windows`
+wants the padded :class:`EpisodeBatch`. Dataset-level metadata -- env, variant,
 population/matrix hashes, the roster manifest, ``ego_index`` -- rides in the
 Vault's own metadata, the small fixed-size part; per-episode labels are broadcast
 into the flat fields.
+
+This is the only dataset store: there is no ``.npz`` artifact. ``EpisodeBatch`` is
+purely the in-memory, read-side shape ``make_windows`` consumes, produced by
+:func:`read_vault`; it is never serialised.
 """
 
 from __future__ import annotations
@@ -45,40 +53,46 @@ SCHEMA_VERSION = 1
 
 
 def _json_safe(meta: dict) -> dict:
-    """Coerce ``meta`` the same way :meth:`EpisodeBatch.load` does on read.
+    """Coerce ``meta`` to JSON-round-trippable values (numpy -> str, etc.).
 
-    ``EpisodeBatch`` round-trips its meta through ``json.dumps(default=str)`` then
-    ``json.loads``; matching that here means a batch written to a vault and read
-    back has a byte-identical meta to one written to ``.npz`` and read back.
+    The vault metadata is stored as JSON, and reading it back must give plain
+    Python types; running it through ``json.dumps(default=str)`` / ``json.loads``
+    here makes the coercion explicit and order-stable.
     """
     return json.loads(json.dumps(meta, sort_keys=True, default=str))
 
 
-def to_flat(batch: EpisodeBatch) -> tuple[dict[str, np.ndarray], dict]:
-    """Flatten a padded batch into ``(experience, metadata)`` for a vault write.
+def to_flat(
+    episodes: list[dict[str, np.ndarray]],
+    member_ids,
+    *,
+    ego_index: int,
+    meta: dict,
+) -> tuple[dict[str, np.ndarray], dict]:
+    """Concatenate collected episodes into flat transitions for a vault write.
 
-    Only the ``valid`` steps of each episode survive; ``episode_id`` marks the
-    boundaries so :func:`read_vault` can re-pad. Per-episode labels
-    (``member_ids``, and ``ego_response_quality`` when the collection recorded it)
-    are broadcast across their episode's transitions.
+    ``episodes`` are the ragged per-episode dicts
+    :func:`~oaht_bench.dataset.construction.collect.collect_episode` returns -- real
+    steps only, so there is nothing to drop; ``episode_id`` records which episode
+    each transition came from. ``member_ids`` is ``(num_episodes, num_agents)``.
+    Per-episode labels (``member_ids``, and ``ego_response_quality`` when the
+    collection recorded it) are broadcast across their episode's transitions.
     """
-    per_episode_eps = batch.meta.get("ego_response_quality")
+    member_ids = np.asarray(member_ids)
+    num_agents = int(member_ids.shape[1])
+    per_episode_eps = meta.get("ego_response_quality")
 
     obs, acts, rews, avail, mem, term, epid, erq = [], [], [], [], [], [], [], []
-    for ep in range(batch.num_episodes):
-        v = np.asarray(batch.valid[ep], dtype=bool)
-        n = int(v.sum())
-        if n == 0:
-            continue
-        # (agent, T, …) -> (T_real, agent, …): transpose the agent axis inward so
-        # a transition is one row, matching the flat convention.
-        obs.append(np.asarray(batch.obs[ep])[:, v].transpose(1, 0, 2))
-        acts.append(np.asarray(batch.actions[ep])[:, v].transpose(1, 0))
-        rews.append(np.asarray(batch.rewards[ep])[:, v].transpose(1, 0))
-        avail.append(np.asarray(batch.avail_actions[ep])[:, v].transpose(1, 0, 2))
-        term.append(np.asarray(batch.dones[ep])[v])
+    for ep, e in enumerate(episodes):
+        n = int(np.asarray(e["dones"]).shape[0])
+        # (agent, T, …) -> (T, agent, …): one transition per row, agent axis kept.
+        obs.append(np.asarray(e["obs"]).transpose(1, 0, 2))
+        acts.append(np.asarray(e["actions"]).transpose(1, 0))
+        rews.append(np.asarray(e["rewards"]).transpose(1, 0))
+        avail.append(np.asarray(e["avail_actions"]).transpose(1, 0, 2))
+        term.append(np.asarray(e["dones"]))
         epid.append(np.full(n, ep, dtype=np.int32))
-        mem.append(np.broadcast_to(np.asarray(batch.member_ids[ep]), (n, batch.num_agents)))
+        mem.append(np.broadcast_to(member_ids[ep], (n, num_agents)))
         if per_episode_eps is not None:
             erq.append(np.full(n, float(per_episode_eps[ep]), dtype=np.float32))
 
@@ -100,11 +114,11 @@ def to_flat(batch: EpisodeBatch) -> tuple[dict[str, np.ndarray], dict]:
 
     metadata = {
         "schema_version": SCHEMA_VERSION,
-        "ego_index": int(batch.ego_index),
-        "num_agents": int(batch.num_agents),
+        "ego_index": int(ego_index),
+        "num_agents": num_agents,
         # The whole batch meta, minus the per-episode array now carried flat.
         "episode_batch_meta": {
-            k: v for k, v in _json_safe(batch.meta).items() if k != "ego_response_quality"
+            k: v for k, v in _json_safe(meta).items() if k != "ego_response_quality"
         },
     }
     return experience, metadata
@@ -122,24 +136,33 @@ def _split_dir(vault_dir: Path, variant: str | None) -> tuple[str, str, str]:
     return str(vault_dir.parent), vault_dir.name, uid
 
 
-def write_vault(batch: EpisodeBatch, vault_dir: str | Path) -> Path:
-    """Write ``batch`` to a Flashbax Vault at ``vault_dir/<variant>/``.
+def write_vault(
+    episodes: list[dict[str, np.ndarray]],
+    member_ids,
+    vault_dir: str | Path,
+    *,
+    ego_index: int,
+    meta: dict,
+) -> Path:
+    """Write collected ``episodes`` to a Flashbax Vault at ``vault_dir/<variant>/``.
 
-    ``vault_dir`` is the ``<name>.vlt`` root; the variant (from ``batch.meta``)
-    becomes the sub-directory, so ``expert``/``mixed``/``br_vs_worst`` collections
-    of one environment can live side by side. Returns the vault root.
+    ``episodes`` are the ragged per-episode dicts from collection and ``member_ids``
+    is ``(num_episodes, num_agents)``; nothing is padded. ``vault_dir`` is the
+    ``<name>.vlt`` root and the variant (from ``meta``) becomes the sub-directory,
+    so ``expert``/``mixed``/``br_vs_worst`` collections of one environment can live
+    side by side. Returns the vault root.
     """
     from flashbax.buffers.trajectory_buffer import TrajectoryBufferState
     from flashbax.vault import Vault
 
-    experience, metadata = to_flat(batch)
+    experience, metadata = to_flat(episodes, member_ids, ego_index=ego_index, meta=meta)
     n = int(experience["episode_id"].shape[1])
     state = TrajectoryBufferState(
         experience=experience,
         current_index=np.asarray(n),
         is_full=np.asarray(True),
     )
-    rel_dir, name, uid = _split_dir(Path(vault_dir), batch.meta.get("variant"))
+    rel_dir, name, uid = _split_dir(Path(vault_dir), meta.get("variant"))
     vault = Vault(
         vault_name=name,
         experience_structure=state.experience,
@@ -152,17 +175,27 @@ def write_vault(batch: EpisodeBatch, vault_dir: str | Path) -> Path:
 
 
 def read_vault(vault_dir: str | Path, *, variant: str | None = None) -> EpisodeBatch:
-    """Reconstruct the padded :class:`EpisodeBatch` written by :func:`write_vault`.
+    """Reconstruct the padded :class:`EpisodeBatch` from a vault.
 
-    Re-groups the flat transitions by ``episode_id``, pads each episode back to the
-    common length with zeros (matching :func:`~oaht_bench.dataset.construction.collect.pad_and_stack`),
-    and restores the ``valid`` mask and ``meta``. The result equals the batch that
-    was written -- so a consumer that took an ``EpisodeBatch`` cannot tell which
-    store it came from.
+    Re-groups the flat transitions by ``episode_id``, pads each episode back to a
+    common length with zeros, and restores the ``valid`` mask and ``meta`` -- the
+    read-side reconstruction :func:`~oaht_bench.offline.dataset.make_windows`
+    consumes. ``variant`` selects the sub-directory; if omitted and the vault holds
+    exactly one, that one is used.
     """
     from flashbax.vault import Vault
 
-    rel_dir, name, uid = _split_dir(Path(vault_dir), variant)
+    vault_dir = Path(vault_dir)
+    if variant is None:
+        subs = sorted(p.name for p in vault_dir.iterdir() if p.is_dir())
+        if len(subs) == 1:
+            variant = subs[0]
+        elif not subs:
+            raise FileNotFoundError(f"no variant sub-directory under {vault_dir}")
+        else:
+            raise ValueError(f"{vault_dir} holds variants {subs}; pass variant= to pick one.")
+
+    rel_dir, name, uid = _split_dir(vault_dir, variant)
     vault = Vault(vault_name=name, rel_dir=rel_dir, vault_uid=uid)
     state = vault.read()
     exp = {k: np.asarray(v)[0] for k, v in state.experience.items()}  # drop B axis

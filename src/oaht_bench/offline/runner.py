@@ -52,7 +52,7 @@ def run(job: TrainingJob) -> Path:
 
     from oaht_bench.common.logging import RunLogger, nonfatal
     from oaht_bench.configs import save_job
-    from oaht_bench.dataset.schema import EpisodeBatch
+    from oaht_bench.dataset.vault import read_vault
     from oaht_bench.offline import TeammateIndex, get_policy, make_windows
 
     if job.baseline not in SUPPORTED:
@@ -75,7 +75,7 @@ def run(job: TrainingJob) -> Path:
     save_job(job, run_dir / "job.json", minimal=False)
 
     cfg = job.offline
-    batch = EpisodeBatch.load(Path(job.dataset_path))
+    batch = read_vault(Path(job.dataset_path))
     windows = make_windows(
         batch,
         context_length=cfg.context_length,

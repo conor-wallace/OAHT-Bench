@@ -109,29 +109,3 @@ def collect_episode(
         "dones": np.asarray(rec["dones"], dtype=bool),
         "valid": np.asarray(rec["valid"], dtype=bool),
     }
-
-
-def pad_and_stack(episodes: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
-    """Pad ragged episodes to a common length and stack them.
-
-    ``valid`` is what distinguishes a real terminal step from padding; consumers
-    must mask with it rather than trusting ``dones``, which is all-False for a
-    truncated episode.
-    """
-    T = max(e["dones"].shape[0] for e in episodes)
-
-    def pad(arr, width, axis):
-        if arr.shape[axis] == width:
-            return arr
-        pad_spec = [(0, 0)] * arr.ndim
-        pad_spec[axis] = (0, width - arr.shape[axis])
-        return np.pad(arr, pad_spec, mode="constant")
-
-    return {
-        "obs": np.stack([pad(e["obs"], T, 1) for e in episodes]),
-        "actions": np.stack([pad(e["actions"], T, 1) for e in episodes]),
-        "rewards": np.stack([pad(e["rewards"], T, 1) for e in episodes]),
-        "avail_actions": np.stack([pad(e["avail_actions"], T, 1) for e in episodes]),
-        "dones": np.stack([pad(e["dones"], T, 0) for e in episodes]),
-        "valid": np.stack([pad(e["valid"], T, 0) for e in episodes]),
-    }

@@ -19,9 +19,9 @@ from tqdm import tqdm
 from oaht_bench.common.save_load_utils import load_train_run
 from oaht_bench.configs import load_job, save_job
 from oaht_bench.configs.job import DatasetCollectionJob
-from oaht_bench.dataset.construction.collect import collect_episode, pad_and_stack
+from oaht_bench.dataset.construction.collect import collect_episode
 from oaht_bench.dataset.construction.epsilon_sampler import EPSILON_TARGETS, load_pooled, plan_for_variant
-from oaht_bench.dataset.schema import EpisodeBatch
+from oaht_bench.dataset.vault import write_vault
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper
 from oaht_bench.population import artifact_dir, population_from_run, released_members
@@ -102,14 +102,15 @@ def run(job: DatasetCollectionJob) -> Path:
     """Collect a dataset and return the run directory.
 
     Dispatches on the shape of ``population_path``: a single string keeps the
-    original within-one-generator path (:func:`_collect_single`), a *list* selects
-    pooled mode (:func:`_collect_pooled`), where the released members of every
-    listed generator are flattened into one roster and the ε sampler seats them
-    across populations against the pooled cross-play matrix. Both share this
-    preamble (idempotence guard, config snapshot) and the summary tail.
+    within-one-generator path (:func:`_collect_single`), a *list* selects pooled
+    mode (:func:`_collect_pooled`), where the released members of every listed
+    generator are flattened into one roster and the ε sampler seats them across
+    populations against the pooled cross-play matrix. Both return ragged episodes
+    written straight to a flat Flashbax Vault -- no padding is ever materialised
+    (:mod:`oaht_bench.dataset.vault`).
     """
     run_dir = Path(job.run_dir())
-    artifact = run_dir / ("dataset.vlt" if job.storage_format == "vault" else "dataset.npz")
+    artifact = run_dir / "dataset.vlt"
     if artifact.exists():
         raise FileExistsError(
             f"{artifact} already exists and would be overwritten. Delete "
@@ -122,33 +123,33 @@ def run(job: DatasetCollectionJob) -> Path:
 
     env = LogWrapper(make_env(job.env.env_name, job.env.env_kwargs()))
     if isinstance(job.population_path, (list, tuple)):
-        batch = _collect_pooled(job, env)
+        episodes, member_ids, meta = _collect_pooled(job, env)
     else:
-        batch = _collect_single(job, env)
+        episodes, member_ids, meta = _collect_single(job, env)
 
-    if job.storage_format == "vault":
-        from oaht_bench.dataset.vault import write_vault
-
-        write_vault(batch, artifact)
-    else:
-        batch.save(artifact)
-    (run_dir / "dataset_summary.json").write_text(
-        json.dumps(
-            {
-                "episodes": batch.num_episodes,
-                "agents": batch.num_agents,
-                "mean_length": float(batch.episode_lengths().mean()),
-                "mean_ego_return": float(batch.episode_returns()[:, 0].mean()),
-            },
-            indent=2,
-        )
-        + "\n"
+    write_vault(episodes, member_ids, artifact, ego_index=0, meta=meta)
+    summary = _summary(episodes, member_ids, ego_index=0)
+    (run_dir / "dataset_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    log.info(
+        "Dataset: %d episodes, %d agents, mean length %.1f, mean ego return %.4f",
+        summary["episodes"], summary["agents"], summary["mean_length"], summary["mean_ego_return"],
     )
-    log.info("Dataset:\n%s", batch.describe())
     return run_dir
 
 
-def _collect_single(job: DatasetCollectionJob, env) -> EpisodeBatch:
+def _summary(episodes: list[dict], member_ids: np.ndarray, *, ego_index: int) -> dict:
+    """Describe a collection from the ragged episodes, without padding them."""
+    lengths = [int(np.asarray(e["dones"]).shape[0]) for e in episodes]
+    ego_returns = [float(np.asarray(e["rewards"])[ego_index].sum()) for e in episodes]
+    return {
+        "episodes": len(episodes),
+        "agents": int(np.asarray(member_ids).shape[1]),
+        "mean_length": float(np.mean(lengths)),
+        "mean_ego_return": float(np.mean(ego_returns)),
+    }
+
+
+def _collect_single(job: DatasetCollectionJob, env) -> tuple[list[dict], np.ndarray, dict]:
     """The original path: seat one generator's designed pairing per episode.
 
     ``population_path`` is a single run directory. Only 'expert' is implemented
@@ -207,23 +208,18 @@ def _collect_single(job: DatasetCollectionJob, env) -> EpisodeBatch:
         if (ep + 1) % 10 == 0:
             log.info("collected %d/%d episodes", ep + 1, job.num_episodes)
 
-    stacked = pad_and_stack(episodes)
-    return EpisodeBatch(
-        **stacked,
-        member_ids=np.stack(member_ids),
-        ego_index=0,
-        meta={
-            "config_hash": job.content_hash(),
-            "env": job.env.name,
-            "variant": job.variant,
-            "generator": gen_job.generator.generator,
-            "paired_roles": loaded.paired,
-            "mismatch_fraction": job.mismatch_fraction,
-            "population_run": str(job.population_path),
-            "population_config_hash": gen_job.content_hash(),
-            "eligible_members": [int(m) for m in eligible],
-        },
-    )
+    meta = {
+        "config_hash": job.content_hash(),
+        "env": job.env.name,
+        "variant": job.variant,
+        "generator": gen_job.generator.generator,
+        "paired_roles": loaded.paired,
+        "mismatch_fraction": job.mismatch_fraction,
+        "population_run": str(job.population_path),
+        "population_config_hash": gen_job.content_hash(),
+        "eligible_members": [int(m) for m in eligible],
+    }
+    return episodes, np.stack(member_ids), meta
 
 
 def _pooled_matrix_hash(path: Path) -> str:
@@ -233,7 +229,7 @@ def _pooled_matrix_hash(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
 
 
-def _collect_pooled(job: DatasetCollectionJob, env) -> EpisodeBatch:
+def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[list[dict], np.ndarray, dict]:
     """Pooled mode: seat the ε sampler's cross-population plan (§3, dataset_design).
 
     The released members of every ``population_path`` are flattened into one
@@ -245,10 +241,10 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> EpisodeBatch:
 
     ``member_ids`` here are *roster* indices, not per-population member indices;
     the roster manifest in ``meta`` maps each back to ``(generator, member,
-    role)``, and ``ego_response_quality`` carries the per-episode ε -- the stable
-    descriptor the trajectory-view baselines read (``dataset_design.md`` §2).
-    These live in ``meta`` until the flat-transition schema (§2, deferred)
-    promotes them to columns.
+    role)``, and ``ego_response_quality`` carries the per-episode ε -- which
+    :func:`~oaht_bench.dataset.vault.write_vault` broadcasts into a flat vault field
+    as well as keeping in ``meta`` (the stable descriptor the trajectory-view
+    baselines read, ``dataset_design.md`` §2).
     """
     if job.variant not in EPSILON_TARGETS:
         raise NotImplementedError(
@@ -308,28 +304,23 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> EpisodeBatch:
         if (ep + 1) % 10 == 0:
             log.info("collected %d/%d episodes", ep + 1, job.num_episodes)
 
-    stacked = pad_and_stack(episodes)
-    return EpisodeBatch(
-        **stacked,
-        member_ids=np.stack(member_ids),
-        ego_index=0,
-        meta={
-            "config_hash": job.content_hash(),
-            "env": job.env.name,
-            "variant": job.variant,
-            "mode": "pooled",
-            "populations": [str(p) for p in pop_dirs],
-            "pooled_matrix_path": str(job.pooled_matrix_path),
-            "pooled_matrix_hash": _pooled_matrix_hash(job.pooled_matrix_path),
-            "allow_self_pairing": job.allow_self_pairing,
-            # member_ids are indices into this roster manifest.
-            "roster": [
-                {"generator": e.generator, "member": int(e.member), "role": e.role}
-                for e in roster
-            ],
-            # Per-episode labels, aligned with the episode axis, until the
-            # flat-transition schema promotes them to columns (§2).
-            "ego_response_quality": [float(x) for x in epsilons],
-            "target_epsilon": [float(x) for x in targets],
-        },
-    )
+    meta = {
+        "config_hash": job.content_hash(),
+        "env": job.env.name,
+        "variant": job.variant,
+        "mode": "pooled",
+        "populations": [str(p) for p in pop_dirs],
+        "pooled_matrix_path": str(job.pooled_matrix_path),
+        "pooled_matrix_hash": _pooled_matrix_hash(job.pooled_matrix_path),
+        "allow_self_pairing": job.allow_self_pairing,
+        # member_ids are indices into this roster manifest.
+        "roster": [
+            {"generator": e.generator, "member": int(e.member), "role": e.role}
+            for e in roster
+        ],
+        # Per-episode labels, aligned with the episode axis. write_vault also
+        # broadcasts ego_response_quality into a flat vault field.
+        "ego_response_quality": [float(x) for x in epsilons],
+        "target_epsilon": [float(x) for x in targets],
+    }
+    return episodes, np.stack(member_ids), meta

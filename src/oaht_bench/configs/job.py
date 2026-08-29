@@ -224,14 +224,6 @@ class DatasetCollectionJob(JobBase):
         "are not interchangeable — see §4.3.",
     )
     num_episodes: int = Field(gt=0)
-    storage_format: Literal["npz", "vault"] = Field(
-        default="npz",
-        description="On-disk store (§2, dataset_design.md). 'npz' is the padded "
-        "single-file schema; 'vault' is the flat-transition Flashbax Vault OG-MARL "
-        "publishes (<name>.vlt/<variant>/), memory-mapped for scale. Both round-trip "
-        "the same EpisodeBatch. 'npz' stays default until the offline reader also "
-        "loads vaults.",
-    )
     mirror_trajectories: bool = Field(
         default=False,
         description="TAGET-style trajectory mirroring (§4.5). Only valid when the "

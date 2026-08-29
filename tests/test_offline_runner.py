@@ -15,23 +15,27 @@ import pytest
 from oaht_bench.configs import get_preset
 from oaht_bench.configs.job import OfflineTrainingConfig, TrainingJob
 from oaht_bench.dataset.schema import EpisodeBatch
+from oaht_bench.dataset.vault import read_vault, write_vault
 
 
 def _dataset(tmp_path: Path, n_ep=8, T=14, obs_dim=6, teammates=(0, 1, 2, 3)) -> Path:
+    """Write a small vault from ragged episodes, the way collection does."""
     rng = np.random.default_rng(0)
     member_ids = np.array([[0, teammates[i % len(teammates)]] for i in range(n_ep)])
-    batch = EpisodeBatch(
-        obs=rng.normal(size=(n_ep, 2, T, obs_dim)).astype(np.float32),
-        actions=rng.integers(0, 6, size=(n_ep, 2, T)),
-        rewards=rng.normal(size=(n_ep, 2, T)).astype(np.float32),
-        dones=np.zeros((n_ep, T), dtype=bool),
-        valid=np.ones((n_ep, T), dtype=bool),
-        avail_actions=np.ones((n_ep, 2, T, 6), dtype=np.float32),
-        member_ids=member_ids,
-        ego_index=0,
-        meta={"generator": "test"},
+    episodes = [
+        {
+            "obs": rng.normal(size=(2, T, obs_dim)).astype(np.float32),
+            "actions": rng.integers(0, 6, size=(2, T)),
+            "rewards": rng.normal(size=(2, T)).astype(np.float32),
+            "avail_actions": np.ones((2, T, 6), dtype=np.float32),
+            "dones": np.zeros(T, dtype=bool),
+            "valid": np.ones(T, dtype=bool),
+        }
+        for _ in range(n_ep)
+    ]
+    return write_vault(
+        episodes, member_ids, tmp_path / "dataset.vlt", ego_index=0, meta={"generator": "test"}
     )
-    return batch.save(tmp_path / "dataset.npz")
 
 
 def _job(tmp_path: Path, baseline: str, **overrides) -> TrainingJob:
@@ -203,10 +207,9 @@ def test_evaluation_target_return_comes_from_the_dataset(tmp_path):
     Conditioning on the dataset's best episode return is the Decision
     Transformer convention -- ask for the best behaviour the data contains.
     """
-    from oaht_bench.dataset.schema import EpisodeBatch
     from oaht_bench.offline.evaluate import dataset_target_return
 
-    batch = EpisodeBatch.load(_dataset(tmp_path))
+    batch = read_vault(_dataset(tmp_path))
     target = dataset_target_return(batch)
     ego_returns = batch.episode_returns()[:, batch.ego_index]
     assert target == pytest.approx(float(np.max(ego_returns)))
