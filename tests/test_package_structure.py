@@ -49,7 +49,8 @@ def test_no_top_level_namespace_pollution(name: str):
         "oaht_bench.common",
         "oaht_bench.algorithms",
         "oaht_bench.offline",
-        "oaht_bench.data",
+        "oaht_bench.dataset",
+        "oaht_bench.dataset.construction",
     ],
 )
 def test_package_modules_import(module: str):

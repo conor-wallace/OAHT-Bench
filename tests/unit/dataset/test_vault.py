@@ -5,8 +5,8 @@
 
 import numpy as np
 
-from oaht_bench.data.schema import EpisodeBatch
-from oaht_bench.data.vault import read_vault, to_flat, write_vault
+from oaht_bench.dataset.schema import EpisodeBatch
+from oaht_bench.dataset.vault import read_vault, to_flat, write_vault
 
 
 def _batch(*, lengths=(3, 5, 2), num_agents=2, obs_dim=4, num_actions=5, meta=None):

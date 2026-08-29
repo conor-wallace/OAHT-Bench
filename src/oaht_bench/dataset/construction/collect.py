@@ -7,7 +7,7 @@ population, not enough to build a dataset. This records the full
 Seats are filled by iterating ``env.agents`` rather than naming ``agent_0`` and
 ``agent_1``, so the loop is already N-agent even though every current
 environment has exactly two seats. That costs nothing here and keeps the
-2-player assumption out of the artifact (see :mod:`oaht_bench.data.schema`).
+2-player assumption out of the artifact (see :mod:`oaht_bench.dataset.schema`).
 """
 
 from __future__ import annotations

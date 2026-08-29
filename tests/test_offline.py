@@ -29,7 +29,7 @@ from oaht_bench.offline import (
 
 
 def _windows(n_ep=4, T=12, obs_dim=5, n_agents=2, seed=0):
-    from oaht_bench.data.schema import EpisodeBatch
+    from oaht_bench.dataset.schema import EpisodeBatch
 
     rng = np.random.default_rng(seed)
     valid = np.ones((n_ep, T), dtype=bool)

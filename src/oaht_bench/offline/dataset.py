@@ -1,4 +1,4 @@
-"""Turn a collected :class:`~oaht_bench.data.schema.EpisodeBatch` into training windows.
+"""Turn a collected :class:`~oaht_bench.dataset.schema.EpisodeBatch` into training windows.
 
 Every trajectory-view baseline consumes the same tensors — an ego stream to
 predict from and a teammate stream to model — so the split happens once here
@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from oaht_bench.data.schema import EpisodeBatch
+from oaht_bench.dataset.schema import EpisodeBatch
 
 
 @dataclass(frozen=True)

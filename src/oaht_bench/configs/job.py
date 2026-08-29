@@ -6,7 +6,7 @@ gets written into the artifact the run produces, so a dataset or a checkpoint ca
 always be traced back to the exact configuration that made it.
 
 Job models here declare *what* to run. The code that executes them lives in the
-corresponding package (``oaht_bench.teammate_generation``, ``oaht_bench.data``,
+corresponding package (``oaht_bench.teammate_generation``, ``oaht_bench.dataset``,
 ...) so that importing a config never pulls in JAX.
 """
 

@@ -14,7 +14,7 @@ import pytest
 
 from oaht_bench.configs import get_preset
 from oaht_bench.configs.job import OfflineTrainingConfig, TrainingJob
-from oaht_bench.data.schema import EpisodeBatch
+from oaht_bench.dataset.schema import EpisodeBatch
 
 
 def _dataset(tmp_path: Path, n_ep=8, T=14, obs_dim=6, teammates=(0, 1, 2, 3)) -> Path:
@@ -203,7 +203,7 @@ def test_evaluation_target_return_comes_from_the_dataset(tmp_path):
     Conditioning on the dataset's best episode return is the Decision
     Transformer convention -- ask for the best behaviour the data contains.
     """
-    from oaht_bench.data.schema import EpisodeBatch
+    from oaht_bench.dataset.schema import EpisodeBatch
     from oaht_bench.offline.evaluate import dataset_target_return
 
     batch = EpisodeBatch.load(_dataset(tmp_path))

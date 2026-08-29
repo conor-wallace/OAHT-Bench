@@ -132,7 +132,7 @@ LBF.
 
 ### Implications for OAHT-Bench
 
-1. **Adopt trajectory mirroring in `data/collect.py`** (§4). It is a cheap, ablated,
+1. **Adopt trajectory mirroring in `dataset/construction/collect.py`** (§4). It is a cheap, ablated,
    `N`× data multiplier, and it is a *dataset* technique rather than a method component — so it
    belongs in the benchmark's collection layer where every trajectory-view baseline can use it.
    Design decision required: mirroring is only well-defined for homogeneous action/observation
@@ -637,7 +637,7 @@ Two things our plan does not currently account for:
    based on final performance and improvement, ensuring the Transformer learns genuine improvement
    dynamics."* Our §4 collection spec has no filtering stage. Without one, the `replay` variant
    is dominated by learning curves that never improved, and AD/DPT are being trained on noise.
-   **Add a documented, configurable filtering stage to `data/collect.py`** and record the filter
+   **Add a documented, configurable filtering stage to `dataset/construction/collect.py`** and record the filter
    in dataset metadata — it is a dataset-design decision that materially changes results and
    therefore belongs in the benchmark contract.
 

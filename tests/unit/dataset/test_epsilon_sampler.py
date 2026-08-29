@@ -6,7 +6,7 @@ elsewhere; this pins how a target ε distribution becomes concrete seatings.
 import numpy as np
 import pytest
 
-from oaht_bench.data.epsilon_sampler import (
+from oaht_bench.dataset.construction.epsilon_sampler import (
     EPSILON_TARGETS,
     PooledMatrix,
     Seating,

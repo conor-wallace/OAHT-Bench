@@ -83,7 +83,7 @@ def _dispatch(job: AnyJob) -> int:
         print(f"\nwrote {run_dir}")
         return 0
     if job.job_type == "dataset_collection":
-        from oaht_bench.data.runner import run as run_data_generation
+        from oaht_bench.dataset.construction.runner import run as run_data_generation
 
         run_dir = run_data_generation(job)
         print(f"\nwrote {run_dir}")

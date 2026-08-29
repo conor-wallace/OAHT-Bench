@@ -52,7 +52,7 @@ def run(job: TrainingJob) -> Path:
 
     from oaht_bench.common.logging import RunLogger, nonfatal
     from oaht_bench.configs import save_job
-    from oaht_bench.data.schema import EpisodeBatch
+    from oaht_bench.dataset.schema import EpisodeBatch
     from oaht_bench.offline import TeammateIndex, get_policy, make_windows
 
     if job.baseline not in SUPPORTED:

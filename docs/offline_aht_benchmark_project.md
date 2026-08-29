@@ -412,7 +412,7 @@ learns genuine improvement dynamics."* Rev 1–5's collection spec has no filter
 Without it, the `replay` variant is dominated by learning curves that never improved, and the
 learning-history family is trained largely on noise — which is one candidate explanation for the
 flat adaptation curves ICRL4AHT reports. **Add a documented, configurable filtering stage to
-`data/collect.py`**, record the filter in dataset metadata, and treat the filter definition as
+`dataset/construction/collect.py`**, record the filter in dataset metadata, and treat the filter definition as
 part of the benchmark contract: it is a dataset-design decision that materially changes results,
 so two groups using different filters are not running the same benchmark.
 
@@ -1272,7 +1272,7 @@ Ordered for Phase 0a. Items 1–3 are the critical path; 4–6 run alongside.
    exactly what each view must contain — **for all three environments**, since Hanabi's masking
    and turn structure are what the schema has to survive. Rev 1's §13 put schema first; writing
    the contract against real consumers is what keeps it from needing a v1 within a week.
-5. **Write `data/schema.py`** — the §4 spec, versioned, with a validator and a synthetic fixture
+5. **Write `dataset/schema.py`** — the §4 spec, versioned, with a validator and a synthetic fixture
    per environment. Include `avail_actions` and `acting_agent` from v0.
 6. **Specify and implement `offline/` (§3.1)** — the backbone and the `module(history) -> z`
    conditioning interface. Critical path for every trajectory-view baseline.

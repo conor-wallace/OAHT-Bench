@@ -9,7 +9,7 @@ a target distribution over that spectrum (``expert`` = top only; ``br_vs_worst``
 = bimodal top/bottom; ``mixed`` = top and middle), and this module realises it as
 an exact list of seatings.
 
-It generalises :func:`oaht_bench.data.runner._seat_plan` along one axis. That
+It generalises :func:`oaht_bench.dataset.construction.runner._seat_plan` along one axis. That
 function splits episodes into matched/mismatched **by count** (not a per-episode
 coin flip, so the fraction is an exact stated property) and cycles teammates so
 each is covered equally. Here the same two ideas carry over: episodes are split
@@ -144,7 +144,7 @@ def load_pooled(path: str | Path) -> PooledMatrix:
 def _band_counts(targets: list[tuple[float, float]], num_episodes: int) -> list[tuple[float, int]]:
     """Split ``num_episodes`` across the target bands by exact count.
 
-    Like :func:`~oaht_bench.data.runner._seat_plan`'s matched/mismatched split, a
+    Like :func:`~oaht_bench.dataset.construction.runner._seat_plan`'s matched/mismatched split, a
     variant's mixture is a stated property, not a draw: ``br_vs_worst`` over 10
     episodes is exactly 5 best-response and 5 worst-response. Rounding drift is
     absorbed by the first band so the counts always sum to ``num_episodes``.

@@ -8,12 +8,12 @@ Supersedes the ICRL-dependent parts of the plan's §4. Two scope changes drive i
    `episode_index_within_history` links, and the ICRL4AHT HDF5+JSONL-index format
    (§4.2 rev 2) are dropped. This is what frees the format decision below.
 2. **OG-MARL/D4RL scale.** The current `.npz`-per-run, padded-`(episode, agent, T,
-   …)` schema (`data/schema.py`) does not scale — padding wastes space and forces
+   …)` schema (`dataset/schema.py`) does not scale — padding wastes space and forces
    whole-file loads. We move to a flat-transition store.
 
 This note defines the three things needed to begin: **structure**, **file
 format**, and **creation process**. Expert collection already exists
-(`data/runner.py`); everything here is how the rest is built on it.
+(`dataset/construction/runner.py`); everything here is how the rest is built on it.
 
 ## 1. Structure — two quality axes, defined not trained
 
@@ -43,7 +43,7 @@ which is the right OAHT semantic.
 The roster is **pooled across all generators** (decision b): `i` and `j` range over
 the union of released members from `{fcp, comedi, brdiv, lbrdiv}` for the
 environment, so the best response to a CoMeDi teammate may be an FCP member. This
-is the cross-population mixing the runner comment (`data/runner.py:99-102`) asked
+is the cross-population mixing the runner comment (`dataset/construction/runner.py`) asked
 for, made precise.
 
 - **Paired generators fit directly.** The released cross-play matrix is already
@@ -108,7 +108,7 @@ its `save`/`load`, so the store swaps under it without touching consumers.
 
 ## 3. Creation process
 
-`data/runner.run` becomes the entry point that dispatches on `variant` to private
+`dataset.construction.runner.run` becomes the entry point that dispatches on `variant` to private
 collectors (per the runner comment). New pieces, in dependency order:
 
 1. **Pooled cross-population cross-play matrix.** Extend the crossplay eval

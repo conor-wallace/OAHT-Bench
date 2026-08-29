@@ -1577,7 +1577,7 @@ def test_seat_plan_splits_by_count_not_by_coin_flip():
     """
     import numpy as np
 
-    from oaht_bench.data.runner import _seat_plan
+    from oaht_bench.dataset.construction.runner import _seat_plan
 
     for n, frac in ((10, 0.5), (10, 0.3), (100, 0.25), (7, 0.0), (7, 1.0)):
         plan = _seat_plan([0, 1, 2, 3, 4], n, frac, np.random.default_rng(0))
@@ -1593,7 +1593,7 @@ def test_matched_and_mismatched_pools_are_disjoint():
     """
     import numpy as np
 
-    from oaht_bench.data.runner import _seat_plan
+    from oaht_bench.dataset.construction.runner import _seat_plan
 
     plan = _seat_plan([0, 1, 2, 3, 4], 10, 0.5, np.random.default_rng(0))
     matched = [p for p in plan if p[0] == p[1]]
@@ -1612,7 +1612,7 @@ def test_seat_plan_covers_every_teammate_equally():
 
     import numpy as np
 
-    from oaht_bench.data.runner import _seat_plan
+    from oaht_bench.dataset.construction.runner import _seat_plan
 
     for n in (10, 20, 100):
         plan = _seat_plan([0, 1, 2, 3, 4], n, 0.5, np.random.default_rng(1))
@@ -1624,7 +1624,7 @@ def test_mismatch_needs_two_members():
     import numpy as np
     import pytest as _pytest
 
-    from oaht_bench.data.runner import _seat_plan
+    from oaht_bench.dataset.construction.runner import _seat_plan
 
     with _pytest.raises(ValueError, match="at least two distinct"):
         _seat_plan([3], 10, 0.5, np.random.default_rng(0))

@@ -19,9 +19,9 @@ from tqdm import tqdm
 from oaht_bench.common.save_load_utils import load_train_run
 from oaht_bench.configs import load_job, save_job
 from oaht_bench.configs.job import DatasetCollectionJob
-from oaht_bench.data.collect import collect_episode, pad_and_stack
-from oaht_bench.data.epsilon_sampler import EPSILON_TARGETS, load_pooled, plan_for_variant
-from oaht_bench.data.schema import EpisodeBatch
+from oaht_bench.dataset.construction.collect import collect_episode, pad_and_stack
+from oaht_bench.dataset.construction.epsilon_sampler import EPSILON_TARGETS, load_pooled, plan_for_variant
+from oaht_bench.dataset.schema import EpisodeBatch
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper
 from oaht_bench.population import artifact_dir, population_from_run, released_members
@@ -127,7 +127,7 @@ def run(job: DatasetCollectionJob) -> Path:
         batch = _collect_single(job, env)
 
     if job.storage_format == "vault":
-        from oaht_bench.data.vault import write_vault
+        from oaht_bench.dataset.vault import write_vault
 
         write_vault(batch, artifact)
     else:

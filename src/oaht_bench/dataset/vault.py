@@ -1,6 +1,6 @@
 """Flashbax Vault storage for a collected dataset (``docs/dataset_design.md`` §2).
 
-The padded ``(episode, agent, T, …)`` :class:`~oaht_bench.data.schema.EpisodeBatch`
+The padded ``(episode, agent, T, …)`` :class:`~oaht_bench.dataset.schema.EpisodeBatch`
 does not scale: padding wastes space and forces whole-file loads. OG-MARL and
 D4RL both store a single *flat* buffer of transitions with explicit episode
 boundaries instead. This module is that store, using a Flashbax Vault -- the same
@@ -37,7 +37,7 @@ from pathlib import Path
 
 import numpy as np
 
-from oaht_bench.data.schema import EpisodeBatch
+from oaht_bench.dataset.schema import EpisodeBatch
 
 #: Bump when the flat field set or reconstruction changes in a way that makes an
 #: older vault unreadable. Written into the vault metadata.
@@ -155,7 +155,7 @@ def read_vault(vault_dir: str | Path, *, variant: str | None = None) -> EpisodeB
     """Reconstruct the padded :class:`EpisodeBatch` written by :func:`write_vault`.
 
     Re-groups the flat transitions by ``episode_id``, pads each episode back to the
-    common length with zeros (matching :func:`~oaht_bench.data.collect.pad_and_stack`),
+    common length with zeros (matching :func:`~oaht_bench.dataset.construction.collect.pad_and_stack`),
     and restores the ``valid`` mask and ``meta``. The result equals the batch that
     was written -- so a consumer that took an ``EpisodeBatch`` cannot tell which
     store it came from.

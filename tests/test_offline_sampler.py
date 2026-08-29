@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from oaht_bench.data.schema import EpisodeBatch
+from oaht_bench.dataset.schema import EpisodeBatch
 from oaht_bench.offline import TeammateIndex, make_windows, sample_stage1, sample_stage2
 
 
