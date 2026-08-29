@@ -12,9 +12,9 @@ memory-mapped so it reads past RAM.
 fields carry a leading ``agent`` axis and the ego seat is recorded rather than
 assumed. The flat store mirrors that: ``observations``/``actions``/``rewards``/
 ``avail_actions`` keep the agent axis, and the ego/teammate split stays a
-:func:`~oaht_bench.offline.dataset.make_windows` concern. That is what lets the
+:func:`~oaht_bench.dataset.windows.make_windows` concern. That is what lets the
 store swap under ``EpisodeBatch`` without touching any baseline -- :func:`read_vault`
-reconstructs the identical padded batch.
+reconstructs the identical ragged batch.
 
 Flat layout (Flashbax experience is ``(B, T, …)``; ``B=1`` for one stream):
 
@@ -27,7 +27,7 @@ Flat layout (Flashbax experience is ``(B, T, …)``; ``B=1`` for one stream):
 episode is real steps only -- so :func:`write_vault` concatenates them straight
 into the buffer; padding never exists on the write side. :func:`read_vault` groups
 transitions by ``episode_id`` into the ragged :class:`EpisodeBatch`
-:func:`~oaht_bench.offline.dataset.make_windows` consumes; padding only ever
+:func:`~oaht_bench.dataset.windows.make_windows` consumes; padding only ever
 reappears window-by-window inside ``make_windows``. Dataset-level metadata -- env, variant,
 population/matrix hashes, the roster manifest, ``ego_index`` -- rides in the
 Vault's own metadata, the small fixed-size part; per-episode labels are broadcast
@@ -180,7 +180,7 @@ def read_vault(vault_dir: str | Path, *, variant: str | None = None) -> EpisodeB
 
     Re-groups the flat transitions by ``episode_id`` into one variable-length array
     per episode and restores ``meta`` -- the read-side view
-    :func:`~oaht_bench.offline.dataset.make_windows` consumes. ``variant`` selects
+    :func:`~oaht_bench.dataset.windows.make_windows` consumes. ``variant`` selects
     the sub-directory; if omitted and the vault holds exactly one, that one is used.
     """
     from flashbax.vault import Vault

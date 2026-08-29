@@ -473,7 +473,7 @@ def test_available_actions_are_enforced_everywhere_the_data_enforces_them():
     """
     import inspect
 
-    from oaht_bench.offline import dataset as ds
+    from oaht_bench.dataset import windows as ds
     from oaht_bench.offline import evaluate as ev
     from oaht_bench.offline import tao as tao_mod
     from oaht_bench.offline.liam import model as liam_mod

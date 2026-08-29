@@ -37,9 +37,9 @@ import jax
 import jax.numpy as jnp
 import optax
 
+from oaht_bench.dataset.sampler import sample_stage1, sample_stage2
 from oaht_bench.offline.backbone import DecisionTransformer
 from oaht_bench.offline.registry import BaseAhtPolicy
-from oaht_bench.offline.sampler import sample_stage1, sample_stage2
 from oaht_bench.offline.utils import mask_logits, to_jax
 
 
@@ -332,7 +332,7 @@ def tao_policy_loss(
             one call site serves both and the choice stays visible.
     """
     # GetOffD: C fragments of the same teammate, concatenated, sampled
-    # independently of the decoder window (see oaht_bench.offline.sampler). The
+    # independently of the decoder window (see oaht_bench.dataset.sampler). The
     # context is therefore C*T long while the decoder window is T -- which is
     # fine, because it enters as cross-attention keys rather than being
     # concatenated to anything.

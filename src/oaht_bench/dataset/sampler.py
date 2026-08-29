@@ -1,6 +1,6 @@
 """Batch construction for the two-stage baselines.
 
-Neither stage can be fed by slicing :class:`~oaht_bench.offline.dataset.Windows`
+Neither stage can be fed by slicing :class:`~oaht_bench.dataset.windows.Windows`
 uniformly, because both need *structure* across the batch rather than just a
 random subset:
 
@@ -30,7 +30,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from oaht_bench.offline.dataset import Windows
+from oaht_bench.dataset.windows import Windows
 
 #: Keys a stage-1 batch carries for the anchor trajectory.
 _ANCHOR_KEYS = (

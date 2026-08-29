@@ -24,8 +24,9 @@ confederate (``final_params_br``), so for those two the data exists; FCP and
 CoMeDi have no best response and would need one trained.
 """
 
+from oaht_bench.dataset.sampler import TeammateIndex, sample_stage1, sample_stage2
+from oaht_bench.dataset.windows import Windows, make_windows, return_to_go
 from oaht_bench.offline.backbone import DecisionTransformer
-from oaht_bench.offline.dataset import Windows, make_windows, return_to_go
 from oaht_bench.offline.liam import (
     LiamDecoder,
     LiamEncoder,
@@ -54,7 +55,6 @@ from oaht_bench.offline.omis import (
 )
 from oaht_bench.offline.pct_bc import PctBcNetwork, PctBcPolicy, pct_bc_loss
 from oaht_bench.offline.registry import BaseAhtPolicy, get_policy
-from oaht_bench.offline.sampler import TeammateIndex, sample_stage1, sample_stage2
 from oaht_bench.offline.tao import (
     AncillaryActionDecoder,
     OpponentPolicyEncoder,
