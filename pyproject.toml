@@ -13,6 +13,11 @@ dependencies = [
     # --- ours ---
     "pydantic>=2.7",
     "h5py>=3.10",
+    # Flat-transition dataset store (docs/dataset_design.md §2). Same format
+    # OG-MARL publishes (`<env>.vlt/{Good,Medium,Poor}/`), JAX-native and
+    # memory-mapped. 0.1.3 requires only jax>=0.4.25, satisfied by the pinned
+    # jax==0.5.3 below; it pulls tensorstore for the on-disk arrays.
+    "flashbax==0.1.3",
     # --- inherited with the absorbed jax-aht code (PROVENANCE.md) ---
     # Pinned to the JAX AI stack v2025.2.5 versions the absorbed code was
     # written against. Bumping these can change environment dynamics, which
@@ -79,6 +84,7 @@ include = [
     "src/oaht_bench/configs/**/*.py",
     "src/oaht_bench/common/logging.py",
     "src/oaht_bench/data/epsilon_sampler.py",
+    "src/oaht_bench/data/vault.py",
     "src/oaht_bench/envs/factory.py",
     "src/oaht_bench/envs/protocols.py",
     "src/oaht_bench/offline/**/*.py",

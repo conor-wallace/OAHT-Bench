@@ -109,10 +109,10 @@ def run(job: DatasetCollectionJob) -> Path:
     preamble (idempotence guard, config snapshot) and the summary tail.
     """
     run_dir = Path(job.run_dir())
-    existing = run_dir / "dataset.npz"
-    if existing.exists():
+    artifact = run_dir / ("dataset.vlt" if job.storage_format == "vault" else "dataset.npz")
+    if artifact.exists():
         raise FileExistsError(
-            f"{existing} already exists and would be overwritten. Delete "
+            f"{artifact} already exists and would be overwritten. Delete "
             f"{run_dir} to re-collect, or change the job's label. (The directory "
             f"name includes the config hash, so an identical config always "
             f"resolves here.)"
@@ -126,7 +126,12 @@ def run(job: DatasetCollectionJob) -> Path:
     else:
         batch = _collect_single(job, env)
 
-    batch.save(run_dir / "dataset.npz")
+    if job.storage_format == "vault":
+        from oaht_bench.data.vault import write_vault
+
+        write_vault(batch, artifact)
+    else:
+        batch.save(artifact)
     (run_dir / "dataset_summary.json").write_text(
         json.dumps(
             {
