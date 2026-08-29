@@ -15,22 +15,23 @@ from oaht_bench.offline import TeammateIndex, make_windows, sample_stage1, sampl
 
 
 def _windows(n_ep=8, T=16, obs_dim=5, teammates=(0, 1, 2, 3), seed=0):
+    from oaht_bench.dataset.schema import Episode
+
     rng = np.random.default_rng(seed)
-    valid = np.ones((n_ep, T), dtype=bool)
     # two episodes per teammate, so "a different episode" is always available
     member_ids = np.array([[0, teammates[i % len(teammates)]] for i in range(n_ep)])
+    episodes = [
+        Episode(
+            obs=rng.normal(size=(2, T, obs_dim)).astype(np.float32),
+            actions=rng.integers(0, 6, size=(2, T)),
+            rewards=rng.normal(size=(2, T)).astype(np.float32),
+            avail_actions=np.ones((2, T, 6), dtype=np.float32),
+            dones=np.zeros(T, dtype=bool),
+        )
+        for _ in range(n_ep)
+    ]
     return make_windows(
-        EpisodeBatch(
-            obs=rng.normal(size=(n_ep, 2, T, obs_dim)).astype(np.float32),
-            actions=rng.integers(0, 6, size=(n_ep, 2, T)),
-            rewards=rng.normal(size=(n_ep, 2, T)).astype(np.float32),
-            dones=np.zeros((n_ep, T), dtype=bool),
-            valid=valid,
-            avail_actions=np.ones((n_ep, 2, T, 6), dtype=np.float32),
-            member_ids=member_ids,
-            ego_index=0,
-            meta={},
-        ),
+        EpisodeBatch(episodes=episodes, member_ids=member_ids, ego_index=0, meta={}),
         context_length=8,
         stride=4,
     )

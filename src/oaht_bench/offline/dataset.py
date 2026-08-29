@@ -158,7 +158,6 @@ def make_windows(
             )
         teammate_index = others[0]
 
-    rtg = return_to_go(batch.rewards[:, ego], batch.valid)
     # The whole-episode ego return, the canonical form (schema.py's own
     # ``describe()`` uses it) rather than re-derived from ``rtg``.
     episode_returns = batch.episode_returns()[:, ego]
@@ -167,45 +166,53 @@ def make_windows(
     mate_o, mate_no, mate_a, mate_r = [], [], [], []
     ego_av, mate_av = [], []
     steps, masks, ids, eps, ep_rets = [], [], [], [], []
-    # Teammate observations shifted one step; the final step repeats, which the
-    # mask covers since a window never ends on a step the episode did not take.
-    next_obs = np.concatenate(
-        [batch.obs[:, teammate_index, 1:], batch.obs[:, teammate_index, -1:]], axis=1
-    )
 
-    for ep in range(batch.num_episodes):
-        length = int(batch.valid[ep].sum())
+    def pad(arr, width=T, fill=0):
+        """Left-pad, the Decision Transformer convention the reference inherits:
+        the most recent timestep is always last, so a short window and a full one
+        agree on where "now" is."""
+        if arr.shape[0] == width:
+            return arr
+        head = np.full((width - arr.shape[0], *arr.shape[1:]), fill, dtype=arr.dtype)
+        return np.concatenate([head, arr], axis=0)
+
+    for ep, episode in enumerate(batch.episodes):
+        ego_obs = episode.obs[ego]  # (T_ep, obs_dim); episodes are already ragged
+        mate_obs = episode.obs[teammate_index]
+        length = ego_obs.shape[0]
         if length == 0:
             continue
+        # No valid mask: T_ep is the real length. Return-to-go over the whole
+        # episode, and teammate observations shifted one step (the final step
+        # repeats, which the window mask covers since a window never ends past the
+        # episode).
+        rtg = return_to_go(episode.rewards[ego][None], np.ones((1, length), dtype=bool))[0]
+        next_obs = np.concatenate([mate_obs[1:], mate_obs[-1:]], axis=0)
+        ego_act = episode.actions[ego]
+        mate_act = episode.actions[teammate_index]
+        mate_rew = episode.rewards[teammate_index]
+        ego_avail = episode.avail_actions[ego]
+        mate_avail = episode.avail_actions[teammate_index]
+
         for start in range(0, max(1, length - T + 1), stride):
             sl = slice(start, start + T)
             n = min(T, length - start)
             if n <= 0:
                 continue
-
-            def pad(arr, width=T, fill=0):
-                """Left-pad, the Decision Transformer convention the reference
-                inherits: the most recent timestep is always last, so a short
-                window and a full one agree on where "now" is."""
-                if arr.shape[0] == width:
-                    return arr
-                head = np.full((width - arr.shape[0], *arr.shape[1:]), fill, dtype=arr.dtype)
-                return np.concatenate([head, arr], axis=0)
-
-            ego_o.append(pad(batch.obs[ep, ego][sl][:n]))
+            ego_o.append(pad(ego_obs[sl][:n]))
             # Reference pads actions with -10, an out-of-range sentinel, so the
             # embedding of a padded action cannot be confused with action 0.
-            ego_a.append(pad(batch.actions[ep, ego][sl][:n], fill=-10))
-            ego_g.append(pad(rtg[ep][sl][:n]))
-            mate_o.append(pad(batch.obs[ep, teammate_index][sl][:n]))
-            mate_no.append(pad(next_obs[ep][sl][:n]))
-            mate_a.append(pad(batch.actions[ep, teammate_index][sl][:n], fill=-10))
-            mate_r.append(pad(batch.rewards[ep, teammate_index][sl][:n]))
+            ego_a.append(pad(ego_act[sl][:n], fill=-10))
+            ego_g.append(pad(rtg[sl][:n]))
+            mate_o.append(pad(mate_obs[sl][:n]))
+            mate_no.append(pad(next_obs[sl][:n]))
+            mate_a.append(pad(mate_act[sl][:n], fill=-10))
+            mate_r.append(pad(mate_rew[sl][:n]))
             # 1-indexed, 0 reserved for padding (reference utils.py:115-118).
             # Pad the mask with ones: a padded step has no legal action either
             # way, and zeros would make the masked logits all -1e10.
-            ego_av.append(pad(batch.avail_actions[ep, ego][sl][:n], fill=1))
-            mate_av.append(pad(batch.avail_actions[ep, teammate_index][sl][:n], fill=1))
+            ego_av.append(pad(ego_avail[sl][:n], fill=1))
+            mate_av.append(pad(mate_avail[sl][:n], fill=1))
             steps.append(pad(np.arange(start + 1, start + n + 1)))
             m = np.zeros(T, dtype=bool)
             m[T - n :] = True

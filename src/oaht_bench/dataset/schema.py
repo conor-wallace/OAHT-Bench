@@ -11,10 +11,14 @@ into ``agent_0_*`` / ``agent_1_*`` fields, and the ego seat is recorded
 explicitly instead of assumed to be index 0. Two-player is then just
 ``num_agents == 2`` and no consumer has to be rewritten when it isn't.
 
-This is the padded, read-side shape :func:`~oaht_bench.offline.dataset.make_windows`
-consumes. It is not serialised: the on-disk store is a flat-transition Flashbax
-Vault (:mod:`oaht_bench.dataset.vault`), and :func:`~oaht_bench.dataset.vault.read_vault`
-reconstructs this batch from it. Padding is a read-side artifact, not a stored one.
+An :class:`Episode` is one episode's transitions, real steps only; an
+:class:`EpisodeBatch` is a list of them plus seat provenance. Collection produces
+``Episode``\\ s (:func:`~oaht_bench.dataset.construction.collect.collect_episode`)
+and the pipeline runs off either -- one ``Episode`` or a batch -- so nothing is
+ever padded to a rectangle. Neither is serialised: the on-disk store is a
+flat-transition Flashbax Vault (:mod:`oaht_bench.dataset.vault`), and
+:func:`~oaht_bench.dataset.vault.read_vault` rebuilds the batch from it. Padding
+only reappears window-by-window inside ``make_windows``.
 """
 
 from __future__ import annotations
@@ -26,32 +30,54 @@ import numpy as np
 
 
 @dataclass(frozen=True)
-class EpisodeBatch:
-    """A stack of episodes, padded to a common length.
+class Episode:
+    """One episode's transitions -- real steps only, no padding.
 
-    Leading axes are ``(episode, agent, timestep)`` for per-agent quantities and
-    ``(episode, timestep)`` for shared ones. ``valid`` marks real steps, since
-    episodes terminate at different times and are padded to ``max_steps``.
+    Per-agent fields keep a leading ``agent`` axis (the schema-level generality
+    argument above); ``dones`` is shared across seats. ``T`` is the episode's real
+    length. This is what ``collect_episode`` produces and what a Vault
+    transition-group reconstructs.
     """
 
-    #: (num_episodes, num_agents, T, obs_dim)
+    #: (num_agents, T, obs_dim)
     obs: np.ndarray
-    #: (num_episodes, num_agents, T)
+    #: (num_agents, T)
     actions: np.ndarray
-    #: (num_episodes, num_agents, T)
+    #: (num_agents, T)
     rewards: np.ndarray
-    #: (num_episodes, T) — environment-level termination, shared across seats.
-    dones: np.ndarray
-    #: (num_episodes, T) — True where the step happened rather than padding.
-    valid: np.ndarray
-    #: (num_episodes, num_agents, T, num_actions) — which actions the
-    #: environment permitted at each step. **Not** all-ones on LBF: every step
-    #: masks something there, 4.77 of 6 actions available on average and action 5
-    #: unavailable 67% of the time. An earlier version of this comment claimed
-    #: LBF did not mask, which is why the offline baselines were built without
-    #: consulting the field.
+    #: (num_agents, T, num_actions) — which actions the environment permitted.
+    #: **Not** all-ones on LBF: 4.77 of 6 actions available on average and action 5
+    #: unavailable 67% of the time. An earlier comment claimed LBF did not mask,
+    #: which is why the offline baselines were built without the field.
     avail_actions: np.ndarray
-    #: Which population member sat in each seat, per episode.
+    #: (T,) — environment-level termination, shared across seats.
+    dones: np.ndarray
+
+    @property
+    def length(self) -> int:
+        return int(self.dones.shape[0])
+
+    @property
+    def num_agents(self) -> int:
+        return int(self.obs.shape[0])
+
+    def returns(self) -> np.ndarray:
+        """Per-agent undiscounted return. (num_agents,)"""
+        return self.rewards.sum(axis=1)
+
+
+@dataclass(frozen=True)
+class EpisodeBatch:
+    """A batch of ragged :class:`Episode`\\ s plus their seat provenance.
+
+    Episodes end at different times, so the batch is just a list of them rather
+    than a rectangle with a ``valid`` mask (which every consumer immediately
+    un-padded anyway). ``member_ids`` is a plain ``(num_episodes, num_agents)``
+    array -- one seat assignment per episode, not per step -- and the ego seat is
+    recorded rather than assumed to be index 0.
+    """
+
+    episodes: list[Episode]
     #: (num_episodes, num_agents)
     member_ids: np.ndarray
     #: Seat the learner occupies. Recorded rather than assumed to be 0.
@@ -61,27 +87,27 @@ class EpisodeBatch:
 
     @property
     def num_episodes(self) -> int:
-        return int(self.obs.shape[0])
+        return len(self.episodes)
 
     @property
     def num_agents(self) -> int:
-        return int(self.obs.shape[1])
+        return self.episodes[0].num_agents
 
     def episode_returns(self) -> np.ndarray:
         """Per-episode, per-agent undiscounted return. (num_episodes, num_agents)"""
-        return (self.rewards * self.valid[:, None, :]).sum(axis=-1)
+        return np.stack([e.returns() for e in self.episodes])
 
     def episode_lengths(self) -> np.ndarray:
-        """(num_episodes,) real step count, excluding padding."""
-        return self.valid.sum(axis=-1)
+        """(num_episodes,) real step count per episode."""
+        return np.asarray([e.length for e in self.episodes])
 
     def describe(self) -> str:
         ret = self.episode_returns()
+        lengths = self.episode_lengths()
         return (
             f"episodes      {self.num_episodes}\n"
             f"agents        {self.num_agents} (ego seat {self.ego_index})\n"
-            f"steps         mean {self.episode_lengths().mean():.1f}, "
-            f"max {self.obs.shape[2]}\n"
+            f"steps         mean {lengths.mean():.1f}, max {int(lengths.max())}\n"
             f"return        ego {ret[:, self.ego_index].mean():.4f}, "
             f"joint {ret.sum(axis=1).mean():.4f}"
         )

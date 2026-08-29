@@ -83,7 +83,7 @@ def run(job: TrainingJob) -> Path:
         normalize=cfg.normalize_observations,
     )
     index = TeammateIndex.build(windows)
-    action_dim = int(batch.avail_actions.shape[-1])
+    action_dim = int(batch.episodes[0].avail_actions.shape[-1])
     log.info(
         "dataset %s -> %d windows, %d teammates, obs_dim %d, action_dim %d",
         job.dataset_path,

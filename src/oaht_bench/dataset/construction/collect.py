@@ -18,6 +18,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from oaht_bench.dataset.schema import Episode
+
 
 def collect_episode(
     rng,
@@ -26,7 +28,7 @@ def collect_episode(
     *,
     max_episode_steps: int,
     greedy: bool = False,
-) -> dict[str, np.ndarray]:
+) -> Episode:
     """Run one episode with ``seats[i]`` controlling ``env.agents[i]``.
 
     Each seat is its own ``(params, policy)`` pair rather than sharing one
@@ -34,9 +36,9 @@ def collect_episode(
     confederate and its best response. It also leaves room for a heuristic
     teammate opposite a learned one without changing this signature again.
 
-    Returns arrays with a leading agent axis for per-agent quantities. Steps
-    after termination are recorded but marked invalid, since the environment is
-    scanned for a fixed length to stay jit-friendly.
+    Returns an :class:`~oaht_bench.dataset.schema.Episode` with a leading agent
+    axis for per-agent quantities. The loop breaks on termination, so every
+    recorded step is real -- there is no padding to mark.
     """
     agents = list(env.agents)
     n = len(agents)
@@ -55,8 +57,7 @@ def collect_episode(
     done_flags = {k: jnp.zeros((1,), dtype=bool) for k in agents + ["__all__"]}
 
     rec: dict[str, list] = {k: [] for k in
-                            ("obs", "actions", "rewards", "avail", "dones", "valid")}
-    finished = False
+                            ("obs", "actions", "rewards", "avail", "dones")}
 
     for _ in range(max_episode_steps):
         avail = jax.lax.stop_gradient(env.get_avail_actions(state))
@@ -95,17 +96,14 @@ def collect_episode(
         )
         ep_done = bool(np.asarray(done_flags["__all__"]).reshape(-1)[0])
         rec["dones"].append(ep_done)
-        rec["valid"].append(not finished)
         if ep_done:
-            finished = True
             break
 
-    return {
+    return Episode(
         # (agent, T, ...) — transpose out of the per-step stacking order.
-        "obs": np.stack(rec["obs"]).transpose(1, 0, 2),
-        "actions": np.stack(rec["actions"]).T,
-        "rewards": np.stack(rec["rewards"]).T,
-        "avail_actions": np.stack(rec["avail"]).transpose(1, 0, 2),
-        "dones": np.asarray(rec["dones"], dtype=bool),
-        "valid": np.asarray(rec["valid"], dtype=bool),
-    }
+        obs=np.stack(rec["obs"]).transpose(1, 0, 2),
+        actions=np.stack(rec["actions"]).T,
+        rewards=np.stack(rec["rewards"]).T,
+        avail_actions=np.stack(rec["avail"]).transpose(1, 0, 2),
+        dones=np.asarray(rec["dones"], dtype=bool),
+    )

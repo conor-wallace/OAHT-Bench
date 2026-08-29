@@ -25,10 +25,10 @@ Flat layout (Flashbax experience is ``(B, T, …)``; ``B=1`` for one stream):
 
 ``N`` is the total number of transitions. Collection is already ragged -- each
 episode is real steps only -- so :func:`write_vault` concatenates them straight
-into the buffer; padding never exists on the write side. It is a *read-side*
-reconstruction: :func:`read_vault` groups transitions by ``episode_id`` and pads
-back to a common length only because :func:`~oaht_bench.offline.dataset.make_windows`
-wants the padded :class:`EpisodeBatch`. Dataset-level metadata -- env, variant,
+into the buffer; padding never exists on the write side. :func:`read_vault` groups
+transitions by ``episode_id`` into the ragged :class:`EpisodeBatch`
+:func:`~oaht_bench.offline.dataset.make_windows` consumes; padding only ever
+reappears window-by-window inside ``make_windows``. Dataset-level metadata -- env, variant,
 population/matrix hashes, the roster manifest, ``ego_index`` -- rides in the
 Vault's own metadata, the small fixed-size part; per-episode labels are broadcast
 into the flat fields.
@@ -45,7 +45,7 @@ from pathlib import Path
 
 import numpy as np
 
-from oaht_bench.dataset.schema import EpisodeBatch
+from oaht_bench.dataset.schema import Episode, EpisodeBatch
 
 #: Bump when the flat field set or reconstruction changes in a way that makes an
 #: older vault unreadable. Written into the vault metadata.
@@ -63,7 +63,7 @@ def _json_safe(meta: dict) -> dict:
 
 
 def to_flat(
-    episodes: list[dict[str, np.ndarray]],
+    episodes: list[Episode],
     member_ids,
     *,
     ego_index: int,
@@ -71,7 +71,7 @@ def to_flat(
 ) -> tuple[dict[str, np.ndarray], dict]:
     """Concatenate collected episodes into flat transitions for a vault write.
 
-    ``episodes`` are the ragged per-episode dicts
+    ``episodes`` are the ragged :class:`~oaht_bench.dataset.schema.Episode`\\ s
     :func:`~oaht_bench.dataset.construction.collect.collect_episode` returns -- real
     steps only, so there is nothing to drop; ``episode_id`` records which episode
     each transition came from. ``member_ids`` is ``(num_episodes, num_agents)``.
@@ -83,14 +83,14 @@ def to_flat(
     per_episode_eps = meta.get("ego_response_quality")
 
     obs, acts, rews, avail, mem, term, epid, erq = [], [], [], [], [], [], [], []
-    for ep, e in enumerate(episodes):
-        n = int(np.asarray(e["dones"]).shape[0])
+    for ep, episode in enumerate(episodes):
+        n = episode.length
         # (agent, T, …) -> (T, agent, …): one transition per row, agent axis kept.
-        obs.append(np.asarray(e["obs"]).transpose(1, 0, 2))
-        acts.append(np.asarray(e["actions"]).transpose(1, 0))
-        rews.append(np.asarray(e["rewards"]).transpose(1, 0))
-        avail.append(np.asarray(e["avail_actions"]).transpose(1, 0, 2))
-        term.append(np.asarray(e["dones"]))
+        obs.append(np.asarray(episode.obs).transpose(1, 0, 2))
+        acts.append(np.asarray(episode.actions).transpose(1, 0))
+        rews.append(np.asarray(episode.rewards).transpose(1, 0))
+        avail.append(np.asarray(episode.avail_actions).transpose(1, 0, 2))
+        term.append(np.asarray(episode.dones))
         epid.append(np.full(n, ep, dtype=np.int32))
         mem.append(np.broadcast_to(member_ids[ep], (n, num_agents)))
         if per_episode_eps is not None:
@@ -137,7 +137,7 @@ def _split_dir(vault_dir: Path, variant: str | None) -> tuple[str, str, str]:
 
 
 def write_vault(
-    episodes: list[dict[str, np.ndarray]],
+    episodes: list[Episode],
     member_ids,
     vault_dir: str | Path,
     *,
@@ -146,8 +146,9 @@ def write_vault(
 ) -> Path:
     """Write collected ``episodes`` to a Flashbax Vault at ``vault_dir/<variant>/``.
 
-    ``episodes`` are the ragged per-episode dicts from collection and ``member_ids``
-    is ``(num_episodes, num_agents)``; nothing is padded. ``vault_dir`` is the
+    ``episodes`` are the ragged :class:`~oaht_bench.dataset.schema.Episode`\\ s from
+    collection and ``member_ids`` is ``(num_episodes, num_agents)``; nothing is
+    padded. ``vault_dir`` is the
     ``<name>.vlt`` root and the variant (from ``meta``) becomes the sub-directory,
     so ``expert``/``mixed``/``br_vs_worst`` collections of one environment can live
     side by side. Returns the vault root.
@@ -175,13 +176,12 @@ def write_vault(
 
 
 def read_vault(vault_dir: str | Path, *, variant: str | None = None) -> EpisodeBatch:
-    """Reconstruct the padded :class:`EpisodeBatch` from a vault.
+    """Reconstruct the ragged :class:`EpisodeBatch` from a vault.
 
-    Re-groups the flat transitions by ``episode_id``, pads each episode back to a
-    common length with zeros, and restores the ``valid`` mask and ``meta`` -- the
-    read-side reconstruction :func:`~oaht_bench.offline.dataset.make_windows`
-    consumes. ``variant`` selects the sub-directory; if omitted and the vault holds
-    exactly one, that one is used.
+    Re-groups the flat transitions by ``episode_id`` into one variable-length array
+    per episode and restores ``meta`` -- the read-side view
+    :func:`~oaht_bench.offline.dataset.make_windows` consumes. ``variant`` selects
+    the sub-directory; if omitted and the vault holds exactly one, that one is used.
     """
     from flashbax.vault import Vault
 
@@ -202,37 +202,28 @@ def read_vault(vault_dir: str | Path, *, variant: str | None = None) -> EpisodeB
     meta = dict(vault._metadata)  # flashbax adds structure_* keys; we want ours
 
     ego_index = int(meta["ego_index"])
-    num_agents = int(meta["num_agents"])
     batch_meta = dict(meta["episode_batch_meta"])
 
     epid = exp["episode_id"]
     episodes = [int(e) for e in np.unique(epid)]
-    lengths = {ep: int((epid == ep).sum()) for ep in episodes}
-    max_len = max(lengths.values())
 
-    def pad_field(arr_per_ep, trailing):
-        """Stack episodes into ``(E, T, *trailing)``, zero-padded to ``max_len``."""
-        out = np.zeros((len(episodes), max_len, *trailing), dtype=arr_per_ep[0].dtype)
-        for i, a in enumerate(arr_per_ep):
-            out[i, : a.shape[0]] = a
-        return out
-
-    # Regroup contiguous transitions per episode, preserving order.
-    def per_ep(field):
-        return [exp[field][epid == ep] for ep in episodes]
-
-    obs_ep = per_ep("observations")
-    obs = pad_field(obs_ep, obs_ep[0].shape[1:]).transpose(0, 2, 1, 3)  # -> (E, A, T, obs)
-    acts = pad_field(per_ep("actions"), (num_agents,)).transpose(0, 2, 1)
-    rews = pad_field(per_ep("rewards"), (num_agents,)).transpose(0, 2, 1)
-    avail_ep = per_ep("avail_actions")
-    avail = pad_field(avail_ep, avail_ep[0].shape[1:]).transpose(0, 2, 1, 3)
-    dones = pad_field(per_ep("terminals"), ())
-    valid = np.zeros((len(episodes), max_len), dtype=bool)
-    for i, ep in enumerate(episodes):
-        valid[i, : lengths[ep]] = True
-    # member_ids is per-episode: take it off any (the first) transition.
-    member_ids = np.stack([exp["member_ids"][epid == ep][0] for ep in episodes])
+    # Regroup the flat transitions per episode. The store is transition-major with
+    # the agent axis kept, ``(N, agent, …)``; transpose back to each Episode's
+    # ``(agent, T_ep, …)`` layout.
+    out_episodes, member_ids = [], []
+    for ep in episodes:
+        m = epid == ep
+        out_episodes.append(
+            Episode(
+                obs=exp["observations"][m].transpose(1, 0, 2).astype(np.float32),
+                actions=exp["actions"][m].transpose(1, 0).astype(np.int64),
+                rewards=exp["rewards"][m].transpose(1, 0).astype(np.float32),
+                avail_actions=exp["avail_actions"][m].transpose(1, 0, 2).astype(np.float32),
+                dones=exp["terminals"][m].astype(bool),
+            )
+        )
+        # member_ids is per-episode: take it off any (the first) transition.
+        member_ids.append(exp["member_ids"][m][0])
 
     if "ego_response_quality" in exp:
         batch_meta["ego_response_quality"] = [
@@ -240,13 +231,8 @@ def read_vault(vault_dir: str | Path, *, variant: str | None = None) -> EpisodeB
         ]
 
     return EpisodeBatch(
-        obs=obs.astype(np.float32),
-        actions=acts.astype(np.int64),
-        rewards=rews.astype(np.float32),
-        dones=dones.astype(bool),
-        valid=valid,
-        avail_actions=avail.astype(np.float32),
-        member_ids=member_ids,
+        episodes=out_episodes,
+        member_ids=np.stack(member_ids),
         ego_index=ego_index,
         meta=batch_meta,
     )

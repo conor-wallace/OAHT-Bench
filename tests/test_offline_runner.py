@@ -14,7 +14,7 @@ import pytest
 
 from oaht_bench.configs import get_preset
 from oaht_bench.configs.job import OfflineTrainingConfig, TrainingJob
-from oaht_bench.dataset.schema import EpisodeBatch
+from oaht_bench.dataset.schema import Episode, EpisodeBatch
 from oaht_bench.dataset.vault import read_vault, write_vault
 
 
@@ -23,14 +23,13 @@ def _dataset(tmp_path: Path, n_ep=8, T=14, obs_dim=6, teammates=(0, 1, 2, 3)) ->
     rng = np.random.default_rng(0)
     member_ids = np.array([[0, teammates[i % len(teammates)]] for i in range(n_ep)])
     episodes = [
-        {
-            "obs": rng.normal(size=(2, T, obs_dim)).astype(np.float32),
-            "actions": rng.integers(0, 6, size=(2, T)),
-            "rewards": rng.normal(size=(2, T)).astype(np.float32),
-            "avail_actions": np.ones((2, T, 6), dtype=np.float32),
-            "dones": np.zeros(T, dtype=bool),
-            "valid": np.ones(T, dtype=bool),
-        }
+        Episode(
+            obs=rng.normal(size=(2, T, obs_dim)).astype(np.float32),
+            actions=rng.integers(0, 6, size=(2, T)),
+            rewards=rng.normal(size=(2, T)).astype(np.float32),
+            avail_actions=np.ones((2, T, 6), dtype=np.float32),
+            dones=np.zeros(T, dtype=bool),
+        )
         for _ in range(n_ep)
     ]
     return write_vault(
@@ -112,16 +111,21 @@ def test_pct_bc_filters_to_the_top_quantile_of_episodes_by_return(tmp_path):
     from oaht_bench.offline.pct_bc import _filter_by_return
 
     n_ep, T, obs_dim = 4, 6, 3
-    rewards = np.zeros((n_ep, 2, T), dtype=np.float32)
+    episodes = []
     for ep in range(n_ep):
-        rewards[ep, 0] = float(ep)  # episode ep's ego return is exactly ep
+        r = np.zeros((2, T), dtype=np.float32)
+        r[0] = float(ep) / T  # episode ep's ego return sums to exactly ep
+        episodes.append(
+            Episode(
+                obs=np.zeros((2, T, obs_dim), dtype=np.float32),
+                actions=np.zeros((2, T), dtype=np.int32),
+                rewards=r,
+                avail_actions=np.ones((2, T, 4), dtype=np.float32),
+                dones=np.zeros(T, dtype=bool),
+            )
+        )
     batch = EpisodeBatch(
-        obs=np.zeros((n_ep, 2, T, obs_dim), dtype=np.float32),
-        actions=np.zeros((n_ep, 2, T), dtype=np.int32),
-        rewards=rewards,
-        dones=np.zeros((n_ep, T), dtype=bool),
-        valid=np.ones((n_ep, T), dtype=bool),
-        avail_actions=np.ones((n_ep, 2, T, 4), dtype=np.float32),
+        episodes=episodes,
         member_ids=np.zeros((n_ep, 2), dtype=np.int32),
         ego_index=0,
         meta={"generator": "test"},

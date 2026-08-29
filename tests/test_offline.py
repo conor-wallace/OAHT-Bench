@@ -29,19 +29,25 @@ from oaht_bench.offline import (
 
 
 def _windows(n_ep=4, T=12, obs_dim=5, n_agents=2, seed=0):
-    from oaht_bench.dataset.schema import EpisodeBatch
+    from oaht_bench.dataset.schema import Episode, EpisodeBatch
 
     rng = np.random.default_rng(seed)
-    valid = np.ones((n_ep, T), dtype=bool)
-    valid[:, -3:] = False  # padding, so masking is exercised
+    # Ragged: episode lengths vary (all >= the context length of 6, as they were
+    # before this became a list of variable-length episodes).
+    lengths = [T - (i % 4) for i in range(n_ep)]
+    episodes = [
+        Episode(
+            obs=rng.normal(size=(n_agents, L, obs_dim)).astype(np.float32),
+            actions=rng.integers(0, 6, size=(n_agents, L)),
+            rewards=rng.normal(size=(n_agents, L)).astype(np.float32),
+            avail_actions=np.ones((n_agents, L, 6), dtype=np.float32),
+            dones=np.zeros(L, dtype=bool),
+        )
+        for L in lengths
+    ]
     return make_windows(
         EpisodeBatch(
-            obs=rng.normal(size=(n_ep, n_agents, T, obs_dim)).astype(np.float32),
-            actions=rng.integers(0, 6, size=(n_ep, n_agents, T)),
-            rewards=rng.normal(size=(n_ep, n_agents, T)).astype(np.float32),
-            dones=np.zeros((n_ep, T), dtype=bool),
-            valid=valid,
-            avail_actions=np.ones((n_ep, n_agents, T, 6), dtype=np.float32),
+            episodes=episodes,
             member_ids=np.array([[0, i % 2] for i in range(n_ep)]),
             ego_index=0,
             meta={},

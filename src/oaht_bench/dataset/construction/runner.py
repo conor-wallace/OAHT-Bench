@@ -21,6 +21,7 @@ from oaht_bench.configs import load_job, save_job
 from oaht_bench.configs.job import DatasetCollectionJob
 from oaht_bench.dataset.construction.collect import collect_episode
 from oaht_bench.dataset.construction.epsilon_sampler import EPSILON_TARGETS, load_pooled, plan_for_variant
+from oaht_bench.dataset.schema import Episode
 from oaht_bench.dataset.vault import write_vault
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper
@@ -137,19 +138,17 @@ def run(job: DatasetCollectionJob) -> Path:
     return run_dir
 
 
-def _summary(episodes: list[dict], member_ids: np.ndarray, *, ego_index: int) -> dict:
+def _summary(episodes: list[Episode], member_ids: np.ndarray, *, ego_index: int) -> dict:
     """Describe a collection from the ragged episodes, without padding them."""
-    lengths = [int(np.asarray(e["dones"]).shape[0]) for e in episodes]
-    ego_returns = [float(np.asarray(e["rewards"])[ego_index].sum()) for e in episodes]
     return {
         "episodes": len(episodes),
         "agents": int(np.asarray(member_ids).shape[1]),
-        "mean_length": float(np.mean(lengths)),
-        "mean_ego_return": float(np.mean(ego_returns)),
+        "mean_length": float(np.mean([e.length for e in episodes])),
+        "mean_ego_return": float(np.mean([e.returns()[ego_index] for e in episodes])),
     }
 
 
-def _collect_single(job: DatasetCollectionJob, env) -> tuple[list[dict], np.ndarray, dict]:
+def _collect_single(job: DatasetCollectionJob, env) -> tuple[list[Episode], np.ndarray, dict]:
     """The original path: seat one generator's designed pairing per episode.
 
     ``population_path`` is a single run directory. Only 'expert' is implemented
@@ -229,7 +228,7 @@ def _pooled_matrix_hash(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
 
 
-def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[list[dict], np.ndarray, dict]:
+def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[list[Episode], np.ndarray, dict]:
     """Pooled mode: seat the ε sampler's cross-population plan (§3, dataset_design).
 
     The released members of every ``population_path`` are flattened into one

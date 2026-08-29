@@ -6,64 +6,37 @@ transitions and :func:`read_vault` reconstructs the padded ``EpisodeBatch`` that
 
 import numpy as np
 
-from oaht_bench.dataset.schema import EpisodeBatch
+from oaht_bench.dataset.schema import Episode, EpisodeBatch
 from oaht_bench.dataset.vault import read_vault, to_flat, write_vault
 
 
 def _episodes(*, lengths=(3, 5, 2), num_agents=2, obs_dim=4, num_actions=5, meta=None):
-    """Ragged episodes as collect_episode returns them: real steps only, (agent, T, …)."""
+    """Ragged Episodes as collect_episode returns them: real steps only, (agent, T, …)."""
     rng = np.random.default_rng(0)
-    episodes = []
-    for n in lengths:
-        episodes.append(
-            {
-                "obs": rng.normal(size=(num_agents, n, obs_dim)).astype(np.float32),
-                "actions": rng.integers(0, num_actions, size=(num_agents, n)),
-                "rewards": rng.normal(size=(num_agents, n)).astype(np.float32),
-                "avail_actions": rng.integers(0, 2, size=(num_agents, n, num_actions)).astype(
-                    np.float32
-                ),
-                "dones": np.arange(n) == (n - 1),  # terminate on the last real step
-                "valid": np.ones(n, dtype=bool),
-            }
+    episodes = [
+        Episode(
+            obs=rng.normal(size=(num_agents, n, obs_dim)).astype(np.float32),
+            actions=rng.integers(0, num_actions, size=(num_agents, n)),
+            rewards=rng.normal(size=(num_agents, n)).astype(np.float32),
+            avail_actions=rng.integers(0, 2, size=(num_agents, n, num_actions)).astype(np.float32),
+            dones=np.arange(n) == (n - 1),  # terminate on the last real step
         )
+        for n in lengths
+    ]
     member_ids = rng.integers(0, 5, size=(len(lengths), num_agents))
     return episodes, member_ids, meta or {"variant": "expert", "env": "lbf_12x12"}
 
 
-def _expected_padded(episodes, member_ids, meta) -> EpisodeBatch:
-    """Independently pad the ragged episodes -- what read_vault should reconstruct."""
-    e_count = len(episodes)
-    a = member_ids.shape[1]
-    t = max(ep["dones"].shape[0] for ep in episodes)
-    obs_dim = episodes[0]["obs"].shape[-1]
-    nact = episodes[0]["avail_actions"].shape[-1]
-    obs = np.zeros((e_count, a, t, obs_dim), np.float32)
-    acts = np.zeros((e_count, a, t), np.int64)
-    rews = np.zeros((e_count, a, t), np.float32)
-    avail = np.zeros((e_count, a, t, nact), np.float32)
-    dones = np.zeros((e_count, t), bool)
-    valid = np.zeros((e_count, t), bool)
-    for i, ep in enumerate(episodes):
-        n = ep["dones"].shape[0]
-        obs[i, :, :n] = ep["obs"]
-        acts[i, :, :n] = ep["actions"]
-        rews[i, :, :n] = ep["rewards"]
-        avail[i, :, :n] = ep["avail_actions"]
-        dones[i, :n] = ep["dones"]
-        valid[i, :n] = True
-    return EpisodeBatch(
-        obs=obs, actions=acts, rewards=rews, dones=dones, valid=valid,
-        avail_actions=avail, member_ids=member_ids, ego_index=0, meta=meta,
-    )
-
-
-def _assert_equal(a: EpisodeBatch, b: EpisodeBatch):
-    assert a.ego_index == b.ego_index
-    for f in ("obs", "actions", "rewards", "dones", "valid", "avail_actions", "member_ids"):
-        np.testing.assert_array_equal(
-            np.asarray(getattr(a, f)), np.asarray(getattr(b, f)), err_msg=f
-        )
+def _assert_matches(episodes, member_ids, batch: EpisodeBatch):
+    """The read-back ragged batch equals the source episodes, per episode."""
+    assert batch.num_episodes == len(episodes)
+    np.testing.assert_array_equal(batch.member_ids, member_ids)
+    for ep, e in enumerate(episodes):
+        for f in ("obs", "actions", "rewards", "avail_actions", "dones"):
+            np.testing.assert_array_equal(
+                np.asarray(getattr(batch.episodes[ep], f)), np.asarray(getattr(e, f)),
+                err_msg=f"{f}[{ep}]",
+            )
 
 
 def test_to_flat_concatenates_ragged_and_marks_boundaries():
@@ -78,11 +51,13 @@ def test_to_flat_concatenates_ragged_and_marks_boundaries():
     assert "ego_response_quality" not in exp  # none in this batch's meta
 
 
-def test_round_trip_reconstructs_the_padded_batch(tmp_path):
+def test_round_trip_reconstructs_the_ragged_batch(tmp_path):
     episodes, member_ids, meta = _episodes(lengths=(3, 5, 2))
     write_vault(episodes, member_ids, tmp_path / "dataset.vlt", ego_index=0, meta=meta)
     back = read_vault(tmp_path / "dataset.vlt", variant="expert")
-    _assert_equal(_expected_padded(episodes, member_ids, meta), back)
+    # Variable-length episodes come back with their own lengths, not padded.
+    assert list(back.episode_lengths()) == [3, 5, 2]
+    _assert_matches(episodes, member_ids, back)
     assert back.meta["env"] == "lbf_12x12"
     assert back.meta["variant"] == "expert"
 
@@ -126,4 +101,4 @@ def test_read_vault_autodiscovers_a_single_variant(tmp_path):
     episodes, member_ids, meta = _episodes(meta={"generator": "test"})  # no 'variant' -> uid 'data'
     write_vault(episodes, member_ids, tmp_path / "dataset.vlt", ego_index=0, meta=meta)
     back = read_vault(tmp_path / "dataset.vlt")  # no variant= given
-    _assert_equal(_expected_padded(episodes, member_ids, meta), back)
+    _assert_matches(episodes, member_ids, back)
