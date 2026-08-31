@@ -138,7 +138,9 @@ class PctBcPolicy(BaseAhtPolicy):
 
     def prepare(self, dataset, logger, *, rng, np_rng) -> None:
         super().prepare(dataset, logger, rng=rng, np_rng=np_rng)
-        self._filtered_idx = _filter_by_return(self.windows, self.config.network.top_return_quantile)
+        self._filtered_idx = _filter_by_return(
+            self.dataset.windows, self.config.network.top_return_quantile
+        )
         if len(self._filtered_idx) < self.config.stage2_batch_size:
             raise ValueError(
                 f"top_return_quantile={self.config.network.top_return_quantile} keeps "
@@ -154,7 +156,7 @@ class PctBcPolicy(BaseAhtPolicy):
         idx = self.np_rng.choice(
             self._filtered_idx, size=self.config.stage2_batch_size, replace=False
         )
-        return to_jax({k: getattr(self.windows, k)[idx] for k in _BATCH_KEYS})
+        return to_jax({k: getattr(self.dataset.windows, k)[idx] for k in _BATCH_KEYS})
 
     def train_stage_1(self):
         """No representation to learn — %BC's entire point is having none."""

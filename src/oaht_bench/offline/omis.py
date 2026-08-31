@@ -270,7 +270,7 @@ class OmisPolicy(BaseAhtPolicy):
         self.actor = OmisActor(action_dim=net.action_dim, **common)
 
     def _sample_batch(self, _step):
-        return sample_window_batch(self.windows, self.np_rng, self.config.stage2_batch_size)
+        return sample_window_batch(self.dataset.windows, self.np_rng, self.config.stage2_batch_size)
 
     def train_stage_1(self):
         init_batch = self._sample_batch(0)

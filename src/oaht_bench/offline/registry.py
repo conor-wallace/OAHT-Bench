@@ -43,13 +43,12 @@ class BaseAhtPolicy:
     def prepare(self, dataset, logger, *, rng, np_rng) -> None:
         """Inject the training data and infrastructure used by both stages.
 
-        Takes the whole :class:`~oaht_bench.dataset.dataset.Dataset`; the stages
-        read ``self.windows`` and draw structured minibatches with ``self.index``
-        via the samplers in :mod:`oaht_bench.dataset.sampler`.
+        Takes the whole :class:`~oaht_bench.dataset.dataset.Dataset`. The stages
+        draw from it directly -- ``self.dataset.windows`` / ``self.dataset.index``
+        fed to the samplers in :mod:`oaht_bench.dataset.sampler` -- rather than the
+        policy holding its own copies.
         """
         self.dataset = dataset
-        self.windows = dataset.windows
-        self.index = dataset.index
         self.logger = logger
         self.rng = rng
         self.np_rng = np_rng

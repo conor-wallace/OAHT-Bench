@@ -413,8 +413,8 @@ class TaoPolicy(BaseAhtPolicy):
     def _stage1_batch(self, _step):
         return to_jax(
             sample_stage1(
-                self.windows,
-                self.index,
+                self.dataset.windows,
+                self.dataset.index,
                 self.np_rng,
                 teammates_per_batch=self.config.teammates_per_batch,
                 windows_per_teammate=self.config.windows_per_teammate,
@@ -424,8 +424,8 @@ class TaoPolicy(BaseAhtPolicy):
     def _stage2_batch(self, _step):
         return to_jax(
             sample_stage2(
-                self.windows,
-                self.index,
+                self.dataset.windows,
+                self.dataset.index,
                 self.np_rng,
                 batch_size=self.config.stage2_batch_size,
                 context_trajectories=self.config.context_trajectories,
@@ -522,15 +522,15 @@ class TaoPolicy(BaseAhtPolicy):
         hidden = self.config.network.hidden_dim
         tokens = self.encoder.apply(
             encoder_params,
-            jnp.asarray(self.windows.mate_next_obs),
-            jnp.asarray(self.windows.mate_actions),
-            jnp.asarray(self.windows.mate_rewards),
-            mask=jnp.asarray(self.windows.mask),
-            timesteps=jnp.asarray(self.windows.timesteps),
+            jnp.asarray(self.dataset.windows.mate_next_obs),
+            jnp.asarray(self.dataset.windows.mate_actions),
+            jnp.asarray(self.dataset.windows.mate_rewards),
+            mask=jnp.asarray(self.dataset.windows.mask),
+            timesteps=jnp.asarray(self.dataset.windows.timesteps),
             train=False,
         )
         context = tokens[:c].reshape(1, -1, hidden)
-        context_mask = jnp.asarray(self.windows.mask)[:c].reshape(1, -1)
+        context_mask = jnp.asarray(self.dataset.windows.mask)[:c].reshape(1, -1)
         return context, context_mask
 
     def act(self, params, rtg, obs, actions, *, timesteps, mask):
