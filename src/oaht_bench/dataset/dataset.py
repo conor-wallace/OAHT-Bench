@@ -1,10 +1,17 @@
-"""Turn a collected :class:`~oaht_bench.dataset.schema.EpisodeBatch` into training windows.
+"""The offline training :class:`Dataset`: a collected
+:class:`~oaht_bench.dataset.schema.EpisodeBatch` processed into fixed-length
+:class:`Windows`.
 
 Every trajectory-view baseline consumes the same tensors — an ego stream to
 predict from and a teammate stream to model — so the split happens once here
 rather than inside each method. What differs between methods is what they *do*
 with the teammate stream: LIAM reconstructs it from the ego embeddings, TAO
 encodes it into a policy embedding and cross-attends.
+
+JAX has no ``Dataset`` base class like PyTorch's ``torch.utils.data.Dataset`` --
+the ecosystem loads data with separate libraries and keeps model code purely
+functional -- so :class:`Dataset` here is a small container of our own: it holds
+the loaded batch, does the windowing once, and exposes what training reads.
 
 Return-to-go is computed rather than stored, because it is a function of the
 rewards already in the artifact and storing it would let the two disagree.
@@ -13,10 +20,12 @@ rewards already in the artifact and storing it would let the two disagree.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
 from oaht_bench.dataset.schema import EpisodeBatch
+from oaht_bench.dataset.vault import read_vault
 
 
 @dataclass(frozen=True)
@@ -108,6 +117,83 @@ class Windows:
         return int(self.ego_obs.shape[1])
 
 
+#: Per-window fields ``__getitem__`` returns for one sample (``norm`` is
+#: dataset-level, not per window).
+_WINDOW_FIELDS = (
+    "ego_obs", "ego_actions", "ego_avail", "ego_rtg",
+    "mate_obs", "mate_next_obs", "mate_actions", "mate_avail", "mate_rewards",
+    "timesteps", "mask", "episode_id", "episode_return", "teammate_id",
+)
+
+
+class Dataset:
+    """The offline training dataset, in the shape PyTorch's ``Dataset`` takes:
+    constructed from the path to the data, it reads the episodes off disk, windows
+    them, and applies the training transforms (return-to-go, observation
+    normalisation) -- so a baseline runner hands over a path and gets model-ready
+    tensors back.
+
+    It holds both the episode-level view (``batch``: metadata, action space, the
+    population to evaluate against) and the windowed view (``windows``). Indexing
+    yields one window (``__getitem__`` / ``__len__``); the two-stage baselines
+    instead read the whole ``windows`` pool through their samplers, which need
+    cross-window structure (a different trajectory of the same teammate, several
+    positives per anchor) that per-item access cannot express.
+    """
+
+    def __init__(
+        self,
+        vault_dir: str | Path,
+        *,
+        context_length: int,
+        stride: int = 1,
+        teammate_index: int | None = None,
+        normalize: bool = True,
+        variant: str | None = None,
+    ):
+        """Read the Flashbax Vault at ``vault_dir``, window it, and transform.
+
+        ``variant`` selects the sub-directory; if omitted and the vault holds
+        exactly one, that one is used (see :func:`~oaht_bench.dataset.vault.read_vault`).
+        """
+        self.batch = read_vault(vault_dir, variant=variant)
+        self.windows = _build_windows(
+            self.batch,
+            context_length=context_length,
+            stride=stride,
+            teammate_index=teammate_index,
+            normalize=normalize,
+        )
+
+    def __len__(self) -> int:
+        return len(self.windows)
+
+    def __getitem__(self, i: int) -> dict[str, np.ndarray]:
+        """One window as a dict of its per-window arrays."""
+        return {f: getattr(self.windows, f)[i] for f in _WINDOW_FIELDS}
+
+    @property
+    def obs_dim(self) -> int:
+        return self.windows.obs_dim
+
+    @property
+    def context_length(self) -> int:
+        return self.windows.context_length
+
+    @property
+    def norm(self) -> Normalization | None:
+        return self.windows.norm
+
+    @property
+    def action_dim(self) -> int:
+        """Size of the action space, from the collected availability masks."""
+        return int(self.batch.episodes[0].avail_actions.shape[-1])
+
+    @property
+    def meta(self) -> dict:
+        return self.batch.meta
+
+
 def return_to_go(rewards: np.ndarray, valid: np.ndarray) -> np.ndarray:
     """Reverse-cumulative reward, zeroed past the end of the episode.
 
@@ -119,7 +205,7 @@ def return_to_go(rewards: np.ndarray, valid: np.ndarray) -> np.ndarray:
     return np.flip(np.cumsum(np.flip(r, axis=-1), axis=-1), axis=-1)
 
 
-def make_windows(
+def _build_windows(
     batch: EpisodeBatch,
     *,
     context_length: int,

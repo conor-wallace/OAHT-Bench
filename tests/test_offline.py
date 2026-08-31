@@ -13,6 +13,7 @@ import numpy as np
 import optax
 import pytest
 
+from oaht_bench.dataset.dataset import _build_windows, return_to_go
 from oaht_bench.offline import (
     AncillaryActionDecoder,
     DecisionTransformer,
@@ -22,8 +23,6 @@ from oaht_bench.offline import (
     OpponentPolicyEncoder,
     TaoNetwork,
     liam_reconstruction_loss,
-    make_windows,
-    return_to_go,
     supervised_contrastive,
 )
 
@@ -45,7 +44,7 @@ def _windows(n_ep=4, T=12, obs_dim=5, n_agents=2, seed=0):
         )
         for L in lengths
     ]
-    return make_windows(
+    return _build_windows(
         EpisodeBatch(
             episodes=episodes,
             member_ids=np.array([[0, i % 2] for i in range(n_ep)]),
@@ -358,7 +357,7 @@ def _tao_setup(w):
     """
     import jax as _jax
 
-    from oaht_bench.offline import TeammateIndex, sample_stage2
+    from oaht_bench.dataset.sampler import TeammateIndex, sample_stage2
 
     rng = _jax.random.PRNGKey(0)
     idx = TeammateIndex.build(w)
@@ -473,7 +472,7 @@ def test_available_actions_are_enforced_everywhere_the_data_enforces_them():
     """
     import inspect
 
-    from oaht_bench.dataset import windows as ds
+    from oaht_bench.dataset import dataset as ds
     from oaht_bench.offline import evaluate as ev
     from oaht_bench.offline import tao as tao_mod
     from oaht_bench.offline.liam import model as liam_mod
@@ -482,7 +481,7 @@ def test_available_actions_are_enforced_everywhere_the_data_enforces_them():
     w = _windows()
     assert w.ego_avail.shape == (len(w), w.context_length, 6)
     assert w.mate_avail.shape == w.ego_avail.shape
-    assert "avail_actions" in inspect.getsource(ds.make_windows)
+    assert "avail_actions" in inspect.getsource(ds._build_windows)
 
     # every cross-entropy is over masked logits
     assert "mask_logits" in inspect.getsource(liam_mod.liam_reconstruction_loss)

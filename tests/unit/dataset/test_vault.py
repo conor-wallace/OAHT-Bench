@@ -1,6 +1,6 @@
 """Flashbax Vault round-trip. Collection is ragged; the vault stores flat
 transitions and :func:`read_vault` reconstructs the padded ``EpisodeBatch`` that
-``make_windows`` consumes. Padding is a read-side artifact, never stored
+``Dataset`` consumes. Padding is a read-side artifact, never stored
 (``docs/dataset_design.md`` §2).
 """
 

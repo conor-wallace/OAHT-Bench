@@ -39,7 +39,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from oaht_bench.dataset.windows import Windows
+from oaht_bench.dataset.dataset import Windows
 from oaht_bench.offline.backbone import DecisionTransformer
 from oaht_bench.offline.registry import BaseAhtPolicy
 from oaht_bench.offline.utils import mask_logits, masked_accuracy, to_jax

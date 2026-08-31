@@ -52,8 +52,9 @@ def run(job: TrainingJob) -> Path:
 
     from oaht_bench.common.logging import RunLogger, nonfatal
     from oaht_bench.configs import save_job
-    from oaht_bench.dataset.vault import read_vault
-    from oaht_bench.offline import TeammateIndex, get_policy, make_windows
+    from oaht_bench.dataset.dataset import Dataset
+    from oaht_bench.dataset.sampler import TeammateIndex
+    from oaht_bench.offline import get_policy
 
     if job.baseline not in SUPPORTED:
         raise NotImplementedError(
@@ -75,15 +76,15 @@ def run(job: TrainingJob) -> Path:
     save_job(job, run_dir / "job.json", minimal=False)
 
     cfg = job.offline
-    batch = read_vault(Path(job.dataset_path))
-    windows = make_windows(
-        batch,
+    dataset = Dataset(
+        job.dataset_path,
         context_length=cfg.context_length,
         stride=cfg.stride,
         normalize=cfg.normalize_observations,
     )
+    batch, windows = dataset.batch, dataset.windows
     index = TeammateIndex.build(windows)
-    action_dim = int(batch.episodes[0].avail_actions.shape[-1])
+    action_dim = dataset.action_dim
     log.info(
         "dataset %s -> %d windows, %d teammates, obs_dim %d, action_dim %d",
         job.dataset_path,

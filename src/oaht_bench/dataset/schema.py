@@ -18,7 +18,7 @@ and the pipeline runs off either -- one ``Episode`` or a batch -- so nothing is
 ever padded to a rectangle. Neither is serialised: the on-disk store is a
 flat-transition Flashbax Vault (:mod:`oaht_bench.dataset.vault`), and
 :func:`~oaht_bench.dataset.vault.read_vault` rebuilds the batch from it. Padding
-only reappears window-by-window inside ``make_windows``.
+only reappears window-by-window inside ``Dataset``.
 """
 
 from __future__ import annotations

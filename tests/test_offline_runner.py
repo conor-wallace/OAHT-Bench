@@ -107,7 +107,7 @@ def test_pct_bc_filters_to_the_top_quantile_of_episodes_by_return(tmp_path):
     windows, and filtering is by episode, not by window, so a long episode's
     overlapping fragments cannot dominate the quantile.
     """
-    from oaht_bench.dataset.windows import make_windows
+    from oaht_bench.dataset.dataset import _build_windows
     from oaht_bench.offline.pct_bc import _filter_by_return
 
     n_ep, T, obs_dim = 4, 6, 3
@@ -130,7 +130,7 @@ def test_pct_bc_filters_to_the_top_quantile_of_episodes_by_return(tmp_path):
         ego_index=0,
         meta={"generator": "test"},
     )
-    windows = make_windows(batch, context_length=T, stride=T, normalize=False)
+    windows = _build_windows(batch, context_length=T, stride=T, normalize=False)
     assert set(np.unique(windows.episode_id)) == {0, 1, 2, 3}
 
     kept = _filter_by_return(windows, top_return_quantile=0.5)

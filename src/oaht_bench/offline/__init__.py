@@ -24,8 +24,6 @@ confederate (``final_params_br``), so for those two the data exists; FCP and
 CoMeDi have no best response and would need one trained.
 """
 
-from oaht_bench.dataset.sampler import TeammateIndex, sample_stage1, sample_stage2
-from oaht_bench.dataset.windows import Windows, make_windows, return_to_go
 from oaht_bench.offline.backbone import DecisionTransformer
 from oaht_bench.offline.liam import (
     LiamDecoder,
@@ -88,10 +86,6 @@ __all__ = [
     "pct_bc_loss",
     "TaoNetwork",
     "TaoPolicy",
-    "TeammateIndex",
-    "Windows",
-    "sample_stage1",
-    "sample_stage2",
     "embedding_loss",
     "supervised_contrastive",
     "tao_policy_loss",
@@ -103,6 +97,4 @@ __all__ = [
     "omis_actor_loss",
     "omis_representation_loss",
     "omis_search",
-    "make_windows",
-    "return_to_go",
 ]

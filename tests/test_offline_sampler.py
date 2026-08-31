@@ -10,8 +10,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from oaht_bench.dataset.dataset import _build_windows
+from oaht_bench.dataset.sampler import TeammateIndex, sample_stage1, sample_stage2
 from oaht_bench.dataset.schema import EpisodeBatch
-from oaht_bench.offline import TeammateIndex, make_windows, sample_stage1, sample_stage2
 
 
 def _windows(n_ep=8, T=16, obs_dim=5, teammates=(0, 1, 2, 3), seed=0):
@@ -30,7 +31,7 @@ def _windows(n_ep=8, T=16, obs_dim=5, teammates=(0, 1, 2, 3), seed=0):
         )
         for _ in range(n_ep)
     ]
-    return make_windows(
+    return _build_windows(
         EpisodeBatch(episodes=episodes, member_ids=member_ids, ego_index=0, meta={}),
         context_length=8,
         stride=4,
