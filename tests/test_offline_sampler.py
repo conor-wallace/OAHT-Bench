@@ -10,8 +10,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from oaht_bench.dataset.dataset import _build_windows
-from oaht_bench.dataset.sampler import TeammateIndex, sample_stage1, sample_stage2
+from oaht_bench.dataset.dataset import TeammateIndex, _build_windows
+from oaht_bench.dataset.sampler import sample_stage1, sample_stage2
 from oaht_bench.dataset.schema import EpisodeBatch
 
 

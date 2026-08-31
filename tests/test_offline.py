@@ -357,7 +357,8 @@ def _tao_setup(w):
     """
     import jax as _jax
 
-    from oaht_bench.dataset.sampler import TeammateIndex, sample_stage2
+    from oaht_bench.dataset.dataset import TeammateIndex
+    from oaht_bench.dataset.sampler import sample_stage2
 
     rng = _jax.random.PRNGKey(0)
     idx = TeammateIndex.build(w)

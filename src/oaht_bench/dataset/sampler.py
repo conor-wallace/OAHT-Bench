@@ -26,11 +26,9 @@ fix collection, which is the better fix and is tracked separately.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import numpy as np
 
-from oaht_bench.dataset.dataset import Windows
+from oaht_bench.dataset.dataset import TeammateIndex, Windows
 
 #: Keys a stage-1 batch carries for the anchor trajectory.
 _ANCHOR_KEYS = (
@@ -40,46 +38,6 @@ _ANCHOR_KEYS = (
     "mask",
     "timesteps",
 )
-
-
-@dataclass(frozen=True)
-class TeammateIndex:
-    """Window indices grouped by teammate, and by episode within teammate.
-
-    Built once per dataset. ``by_teammate`` answers "which windows show this
-    teammate"; ``episodes`` answers "which episodes did they come from", which is
-    what makes "a *different* trajectory" expressible — two overlapping windows
-    of one episode are not two trajectories.
-    """
-
-    by_teammate: dict[int, np.ndarray]
-    episodes: dict[int, np.ndarray]
-
-    @classmethod
-    def build(cls, windows: Windows) -> TeammateIndex:
-        by_teammate, episodes = {}, {}
-        for t in np.unique(windows.teammate_id):
-            idx = np.flatnonzero(windows.teammate_id == t)
-            by_teammate[int(t)] = idx
-            episodes[int(t)] = windows.episode_id[idx]
-        return cls(by_teammate=by_teammate, episodes=episodes)
-
-    @property
-    def teammates(self) -> list[int]:
-        return sorted(self.by_teammate)
-
-    def cross_trajectory(self, teammate: int, episode: int, rng: np.random.Generator) -> int:
-        """A window of the same teammate from a *different* episode.
-
-        Falls back to the same episode when the teammate appears in only one,
-        which the reference also permits — its ``index_gen`` can select the
-        anchor itself. Recorded rather than raised because with 1-4 episodes per
-        teammate the single-episode case is common, and dropping those teammates
-        would bias the batch toward the well-covered ones.
-        """
-        pool = self.by_teammate[teammate]
-        other = pool[self.episodes[teammate] != episode]
-        return int(rng.choice(other if other.size else pool))
 
 
 def _take(windows: Windows, idx: np.ndarray, keys, prefix: str = "") -> dict[str, np.ndarray]:

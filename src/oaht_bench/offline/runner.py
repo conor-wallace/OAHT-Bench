@@ -53,7 +53,6 @@ def run(job: TrainingJob) -> Path:
     from oaht_bench.common.logging import RunLogger, nonfatal
     from oaht_bench.configs import save_job
     from oaht_bench.dataset.dataset import Dataset
-    from oaht_bench.dataset.sampler import TeammateIndex
     from oaht_bench.offline import get_policy
 
     if job.baseline not in SUPPORTED:
@@ -82,15 +81,13 @@ def run(job: TrainingJob) -> Path:
         stride=cfg.stride,
         normalize=cfg.normalize_observations,
     )
-    batch, windows = dataset.batch, dataset.windows
-    index = TeammateIndex.build(windows)
     action_dim = dataset.action_dim
     log.info(
         "dataset %s -> %d windows, %d teammates, obs_dim %d, action_dim %d",
         job.dataset_path,
-        len(windows),
-        len(index.teammates),
-        windows.obs_dim,
+        len(dataset.windows),
+        len(dataset.index.teammates),
+        dataset.obs_dim,
         action_dim,
     )
 
@@ -105,10 +102,10 @@ def run(job: TrainingJob) -> Path:
         config=json.loads(job.canonical_json()),
         verbose=job.logging.verbose,
     ) as logger:
-        resolved = _resolve_dims(cfg, windows.obs_dim, action_dim)
+        resolved = _resolve_dims(cfg, dataset.obs_dim, action_dim)
         policy = get_policy(resolved)(resolved)
         policy.build_model()
-        policy.prepare(windows, index, logger, rng=rng, np_rng=np_rng)
+        policy.prepare(dataset, logger, rng=rng, np_rng=np_rng)
 
         log.info("stage 1: %d steps", cfg.stage1_steps)
         stage1_params = policy.train_stage_1()
@@ -122,7 +119,7 @@ def run(job: TrainingJob) -> Path:
         out: dict[str, Any] = {
             "stage1": stage1_params,
             "stage2": stage2_params,
-            "normalization": windows.norm,
+            "normalization": dataset.norm,
         }
         with (run_dir / "params.pkl").open("wb") as fh:
             pickle.dump(jax.device_get(out), fh)
@@ -131,7 +128,7 @@ def run(job: TrainingJob) -> Path:
         # opposed to predicting dataset actions. Non-fatal because parameters are
         # already on disk -- a failure here costs a metric, not the run.
         eval_scores, eval_skipped = None, None
-        if "population_run" not in batch.meta:
+        if "population_run" not in dataset.meta:
             # Distinguish "no population to play against" from "evaluation
             # crashed": both leave eval null, and only one is a bug.
             eval_skipped = (
@@ -142,7 +139,8 @@ def run(job: TrainingJob) -> Path:
         else:
             with nonfatal(f"{job.baseline} evaluation rollouts"):
                 eval_scores = _evaluate(
-                    job, batch, windows, stage1_params, stage2_params, action_dim, logger
+                    job, dataset.batch, dataset.windows,
+                    stage1_params, stage2_params, action_dim, logger,
                 )
 
         with nonfatal(f"{job.baseline} post-training summary"):
@@ -150,9 +148,9 @@ def run(job: TrainingJob) -> Path:
                 json.dumps(
                     {
                         "baseline": job.baseline,
-                        "windows": len(windows),
-                        "teammates": len(index.teammates),
-                        "obs_dim": windows.obs_dim,
+                        "windows": len(dataset.windows),
+                        "teammates": len(dataset.index.teammates),
+                        "obs_dim": dataset.obs_dim,
                         "action_dim": action_dim,
                         "stage1_steps": cfg.stage1_steps,
                         "stage2_steps": cfg.stage2_steps,

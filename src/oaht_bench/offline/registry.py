@@ -40,10 +40,16 @@ class BaseAhtPolicy:
         """Build the flax modules from ``self.config`` (including resolved dims)."""
         raise NotImplementedError
 
-    def prepare(self, windows, index, logger, *, rng, np_rng) -> None:
-        """Inject the training data and infrastructure used by both stages."""
-        self.windows = windows
-        self.index = index
+    def prepare(self, dataset, logger, *, rng, np_rng) -> None:
+        """Inject the training data and infrastructure used by both stages.
+
+        Takes the whole :class:`~oaht_bench.dataset.dataset.Dataset`; the stages
+        read ``self.windows`` and draw structured minibatches with ``self.index``
+        via the samplers in :mod:`oaht_bench.dataset.sampler`.
+        """
+        self.dataset = dataset
+        self.windows = dataset.windows
+        self.index = dataset.index
         self.logger = logger
         self.rng = rng
         self.np_rng = np_rng

@@ -117,28 +117,63 @@ class Windows:
         return int(self.ego_obs.shape[1])
 
 
-#: Per-window fields ``__getitem__`` returns for one sample (``norm`` is
-#: dataset-level, not per window).
-_WINDOW_FIELDS = (
-    "ego_obs", "ego_actions", "ego_avail", "ego_rtg",
-    "mate_obs", "mate_next_obs", "mate_actions", "mate_avail", "mate_rewards",
-    "timesteps", "mask", "episode_id", "episode_return", "teammate_id",
-)
+@dataclass(frozen=True)
+class TeammateIndex:
+    """Window indices grouped by teammate, and by episode within teammate.
+
+    Built once per dataset (a :class:`Dataset` owns one). ``by_teammate`` answers
+    "which windows show this teammate"; ``episodes`` answers "which episodes did
+    they come from", which is what makes "a *different* trajectory" expressible --
+    two overlapping windows of one episode are not two trajectories.
+    """
+
+    by_teammate: dict[int, np.ndarray]
+    episodes: dict[int, np.ndarray]
+
+    @classmethod
+    def build(cls, windows: Windows) -> TeammateIndex:
+        by_teammate, episodes = {}, {}
+        for t in np.unique(windows.teammate_id):
+            idx = np.flatnonzero(windows.teammate_id == t)
+            by_teammate[int(t)] = idx
+            episodes[int(t)] = windows.episode_id[idx]
+        return cls(by_teammate=by_teammate, episodes=episodes)
+
+    @property
+    def teammates(self) -> list[int]:
+        return sorted(self.by_teammate)
+
+    def cross_trajectory(self, teammate: int, episode: int, rng: np.random.Generator) -> int:
+        """A window of the same teammate from a *different* episode.
+
+        Falls back to the same episode when the teammate appears in only one,
+        which the reference also permits -- its ``index_gen`` can select the
+        anchor itself. Recorded rather than raised because with 1-4 episodes per
+        teammate the single-episode case is common, and dropping those teammates
+        would bias the batch toward the well-covered ones.
+        """
+        pool = self.by_teammate[teammate]
+        other = pool[self.episodes[teammate] != episode]
+        return int(rng.choice(other if other.size else pool))
 
 
 class Dataset:
-    """The offline training dataset, in the shape PyTorch's ``Dataset`` takes:
-    constructed from the path to the data, it reads the episodes off disk, windows
-    them, and applies the training transforms (return-to-go, observation
-    normalisation) -- so a baseline runner hands over a path and gets model-ready
-    tensors back.
+    """The offline training dataset: load and process only, in the spirit of
+    PyTorch's ``Dataset`` (data, not sampling).
 
-    It holds both the episode-level view (``batch``: metadata, action space, the
-    population to evaluate against) and the windowed view (``windows``). Indexing
-    yields one window (``__getitem__`` / ``__len__``); the two-stage baselines
-    instead read the whole ``windows`` pool through their samplers, which need
-    cross-window structure (a different trajectory of the same teammate, several
-    positives per anchor) that per-item access cannot express.
+    Constructed from the path to the data, it reads the episodes off disk, windows
+    them, applies the training transforms (return-to-go, observation
+    normalisation), and builds the :class:`TeammateIndex` the samplers need -- so a
+    baseline runner hands over a path and gets everything training reads. It holds
+    the episode-level view (``batch``: metadata, action space, the population to
+    evaluate against), the windowed view (``windows``), and their ``index``.
+
+    Drawing batches is deliberately *not* its job: the two-stage baselines read the
+    whole ``windows`` pool through the samplers in
+    :mod:`oaht_bench.dataset.sampler`, which need cross-window structure (a
+    different trajectory of the same teammate, several positives per anchor) that a
+    per-item ``__getitem__`` cannot express -- so there is no ``DataLoader`` here,
+    just this container and those samplers.
     """
 
     def __init__(
@@ -164,13 +199,7 @@ class Dataset:
             teammate_index=teammate_index,
             normalize=normalize,
         )
-
-    def __len__(self) -> int:
-        return len(self.windows)
-
-    def __getitem__(self, i: int) -> dict[str, np.ndarray]:
-        """One window as a dict of its per-window arrays."""
-        return {f: getattr(self.windows, f)[i] for f in _WINDOW_FIELDS}
+        self.index = TeammateIndex.build(self.windows)
 
     @property
     def obs_dim(self) -> int:
