@@ -4,7 +4,7 @@ import numpy as np
 import os
 from omegaconf import OmegaConf
 
-from oaht_bench.agents.initialize_agents import initialize_s5_agent, initialize_mlp_agent, \
+from oaht_bench.models.initialize_agents import initialize_s5_agent, initialize_mlp_agent, \
     initialize_rnn_agent, initialize_actor_with_double_critic, \
     initialize_actor_with_conditional_critic
 from oaht_bench.agents.lbf.agent_policy_wrappers import (

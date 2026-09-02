@@ -165,7 +165,7 @@ def _toy_traj(rng, T=4, E=3, obs_dim=6, act_dim=6):
 
 def _meta_grad(off_diag_factor, base_lr=0.05):
     """Meta-gradient of the diversity objective w.r.t. the manipulator, on a toy."""
-    from oaht_bench.agents.mlp_actor_critic_agent import MLPActorCriticPolicy
+    from oaht_bench.models.mlp_actor_critic_agent import MLPActorCriticPolicy
     from oaht_bench.teammate_gen.RPG import _manipulator_meta_loss
 
     rng = np.random.default_rng(7)

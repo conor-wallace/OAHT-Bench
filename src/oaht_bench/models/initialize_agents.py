@@ -1,11 +1,11 @@
 import jax
 
-from oaht_bench.agents.mlp_actor_critic_agent import MLPActorCriticPolicy, ActorWithDoubleCriticPolicy, \
+from oaht_bench.models.mlp_actor_critic_agent import MLPActorCriticPolicy, ActorWithDoubleCriticPolicy, \
     ActorWithConditionalCriticPolicy, PseudoActorWithDoubleCriticPolicy, \
     PseudoActorWithConditionalCriticPolicy
-from oaht_bench.agents.rnn_actor_critic_agent import RNNActorCriticPolicy, RNNActorWithConditionalCriticPolicy, \
+from oaht_bench.models.rnn_actor_critic_agent import RNNActorCriticPolicy, RNNActorWithConditionalCriticPolicy, \
     PseudoRNNActorWithConditionalCriticPolicy
-from oaht_bench.agents.s5_actor_critic_agent import S5ActorCriticPolicy
+from oaht_bench.models.s5_actor_critic_agent import S5ActorCriticPolicy
 
 def initialize_s5_agent(config, env, rng):
     """Initialize an S5 agent with the given config.

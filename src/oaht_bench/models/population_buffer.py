@@ -5,7 +5,7 @@ import jax.numpy as jnp
 from flax import struct
 import chex
 
-from oaht_bench.agents.population_interface import AgentPopulation
+from oaht_bench.models.population_interface import AgentPopulation
 
 
 def add_partners_to_buffer(population, buffer, params_batch):

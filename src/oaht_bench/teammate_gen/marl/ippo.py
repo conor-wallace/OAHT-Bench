@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import optax
 from flax.training.train_state import TrainState
 
-from oaht_bench.agents.initialize_agents import initialize_s5_agent, initialize_mlp_agent, \
+from oaht_bench.models.initialize_agents import initialize_s5_agent, initialize_mlp_agent, \
     initialize_rnn_agent, initialize_pseudo_actor_with_double_critic, initialize_pseudo_actor_with_conditional_critic, \
     initialize_pseudo_rnn_actor_with_conditional_critic
 from oaht_bench.common.plot_utils import get_stats, get_metric_names

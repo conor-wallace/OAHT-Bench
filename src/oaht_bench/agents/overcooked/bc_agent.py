@@ -19,7 +19,7 @@ from oaht_bench.envs import make_env
 from oaht_bench.envs.overcooked.overcooked_v1 import OvercookedV1
 from oaht_bench.envs.overcooked.overcooked_wrapper import OvercookedWrapper
 from oaht_bench.envs.overcooked.augmented_layouts import augmented_layouts
-from oaht_bench.agents.agent_interface import AgentPolicy
+from oaht_bench.models.agent_interface import AgentPolicy
 from oaht_bench.agents.overcooked.bc_featurizer import BCFeaturizer
 
 

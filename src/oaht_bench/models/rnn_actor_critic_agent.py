@@ -3,8 +3,8 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
-from oaht_bench.agents.agent_interface import AgentPolicy
-from oaht_bench.agents.rnn_actor_critic import (
+from oaht_bench.models.agent_interface import AgentPolicy
+from oaht_bench.models.rnn_actor_critic import (
     RNNActorCritic,
     RNNActorWithConditionalCritic,
     ScannedRNN,

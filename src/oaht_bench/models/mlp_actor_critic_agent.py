@@ -3,10 +3,10 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
-from oaht_bench.agents.agent_interface import AgentPolicy
-from oaht_bench.agents.mlp_actor_critic import ActorCritic
-from oaht_bench.agents.mlp_actor_critic import ActorWithDoubleCritic
-from oaht_bench.agents.mlp_actor_critic import ActorWithConditionalCritic
+from oaht_bench.models.agent_interface import AgentPolicy
+from oaht_bench.models.mlp_actor_critic import ActorCritic
+from oaht_bench.models.mlp_actor_critic import ActorWithDoubleCritic
+from oaht_bench.models.mlp_actor_critic import ActorWithConditionalCritic
 
 
 class MLPActorCriticPolicy(AgentPolicy):

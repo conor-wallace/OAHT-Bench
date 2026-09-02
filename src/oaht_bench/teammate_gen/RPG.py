@@ -39,13 +39,13 @@ import numpy as np
 import optax
 from jax.experimental import io_callback
 
-from oaht_bench.agents.mlp_actor_critic_agent import MLPActorCriticPolicy
-from oaht_bench.agents.population_interface import AgentPopulation
 from oaht_bench.common.logging import RunLogger, nonfatal
 from oaht_bench.common.save_load_utils import save_train_run
 from oaht_bench.configs.job import TeammateGenerationJob
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper
+from oaht_bench.models.mlp_actor_critic_agent import MLPActorCriticPolicy
+from oaht_bench.models.population_interface import AgentPopulation
 from oaht_bench.teammate_gen.runtime import RpgRuntime
 
 log = logging.getLogger(__name__)

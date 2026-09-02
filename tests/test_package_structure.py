@@ -43,6 +43,7 @@ def test_no_top_level_namespace_pollution(name: str):
     [
         "oaht_bench.configs",
         "oaht_bench.envs",
+        "oaht_bench.models",
         "oaht_bench.agents",
         "oaht_bench.teammate_gen",
         "oaht_bench.teammate_gen.marl",

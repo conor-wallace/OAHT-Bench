@@ -24,10 +24,10 @@ import numpy as np
 import optax
 import wandb
 
-from oaht_bench.agents.mlp_actor_critic_agent import ActorWithConditionalCriticPolicy
-from oaht_bench.agents.initialize_agents import initialize_actor_with_conditional_critic
-from oaht_bench.agents.population_interface import AgentPopulation
-from oaht_bench.agents.population_buffer import BufferedPopulation
+from oaht_bench.models.mlp_actor_critic_agent import ActorWithConditionalCriticPolicy
+from oaht_bench.models.initialize_agents import initialize_actor_with_conditional_critic
+from oaht_bench.models.population_interface import AgentPopulation
+from oaht_bench.models.population_buffer import BufferedPopulation
 from oaht_bench.common.save_load_utils import save_train_run
 from oaht_bench.common.plot_utils import get_metric_names
 from oaht_bench.common.run_episodes import run_episodes

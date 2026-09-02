@@ -24,9 +24,9 @@ import optax
 from flax.training.train_state import TrainState
 import wandb
 
-from oaht_bench.agents.mlp_actor_critic_agent import ActorWithConditionalCriticPolicy
-from oaht_bench.agents.rnn_actor_critic_agent import RNNActorWithConditionalCriticPolicy
-from oaht_bench.agents.population_interface import AgentPopulation
+from oaht_bench.models.mlp_actor_critic_agent import ActorWithConditionalCriticPolicy
+from oaht_bench.models.rnn_actor_critic_agent import RNNActorWithConditionalCriticPolicy
+from oaht_bench.models.population_interface import AgentPopulation
 from oaht_bench.common.plot_utils import get_metric_names
 from oaht_bench.common.run_episodes import run_episodes
 from oaht_bench.common.save_load_utils import save_train_run

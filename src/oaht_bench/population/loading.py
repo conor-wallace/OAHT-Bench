@@ -22,12 +22,12 @@ from typing import Any, TypedDict
 import chex
 import jax
 
-from oaht_bench.agents.mlp_actor_critic_agent import (
+from oaht_bench.models.mlp_actor_critic_agent import (
     ActorWithConditionalCriticPolicy,
     MLPActorCriticPolicy,
 )
-from oaht_bench.agents.population_interface import AgentPopulation
-from oaht_bench.agents.rnn_actor_critic_agent import (
+from oaht_bench.models.population_interface import AgentPopulation
+from oaht_bench.models.rnn_actor_critic_agent import (
     RNNActorCriticPolicy,
     RNNActorWithConditionalCriticPolicy,
 )

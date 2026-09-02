@@ -2,7 +2,7 @@
 TODO: clean up logic by vectorizing init_hstate. See HeuristicPolicyPopulation.
 '''
 import jax
-from oaht_bench.agents.agent_interface import AgentPolicy
+from oaht_bench.models.agent_interface import AgentPolicy
 from oaht_bench.agents.overcooked.independent_agent import IndependentAgent
 from oaht_bench.agents.overcooked.onion_agent import OnionAgent
 from oaht_bench.agents.overcooked.plate_agent import PlateAgent

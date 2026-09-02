@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 import os
-from oaht_bench.agents.agent_interface import AgentPolicy
+from oaht_bench.models.agent_interface import AgentPolicy
 from oaht_bench.agents.hanabi.random_agent import RandomAgent
 from oaht_bench.agents.hanabi.rule_based_agent import RuleBasedAgent
 from oaht_bench.agents.hanabi.iggi_agent import IGGIAgent

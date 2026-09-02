@@ -3,8 +3,8 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
-from oaht_bench.agents.agent_interface import AgentPolicy
-from oaht_bench.agents.s5_actor_critic import S5ActorCritic, StackedEncoderModel, init_S5SSM, make_DPLR_HiPPO
+from oaht_bench.models.agent_interface import AgentPolicy
+from oaht_bench.models.s5_actor_critic import S5ActorCritic, StackedEncoderModel, init_S5SSM, make_DPLR_HiPPO
 
 
 class S5ActorCriticPolicy(AgentPolicy):

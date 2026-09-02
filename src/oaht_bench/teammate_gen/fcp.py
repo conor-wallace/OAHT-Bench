@@ -11,8 +11,8 @@ import chex
 import jax
 import numpy as np
 
-from oaht_bench.agents.mlp_actor_critic_agent import MLPActorCriticPolicy
-from oaht_bench.agents.population_interface import AgentPopulation
+from oaht_bench.models.mlp_actor_critic_agent import MLPActorCriticPolicy
+from oaht_bench.models.population_interface import AgentPopulation
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper
 from oaht_bench.teammate_gen.marl.ippo import make_train as make_ppo_train
