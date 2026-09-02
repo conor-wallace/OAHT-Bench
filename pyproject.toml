@@ -42,7 +42,6 @@ dependencies = [
     "safetensors",
     "huggingface-hub",
     "omegaconf",
-    "hydra-core",
     "matplotlib",
     "prettytable",
     "rliable",  # IQM aggregation for BR-Prox (§8)
