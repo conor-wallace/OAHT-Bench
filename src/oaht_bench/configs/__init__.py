@@ -26,6 +26,7 @@ from oaht_bench.configs.job import (
     DatasetCollectionJob,
     EvaluationJob,
     JobConfig,
+    PooledCrossplayJob,
     TeammateGenerationJob,
     TrainingJob,
 )
@@ -66,8 +67,8 @@ def validate_job(payload: dict, *, source: str = "<dict>") -> AnyJob:
             )
         raise ValueError(
             f"{source}: missing 'job'. A config file holds one job under that key, "
-            f"with a 'job_type' of teammate_generation, dataset_collection, "
-            f"training, or evaluation."
+            f"with a 'job_type' of teammate_generation, pooled_crossplay, "
+            f"dataset_collection, training, or evaluation."
         )
     return JobConfig.model_validate(payload).job
 
@@ -98,6 +99,7 @@ __all__ = [
     "AnyJob",
     "TeammateGenerationJob",
     "DatasetCollectionJob",
+    "PooledCrossplayJob",
     "TrainingJob",
     "EvaluationJob",
     "validate_job",

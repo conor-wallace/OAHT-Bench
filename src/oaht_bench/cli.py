@@ -82,6 +82,12 @@ def _dispatch(job: AnyJob) -> int:
         run_dir = run_teammate_generation(job)
         print(f"\nwrote {run_dir}")
         return 0
+    if job.job_type == "pooled_crossplay":
+        from oaht_bench.population.pooled_crossplay import run as run_pooled_crossplay
+
+        run_dir = run_pooled_crossplay(job)
+        print(f"\nwrote {run_dir}")
+        return 0
     if job.job_type == "dataset_collection":
         from oaht_bench.dataset.construction.runner import run as run_data_generation
 

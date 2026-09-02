@@ -85,14 +85,18 @@ def build_roster(population_dirs: list[Path], env, *, seed_index: int = 0) -> li
             if loaded.paired:
                 roster.append(
                     RosterEntry(
-                        generator, m, "conf",
+                        generator,
+                        m,
+                        "conf",
                         get_member_params(loaded.params, m, seed_index=seed_index),
                         loaded.policy_cls,
                     )
                 )
                 roster.append(
                     RosterEntry(
-                        generator, m, "br",
+                        generator,
+                        m,
+                        "br",
                         get_member_params(loaded.partner_params, m, seed_index=seed_index),
                         loaded.policy_cls,
                     )
@@ -100,7 +104,9 @@ def build_roster(population_dirs: list[Path], env, *, seed_index: int = 0) -> li
             else:
                 roster.append(
                     RosterEntry(
-                        generator, m, "self",
+                        generator,
+                        m,
+                        "self",
                         get_member_params(loaded.params, m, seed_index=seed_index),
                         loaded.policy_cls,
                     )
@@ -183,3 +189,66 @@ def save_pooled(matrix: np.ndarray, roster: list[RosterEntry], path: Path, *, me
         meta=np.asarray(json.dumps(meta, sort_keys=True, default=str)),
     )
     return path
+
+
+def run(job) -> Path:
+    """Execute a :class:`~oaht_bench.configs.job.PooledCrossplayJob` (§4, step 2).
+
+    Builds the pooled roster from ``job.population_path`` (in list order, so it
+    matches what a pooled ``dataset_collection`` reconstructs), scores every ordered
+    ``(ego, teammate)`` pair, and writes ``pooled_crossplay.npz`` plus a readable
+    ``.csv`` and ``roster.json`` to ``job.output_path`` (or ``<run_dir>/
+    pooled_crossplay.npz`` when unset). The resolved config is always recorded in the
+    run directory. Returns the directory the matrix was written to.
+    """
+    import json
+
+    from oaht_bench.configs import save_job
+    from oaht_bench.envs import make_env
+    from oaht_bench.envs.log_wrapper import LogWrapper
+
+    run_dir = Path(job.run_dir())
+    out = Path(job.output_path) if job.output_path else run_dir / "pooled_crossplay.npz"
+    if out.exists():
+        raise FileExistsError(
+            f"{out} already exists and would be overwritten. Delete it to recompute, "
+            f"or set a different output_path/label. (Downstream configs reference this "
+            f"path, so overwriting silently would change what they read.)"
+        )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    save_job(job, run_dir / "job.json", minimal=False)
+
+    env = LogWrapper(make_env(job.env.env_name, job.env.env_kwargs()))
+    roster = build_roster([Path(p) for p in job.population_path], env)
+
+    matrix = evaluate_pooled(
+        env,
+        roster,
+        rng=jax.random.PRNGKey(job.seed),
+        max_episode_steps=job.env.rollout_length,
+        num_episodes=job.num_episodes,
+    )
+    save_pooled(
+        matrix,
+        roster,
+        out,
+        meta={
+            "env": job.env.name,
+            "populations": [str(p) for p in job.population_path],
+            "num_episodes": job.num_episodes,
+            "seed": job.seed,
+        },
+    )
+    # A readable copy of the matrix and roster alongside the npz.
+    np.savetxt(out.with_suffix(".csv"), matrix, delimiter=",")
+    out.with_name("roster.json").write_text(
+        json.dumps(
+            [
+                {"index": i, "generator": e.generator, "member": e.member, "role": e.role}
+                for i, e in enumerate(roster)
+            ],
+            indent=2,
+        )
+        + "\n"
+    )
+    return out.parent

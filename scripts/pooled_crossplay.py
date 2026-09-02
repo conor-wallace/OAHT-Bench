@@ -17,7 +17,6 @@ be slower than a within-population crossplay of the same members.
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
 
@@ -27,25 +26,29 @@ def _population_dirs(env_dir: Path) -> list[Path]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("env_dir", type=Path, help="populations/<env>/, holding one dir per generator.")
-    parser.add_argument("--num-episodes", type=int, default=20, help="Episodes per (ego, teammate) pair.")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "env_dir", type=Path, help="populations/<env>/, holding one dir per generator."
+    )
+    parser.add_argument(
+        "--num-episodes", type=int, default=20, help="Episodes per (ego, teammate) pair."
+    )
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--out", type=Path, default=None, help="Output .npz (default: <env_dir>/pooled_crossplay.npz).")
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Output .npz (default: <env_dir>/pooled_crossplay.npz).",
+    )
     args = parser.parse_args()
 
-    import jax
     import numpy as np
 
     from oaht_bench.configs import load_job
-    from oaht_bench.envs import make_env
-    from oaht_bench.envs.log_wrapper import LogWrapper
-    from oaht_bench.population.pooled_crossplay import (
-        build_roster,
-        evaluate_pooled,
-        normalise_per_teammate,
-        save_pooled,
-    )
+    from oaht_bench.configs.job import PooledCrossplayJob
+    from oaht_bench.population.pooled_crossplay import run
 
     pop_dirs = _population_dirs(args.env_dir)
     if not pop_dirs:
@@ -53,57 +56,40 @@ def main() -> int:
 
     # Every population for this env shares one env config; read it from the first.
     first_job = load_job(pop_dirs[0] / "job.json")
-    env = LogWrapper(make_env(first_job.env.env_name, first_job.env.env_kwargs()))
-
-    roster = build_roster(pop_dirs, env)
-    print(f"pooled roster: {len(roster)} policies from {len(pop_dirs)} populations")
-    for i, e in enumerate(roster):
-        print(f"  [{i:2d}] {e.generator:8s} member {e.member:2d} ({e.role})")
-
-    matrix = evaluate_pooled(
-        env,
-        roster,
-        rng=jax.random.PRNGKey(args.seed),
-        max_episode_steps=first_job.env.rollout_length,
-        num_episodes=args.num_episodes,
-    )
-
     out = args.out or (args.env_dir / "pooled_crossplay.npz")
-    save_pooled(
-        matrix,
-        roster,
-        out,
-        meta={
-            "env": first_job.env.name,
-            "populations": [str(p) for p in pop_dirs],
-            "num_episodes": args.num_episodes,
-            "seed": args.seed,
-        },
-    )
-    # A readable copy of the matrix and roster alongside the npz.
-    np.savetxt(out.with_suffix(".csv"), matrix, delimiter=",")
-    (out.with_name("roster.json")).write_text(
-        json.dumps(
-            [{"index": i, "generator": e.generator, "member": e.member, "role": e.role} for i, e in enumerate(roster)],
-            indent=2,
-        )
-        + "\n"
-    )
 
-    # Sanity read-out: for each teammate column, the best and worst ego.
-    quality = normalise_per_teammate(matrix)
-    print(f"\nwrote {out}  (K={len(roster)})")
+    # Delegate the compute and the writes to the pooled_crossplay job runner, so this
+    # convenience wrapper and ``oaht-bench config=...`` share one code path. The
+    # wrapper only adds directory discovery and the read-out below.
+    job = PooledCrossplayJob(
+        env=first_job.env,
+        population_path=[str(p) for p in pop_dirs],
+        num_episodes=args.num_episodes,
+        seed=args.seed,
+        output_path=str(out),
+        label=f"pooled_{first_job.env.name}",
+    )
+    run(job)
+
+    # Sanity read-out from what was written: for each teammate column, the best and
+    # worst ego, straight off the roster arrays the npz carries.
+    d = np.load(out, allow_pickle=True)
+    matrix, gen, mem, role = (
+        d["matrix"],
+        d["roster_generator"],
+        d["roster_member"],
+        d["roster_role"],
+    )
+    print(f"\nwrote {out}  (K={matrix.shape[0]})")
     print("per-teammate best / worst response (by pooled return):")
-    for j, mate in enumerate(roster):
+    for j in range(matrix.shape[1]):
         best_i = int(np.argmax(matrix[:, j]))
         worst_i = int(np.argmin(matrix[:, j]))
-        b, w = roster[best_i], roster[worst_i]
         print(
-            f"  teammate [{j:2d}] {mate.generator}/{mate.member}({mate.role}): "
-            f"best={b.generator}/{b.member}({b.role}) R={matrix[best_i, j]:.3f}  "
-            f"worst={w.generator}/{w.member}({w.role}) R={matrix[worst_i, j]:.3f}"
+            f"  teammate [{j:2d}] {gen[j]}/{mem[j]}({role[j]}): "
+            f"best={gen[best_i]}/{mem[best_i]}({role[best_i]}) R={matrix[best_i, j]:.3f}  "
+            f"worst={gen[worst_i]}/{mem[worst_i]}({role[worst_i]}) R={matrix[worst_i, j]:.3f}"
         )
-    del quality
     return 0
 
 

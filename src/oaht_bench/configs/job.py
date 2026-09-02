@@ -193,6 +193,46 @@ class DatasetCollectionJob(JobBase):
     )
 
 
+class PooledCrossplayJob(JobBase):
+    """Compute the pooled cross-population coordination-return matrix (§4, step 2).
+
+    Pools the released members of every listed generator into one roster of
+    individual policies (:func:`~oaht_bench.population.pooled_crossplay.build_roster`)
+    and scores every ordered ``(ego, teammate)`` pair. The matrix is what the ε
+    sampler reads to place each episode on the best-worst response spectrum, so a
+    pooled ``dataset_collection`` job points its ``pooled_matrix_path`` at this job's
+    output.
+
+    ``population_path`` is the same list, in the same order, a pooled
+    ``dataset_collection`` uses: ``build_roster`` preserves list order and the sampler
+    indexes the matrix by roster position, so a reordered list would silently mis-seat
+    (the collection runner's ``check_roster`` guards against exactly that).
+    """
+
+    job_type: Literal["pooled_crossplay"] = "pooled_crossplay"
+    env: EnvConfig
+    population_path: list[str] = Field(
+        min_length=2,
+        description="Released teammate-generation run directories flattened into one "
+        "roster in list order. Must match the list a pooled dataset_collection uses.",
+    )
+    num_episodes: int = Field(
+        default=20,
+        gt=0,
+        description="Episodes per ordered (ego, teammate) pair. Only has to rank egos "
+        "per teammate for the ε bands, so modest counts suffice; raise it to break "
+        "near-ties. Cost is K^2 x this, with K the roster size.",
+    )
+    output_path: str | None = Field(
+        default=None,
+        description="Where to write pooled_crossplay.npz (plus a .csv and roster.json "
+        "alongside). Defaults to <run_dir>/pooled_crossplay.npz; set it to a stable "
+        "path (e.g. populations/<env>/pooled_crossplay.npz) to keep the matrix beside "
+        "the populations it scores, which is what a pooled dataset_collection then "
+        "references.",
+    )
+
+
 class OfflineTrainingConfig(BaseConfig):
     """Optimisation and batching for the two-stage trajectory-view baselines.
 
@@ -348,7 +388,7 @@ class EvaluationJob(JobBase):
 
 #: The union itself, for annotating anything that holds a concrete job.
 AnyJob = Annotated[
-    TeammateGenerationJob | DatasetCollectionJob | TrainingJob | EvaluationJob,
+    TeammateGenerationJob | DatasetCollectionJob | PooledCrossplayJob | TrainingJob | EvaluationJob,
     Field(discriminator="job_type"),
 ]
 
