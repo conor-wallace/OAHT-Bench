@@ -13,7 +13,6 @@ from oaht_bench.population.scripted.hanabi.internal_agent import InternalAgent
 from oaht_bench.population.scripted.hanabi.cautious_agent import CautiousAgent
 from oaht_bench.population.scripted.hanabi.smartbot_agent import SmartBotAgent
 from oaht_bench.population.scripted.hanabi.obl_r2d2_agent import OBLAgentR2D2
-from oaht_bench.population.scripted.hanabi.bc_lstm_agent import BCLSTMAgent as LegacyBCLSTMAgent
 from oaht_bench.common.save_load_utils import REPO_PATH
 
 
@@ -312,63 +311,3 @@ class HanabiOBLPolicyWrapper(AgentPolicy):
         return self.agent.initialize_carry(
             jax.random.PRNGKey(0), batch_dims=()
         )
-
-
-class HanabiBCLSTMPolicyWrapper(AgentPolicy):
-
-    def __init__(self, weight_file: str, using_log_wrapper: bool = False,
-                 greedy: bool = True):
-        import os, yaml
-        yaml_path = weight_file.rsplit('.', 1)[0] + '.yaml'
-        from oaht_bench.common.save_load_utils import REPO_PATH
-        abs_yaml = yaml_path if os.path.isabs(yaml_path) else os.path.join(REPO_PATH, yaml_path)
-
-        is_new_format = False
-        if os.path.exists(abs_yaml):
-            with open(abs_yaml) as f:
-                cfg = yaml.safe_load(f)
-
-            is_new_format = 'preprocess_dim' in cfg or 'data_dir' in cfg
-
-        if is_new_format:
-            from oaht_bench.population.scripted.bc import BCLSTMAgent, BCLSTMConfig
-            config = BCLSTMConfig(
-                obs_dim=cfg['obs_dim'], action_dim=cfg['action_dim'],
-                preprocess_dim=cfg.get('preprocess_dim', 1024),
-                lstm_dim=cfg.get('lstm_dim', 512),
-                postprocess_dim=cfg.get('postprocess_dim', 256),
-                dropout_rate=cfg.get('dropout_rate', 0.0),
-            )
-            self.agent = BCLSTMAgent(config, weight_path=weight_file)
-        else:
-            self.agent = LegacyBCLSTMAgent(weight_path=weight_file)
-        self.using_log_wrapper = using_log_wrapper
-        self.greedy = greedy
-
-    def get_action(self, params, obs, done, avail_actions, hstate, rng,
-                   env_state, aux_obs=None, test_mode=False):
-        if self.using_log_wrapper:
-            env_state = env_state.env_state
-        obs_flat = obs.reshape(-1)
-
-        if avail_actions is not None and avail_actions.ndim >= 1:
-            legal_mask = avail_actions.reshape(-1).astype(jnp.float32)
-        else:
-            legal_mask = jnp.ones(21, dtype=jnp.float32)
-
-        if self.greedy or test_mode:
-            carry, action = self.agent.greedy_act(hstate, obs_flat, legal_mask)
-        else:
-            carry, action = self.agent.sample_act(hstate, obs_flat, legal_mask, rng)
-
-        init_fn = getattr(self.agent, 'initialize_carry', None) or self.agent.init_carry
-        carry = jax.lax.cond(
-            done.squeeze().astype(bool),
-            lambda: init_fn(),
-            lambda: carry,
-        )
-        return action, carry
-
-    def init_hstate(self, batch_size: int, aux_info=None):
-        init_fn = getattr(self.agent, 'initialize_carry', None) or self.agent.init_carry
-        return init_fn()

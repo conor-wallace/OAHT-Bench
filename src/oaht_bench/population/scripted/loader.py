@@ -21,7 +21,7 @@ from oaht_bench.population.scripted.hanabi.agent_policy_wrappers import (
     HanabiIGGIPolicyWrapper, HanabiPiersPolicyWrapper,
     HanabiFlawedPolicyWrapper, HanabiOuterPolicyWrapper,
     HanabiVanDenBerghPolicyWrapper, HanabiSmartBotPolicyWrapper,
-    HanabiOBLPolicyWrapper, HanabiBCLSTMPolicyWrapper,
+    HanabiOBLPolicyWrapper,
     HanabiInternalPolicyWrapper, HanabiCautiousPolicyWrapper,
 )
 from oaht_bench.common.save_load_utils import load_checkpoints, REPO_PATH
@@ -224,12 +224,6 @@ def initialize_heuristic_agent_from_config(agent_config, agent_name, task_name, 
         if actor_type == "obl_r2d2":
             return HanabiOBLPolicyWrapper(
                 weight_file=agent_config["weight_file"], using_log_wrapper=True
-            )
-        if actor_type == "bc_lstm":
-            return HanabiBCLSTMPolicyWrapper(
-                weight_file=agent_config["weight_file"],
-                using_log_wrapper=True,
-                greedy=agent_config.get("greedy", True),
             )
         raise ValueError(f"Unrecognized actor type for {task_name}: '{actor_type}' ({agent_name})")
 
