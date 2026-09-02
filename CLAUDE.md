@@ -20,8 +20,8 @@ names. See `PROVENANCE.md`.
 their diff against the recorded upstream commit (`PROVENANCE.md`); whitespace
 churn destroys that. Ruff is configured with an *allowlist* of the ~22 files we
 authored (`[tool.ruff] include` in `pyproject.toml`). An absorbed file is
-untouched by default. The four generators (`fcp.py`, `CoMeDi.py`, `BRDiv.py`,
-`LBRDiv.py`) are absorbed-but-heavily-modified and stay excluded for the same
+untouched by default. The four generators (`fcp.py`, `comedi.py`, `brdiv.py`,
+`lbrdiv.py`) are absorbed-but-heavily-modified and stay excluded for the same
 reason.
 
 ## Conventions the user has established

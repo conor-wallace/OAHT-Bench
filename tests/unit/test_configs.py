@@ -396,7 +396,7 @@ def test_all_generators_report_the_same_episode_statistics():
 
     src = pathlib.Path(__file__).resolve().parents[2] / "src" / "oaht_bench" / "teammate_gen"
     assert 'f"Train/{stat_name}"' in (src / "marl" / "ippo.py").read_text()
-    for name in ("BRDiv.py", "LBRDiv.py"):
+    for name in ("brdiv.py", "lbrdiv.py"):
         assert "log_update_metrics" in (src / name).read_text()
 
 
@@ -456,7 +456,7 @@ def test_paired_generators_stream_rather_than_batch():
     import pathlib
 
     src = pathlib.Path(__file__).resolve().parents[2] / "src" / "oaht_bench" / "teammate_gen"
-    for name in ("BRDiv.py", "LBRDiv.py"):
+    for name in ("brdiv.py", "lbrdiv.py"):
         text = (src / name).read_text()
         assert "io_callback" in text, f"{name} does not stream"
         assert "log_training_curves" not in text, f"{name} would double-log"
@@ -524,7 +524,7 @@ def test_comedi_streams_its_outer_loop_not_only_the_warmup():
     import pathlib
 
     src = pathlib.Path(__file__).resolve().parents[2] / "src" / "oaht_bench" / "teammate_gen"
-    text = (src / "CoMeDi.py").read_text()
+    text = (src / "comedi.py").read_text()
     assert "io_callback" in text, "CoMeDi does not stream its outer loop"
     # The streamed step must continue past the warmup rather than restart at 0.
     assert "_warmup_updates" in text
@@ -540,7 +540,7 @@ def test_comedi_streams_self_play_for_continuity():
     import pathlib
 
     src = pathlib.Path(__file__).resolve().parents[2] / "src" / "oaht_bench" / "teammate_gen"
-    text = (src / "CoMeDi.py").read_text()
+    text = (src / "comedi.py").read_text()
     stream_block = text[
         text.index("sp_metric = jax.tree.map") : text.index("jax.experimental.io_callback(_stream")
     ]
@@ -559,7 +559,7 @@ def test_paired_generators_log_the_intended_pairing_only():
     import pathlib
 
     src = pathlib.Path(__file__).resolve().parents[2] / "src" / "oaht_bench" / "teammate_gen"
-    for name in ("BRDiv.py", "LBRDiv.py"):
+    for name in ("brdiv.py", "lbrdiv.py"):
         text = (src / name).read_text()
         block = text[text.index("_paired = (") : text.index("jax.experimental.io_callback(_stream")]
         assert "self_onehot_id" in block and "oppo_onehot_id" in block
