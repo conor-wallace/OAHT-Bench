@@ -38,12 +38,11 @@ KL, the partner-*action* target, and belief-parameter conditioning — is kept.
 
 from __future__ import annotations
 
-import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import optax
 
-from oaht_bench.models.backbone import DecisionTransformer
+from oaht_bench.models.meliba_agent import MelibaAgent
 from oaht_bench.offline.registry import BaseAhtPolicy
 from oaht_bench.offline.utils import mask_logits, sample_window_batch
 
@@ -79,88 +78,6 @@ def _sequential_kl(mean, logvar, mask) -> jnp.ndarray:
     )
     mask = mask.astype(jnp.float32)
     return (kl * mask).sum() / jnp.maximum(mask.sum(), 1.0)
-
-
-class MelibaEncoder(nn.Module):
-    """Ego-history encoder emitting two Gaussian belief latents.
-
-    The DT backbone is read at the ``o_t`` positions (LIAM's information set),
-    then four linear heads produce the *agent character* and *mental state*
-    means and log-variances (``meliba_agent.py:138-145``). Sampling is deferred
-    to the loss, where the reparameterisation rng is available, so this module is
-    deterministic given the backbone.
-    """
-
-    action_dim: int
-    latent_dim: int = 16
-    hidden_dim: int = 32
-    dropout: float = 0.1
-
-    @nn.compact
-    def __call__(self, rtg, obs, actions, *, timesteps, mask=None, train: bool = False):
-        _, obs_hidden = DecisionTransformer(
-            action_dim=self.action_dim,
-            hidden_dim=self.hidden_dim,
-            use_cross_attention=False,
-            dropout=self.dropout,
-        )(rtg, obs, actions, timesteps=timesteps, mask=mask, train=train)
-
-        char_mean = nn.Dense(self.latent_dim, name="char_mean")(obs_hidden)
-        char_logvar = nn.Dense(self.latent_dim, name="char_logvar")(obs_hidden)
-        mental_mean = nn.Dense(self.latent_dim, name="mental_mean")(obs_hidden)
-        mental_logvar = nn.Dense(self.latent_dim, name="mental_logvar")(obs_hidden)
-        return char_mean, char_logvar, mental_mean, mental_logvar
-
-
-class MelibaDecoder(nn.Module):
-    """Reconstructs the teammate's *action* from the belief samples.
-
-    MeLIBA's decoder targets the partner action (``meliba_agent.py:283-300``),
-    unlike LIAM which also reconstructs the partner observation. Conditioned on
-    the two latent *samples* only — the belief must carry the partner information
-    for the reconstruction to succeed, which is the point of the auxiliary task —
-    with two hidden layers mirroring :class:`liam.LiamDecoder`.
-    """
-
-    action_dim: int
-    hidden_dim: int = 32
-
-    @nn.compact
-    def __call__(self, latent_sample):
-        h = nn.relu(nn.Dense(self.hidden_dim)(latent_sample))
-        h = nn.relu(nn.Dense(self.hidden_dim)(h))
-        return nn.Dense(self.action_dim)(h)
-
-
-class MelibaNetwork(nn.Module):
-    """Stage 2: the backbone conditioned on the frozen belief parameters.
-
-    The policy sees ``(mean, logvar)`` of both latents concatenated to the
-    observation (``meliba_agent.py:685``), i.e. the belief *distribution*, not a
-    point embedding — the difference from LIAM. Offline the ``stop_gradient`` is
-    unnecessary: stage 2 differentiates only the policy.
-    """
-
-    action_dim: int
-    hidden_dim: int = 32
-    dropout: float = 0.1
-
-    @nn.compact
-    def __call__(self, rtg, obs, actions, *, timesteps, belief, mask=None, train: bool = False):
-        logits, _ = DecisionTransformer(
-            action_dim=self.action_dim,
-            hidden_dim=self.hidden_dim,
-            use_cross_attention=False,
-            dropout=self.dropout,
-        )(
-            rtg,
-            jnp.concatenate([obs, belief], axis=-1),
-            actions,
-            timesteps=timesteps,
-            mask=mask,
-            train=train,
-        )
-        return logits
 
 
 def _reparameterise(mean, logvar, key):
@@ -283,18 +200,10 @@ class MelibaPolicy(BaseAhtPolicy):
     name = "meliba"
 
     def build_model(self) -> None:
-        net = self.config.network
-        if net.obs_dim is None or net.action_dim is None:
-            raise ValueError(
-                "obs_dim/action_dim are unresolved on the network config; the "
-                "runner must resolve them from the dataset before build_model()."
-            )
-        common = dict(hidden_dim=net.hidden_dim, dropout=net.dropout)
-        self.encoder = MelibaEncoder(
-            action_dim=net.action_dim, latent_dim=self.config.latent_dim, **common
-        )
-        self.decoder = MelibaDecoder(action_dim=net.action_dim, hidden_dim=net.hidden_dim)
-        self.network = MelibaNetwork(action_dim=net.action_dim, **common)
+        # The model and inference are a composed MelibaAgent; training reads its
+        # encoder/decoder/network, and act delegates to it.
+        self.agent = MelibaAgent(self.config)
+        self.agent.build_model()
 
     def _sample_batch(self, _step):
         return sample_window_batch(self.dataset.windows, self.np_rng, self.config.stage2_batch_size)
@@ -302,7 +211,7 @@ class MelibaPolicy(BaseAhtPolicy):
     def train_stage_1(self):
         init_batch = self._sample_batch(0)
         self.rng, k1, k2 = jax.random.split(self.rng, 3)
-        encoder_params = self.encoder.init(
+        encoder_params = self.agent.encoder.init(
             k1,
             init_batch["ego_rtg"],
             init_batch["ego_obs"],
@@ -310,7 +219,7 @@ class MelibaPolicy(BaseAhtPolicy):
             timesteps=init_batch["timesteps"],
             mask=init_batch["mask"],
         )
-        char_mean, _, mental_mean, _ = self.encoder.apply(
+        char_mean, _, mental_mean, _ = self.agent.encoder.apply(
             encoder_params,
             init_batch["ego_rtg"],
             init_batch["ego_obs"],
@@ -320,12 +229,19 @@ class MelibaPolicy(BaseAhtPolicy):
         )
         # The decoder reads the two latent samples concatenated; means stand in
         # for a sample at init, where only shapes matter.
-        decoder_params = self.decoder.init(k2, jnp.concatenate([char_mean, mental_mean], axis=-1))
+        decoder_params = self.agent.decoder.init(
+            k2, jnp.concatenate([char_mean, mental_mean], axis=-1)
+        )
         params = {"encoder": encoder_params, "decoder": decoder_params}
 
         def loss(p, b, rngs):
             return meliba_reconstruction_loss(
-                p, self.encoder, self.decoder, b, kl_weight=self.config.kl_weight, rngs=rngs
+                p,
+                self.agent.encoder,
+                self.agent.decoder,
+                b,
+                kl_weight=self.config.kl_weight,
+                rngs=rngs,
             )
 
         return self._run_stage(
@@ -340,8 +256,8 @@ class MelibaPolicy(BaseAhtPolicy):
     def train_stage_2(self, stage1_params):
         init_batch = self._sample_batch(0)
         self.rng, k = jax.random.split(self.rng)
-        belief = meliba_belief(self.encoder, stage1_params["encoder"], init_batch)
-        policy_params = self.network.init(
+        belief = meliba_belief(self.agent.encoder, stage1_params["encoder"], init_batch)
+        policy_params = self.agent.network.init(
             k,
             init_batch["ego_rtg"],
             init_batch["ego_obs"],
@@ -353,7 +269,7 @@ class MelibaPolicy(BaseAhtPolicy):
 
         def loss(p, b, rngs):
             return meliba_policy_loss(
-                p, self.network, self.encoder, stage1_params["encoder"], b, rngs=rngs
+                p, self.agent.network, self.agent.encoder, stage1_params["encoder"], b, rngs=rngs
             )
 
         return self._run_stage(
@@ -366,12 +282,4 @@ class MelibaPolicy(BaseAhtPolicy):
         )
 
     def act(self, params, rtg, obs, actions, *, timesteps, mask):
-        char_mean, char_logvar, mental_mean, mental_logvar = self.encoder.apply(
-            params["stage1"]["encoder"], rtg, obs, actions,
-            timesteps=timesteps, mask=mask, train=False,
-        )
-        belief = jnp.concatenate([char_mean, char_logvar, mental_mean, mental_logvar], axis=-1)
-        return self.network.apply(
-            params["stage2"], rtg, obs, actions,
-            timesteps=timesteps, belief=belief, mask=mask, train=False,
-        )
+        return self.agent.act(params, rtg, obs, actions, timesteps=timesteps, mask=mask)

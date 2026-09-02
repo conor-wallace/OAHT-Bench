@@ -44,12 +44,11 @@ forward-only baselines.
 
 from __future__ import annotations
 
-import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import optax
 
-from oaht_bench.models.backbone import DecisionTransformer
+from oaht_bench.models.omis_agent import OmisAgent
 from oaht_bench.offline.registry import BaseAhtPolicy
 from oaht_bench.offline.utils import mask_logits, sample_window_batch
 
@@ -59,85 +58,6 @@ def _masked_accuracy(logits, labels, mask) -> jnp.ndarray:
     correct = (jnp.argmax(logits, axis=-1) == labels).astype(jnp.float32)
     m = mask.astype(jnp.float32)
     return (correct * m).sum() / jnp.maximum(m.sum(), 1.0)
-
-
-class OmisEncoder(nn.Module):
-    """Shared representation backbone, read at the ``o_t`` positions.
-
-    Identical in form to :class:`liam.LiamEncoder`; what differs is the stage-1
-    objective that trains it — teammate imitation and best-response value rather
-    than teammate reconstruction.
-    """
-
-    action_dim: int
-    hidden_dim: int = 32
-    dropout: float = 0.1
-
-    @nn.compact
-    def __call__(self, rtg, obs, actions, *, timesteps, mask=None, train: bool = False):
-        _, obs_hidden = DecisionTransformer(
-            action_dim=self.action_dim,
-            hidden_dim=self.hidden_dim,
-            use_cross_attention=False,
-            dropout=self.dropout,
-        )(rtg, obs, actions, timesteps=timesteps, mask=mask, train=train)
-        return obs_hidden
-
-
-class OmisModel(nn.Module):
-    """The two search components: opponent imitator and critic.
-
-    Two heads off the representation, each two hidden layers with ReLU
-    (mirroring :class:`liam.LiamDecoder`). The imitator returns teammate-action
-    logits (``μ_φ``); the critic returns a scalar value (``V_ω``) regressed to the
-    ego return-to-go — the best response's RTG when the dataset carries best
-    responses. Neither is used by the search-free actor; both are trained so
-    :func:`omis_search` can be added without retraining.
-    """
-
-    action_dim: int
-    hidden_dim: int = 32
-
-    @nn.compact
-    def __call__(self, embedding):
-        h = nn.relu(nn.Dense(self.hidden_dim)(embedding))
-        h = nn.relu(nn.Dense(self.hidden_dim)(h))
-        mate_action_logits = nn.Dense(self.action_dim)(h)
-
-        g = nn.relu(nn.Dense(self.hidden_dim)(embedding))
-        g = nn.relu(nn.Dense(self.hidden_dim)(g))
-        value = nn.Dense(1)(g)[..., 0]
-        return mate_action_logits, value
-
-
-class OmisActor(nn.Module):
-    """Stage 2: the actor policy, conditioned on the frozen representation.
-
-    Structurally :class:`liam.LiamPolicy` — a DT over the ego stream with the
-    representation concatenated to the observation. This is OMIS's ``π_θ``
-    deployed feed-forward (``OMIS w/o S``); search would wrap it, not replace it.
-    """
-
-    action_dim: int
-    hidden_dim: int = 32
-    dropout: float = 0.1
-
-    @nn.compact
-    def __call__(self, rtg, obs, actions, *, timesteps, embedding, mask=None, train: bool = False):
-        logits, _ = DecisionTransformer(
-            action_dim=self.action_dim,
-            hidden_dim=self.hidden_dim,
-            use_cross_attention=False,
-            dropout=self.dropout,
-        )(
-            rtg,
-            jnp.concatenate([obs, embedding], axis=-1),
-            actions,
-            timesteps=timesteps,
-            mask=mask,
-            train=train,
-        )
-        return logits
 
 
 def omis_representation_loss(
@@ -258,16 +178,10 @@ class OmisPolicy(BaseAhtPolicy):
     name = "omis"
 
     def build_model(self) -> None:
-        net = self.config.network
-        if net.obs_dim is None or net.action_dim is None:
-            raise ValueError(
-                "obs_dim/action_dim are unresolved on the network config; the "
-                "runner must resolve them from the dataset before build_model()."
-            )
-        common = dict(hidden_dim=net.hidden_dim, dropout=net.dropout)
-        self.encoder = OmisEncoder(action_dim=net.action_dim, **common)
-        self.model = OmisModel(action_dim=net.action_dim, hidden_dim=net.hidden_dim)
-        self.actor = OmisActor(action_dim=net.action_dim, **common)
+        # The model and inference are a composed OmisAgent; training reads its
+        # encoder/model/actor, and act delegates to it.
+        self.agent = OmisAgent(self.config)
+        self.agent.build_model()
 
     def _sample_batch(self, _step):
         return sample_window_batch(self.dataset.windows, self.np_rng, self.config.stage2_batch_size)
@@ -275,7 +189,7 @@ class OmisPolicy(BaseAhtPolicy):
     def train_stage_1(self):
         init_batch = self._sample_batch(0)
         self.rng, k1, k2 = jax.random.split(self.rng, 3)
-        encoder_params = self.encoder.init(
+        encoder_params = self.agent.encoder.init(
             k1,
             init_batch["ego_rtg"],
             init_batch["ego_obs"],
@@ -283,7 +197,7 @@ class OmisPolicy(BaseAhtPolicy):
             timesteps=init_batch["timesteps"],
             mask=init_batch["mask"],
         )
-        init_z = self.encoder.apply(
+        init_z = self.agent.encoder.apply(
             encoder_params,
             init_batch["ego_rtg"],
             init_batch["ego_obs"],
@@ -291,12 +205,17 @@ class OmisPolicy(BaseAhtPolicy):
             timesteps=init_batch["timesteps"],
             mask=init_batch["mask"],
         )
-        model_params = self.model.init(k2, init_z)
+        model_params = self.agent.model.init(k2, init_z)
         params = {"encoder": encoder_params, "model": model_params}
 
         def loss(p, b, rngs):
             return omis_representation_loss(
-                p, self.encoder, self.model, b, value_coef=self.config.value_coef, rngs=rngs
+                p,
+                self.agent.encoder,
+                self.agent.model,
+                b,
+                value_coef=self.config.value_coef,
+                rngs=rngs,
             )
 
         return self._run_stage(
@@ -311,7 +230,7 @@ class OmisPolicy(BaseAhtPolicy):
     def train_stage_2(self, stage1_params):
         init_batch = self._sample_batch(0)
         self.rng, k = jax.random.split(self.rng)
-        init_z = self.encoder.apply(
+        init_z = self.agent.encoder.apply(
             stage1_params["encoder"],
             init_batch["ego_rtg"],
             init_batch["ego_obs"],
@@ -319,7 +238,7 @@ class OmisPolicy(BaseAhtPolicy):
             timesteps=init_batch["timesteps"],
             mask=init_batch["mask"],
         )
-        actor_params = self.actor.init(
+        actor_params = self.agent.actor.init(
             k,
             init_batch["ego_rtg"],
             init_batch["ego_obs"],
@@ -331,7 +250,7 @@ class OmisPolicy(BaseAhtPolicy):
 
         def loss(p, b, rngs):
             return omis_actor_loss(
-                p, self.actor, self.encoder, stage1_params["encoder"], b, rngs=rngs
+                p, self.agent.actor, self.agent.encoder, stage1_params["encoder"], b, rngs=rngs
             )
 
         return self._run_stage(
@@ -344,11 +263,4 @@ class OmisPolicy(BaseAhtPolicy):
         )
 
     def act(self, params, rtg, obs, actions, *, timesteps, mask):
-        z = self.encoder.apply(
-            params["stage1"]["encoder"], rtg, obs, actions,
-            timesteps=timesteps, mask=mask, train=False,
-        )
-        return self.actor.apply(
-            params["stage2"], rtg, obs, actions,
-            timesteps=timesteps, embedding=z, mask=mask, train=False,
-        )
+        return self.agent.act(params, rtg, obs, actions, timesteps=timesteps, mask=mask)

@@ -25,25 +25,19 @@ CoMeDi have no best response and would need one trained.
 """
 
 from oaht_bench.models.backbone import DecisionTransformer
-from oaht_bench.offline.bc import BcNetwork, BcPolicy, bc_loss
+from oaht_bench.offline.bc import BcPolicy, bc_loss
 from oaht_bench.offline.liam import (
     LiamPolicy,
     liam_policy_loss,
     liam_reconstruction_loss,
 )
 from oaht_bench.offline.meliba import (
-    MelibaDecoder,
-    MelibaEncoder,
-    MelibaNetwork,
     MelibaPolicy,
     meliba_belief,
     meliba_policy_loss,
     meliba_reconstruction_loss,
 )
 from oaht_bench.offline.omis import (
-    OmisActor,
-    OmisEncoder,
-    OmisModel,
     OmisPolicy,
     omis_actor_loss,
     omis_representation_loss,
@@ -62,15 +56,8 @@ __all__ = [
     "DecisionTransformer",
     "LiamPolicy",
     "get_policy",
-    "MelibaDecoder",
-    "MelibaEncoder",
-    "MelibaNetwork",
     "MelibaPolicy",
-    "OmisActor",
-    "OmisEncoder",
-    "OmisModel",
     "OmisPolicy",
-    "BcNetwork",
     "BcPolicy",
     "bc_loss",
     "TaoPolicy",

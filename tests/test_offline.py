@@ -470,7 +470,7 @@ def test_available_actions_are_enforced_everywhere_the_data_enforces_them():
     import inspect
 
     from oaht_bench.dataset import dataset as ds
-    from oaht_bench.offline import evaluate as ev
+    from oaht_bench.models.return_conditioned_agent import ReturnConditionedAgent
     from oaht_bench.offline import liam as liam_mod
     from oaht_bench.offline import tao as tao_mod
 
@@ -486,8 +486,8 @@ def test_available_actions_are_enforced_everywhere_the_data_enforces_them():
     assert "mask_logits" in inspect.getsource(tao_mod.embedding_loss)
     assert "mask_logits" in inspect.getsource(tao_mod.tao_policy_loss)
 
-    # and the rollout masks before sampling the ego
-    assert "mask_logits" in inspect.getsource(ev._rollout)
+    # and the shared deployment loop masks before sampling the ego
+    assert "mask_logits" in inspect.getsource(ReturnConditionedAgent.get_action)
 
 
 def test_mask_logits_matches_the_absorbed_convention():

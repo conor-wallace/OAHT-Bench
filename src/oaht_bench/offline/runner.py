@@ -191,8 +191,12 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
     from oaht_bench.configs import load_job
     from oaht_bench.envs import make_env
     from oaht_bench.envs.log_wrapper import LogWrapper
-    from oaht_bench.offline import get_policy
-    from oaht_bench.offline.evaluate import dataset_target_return, evaluate, evaluate_agent
+    from oaht_bench.models.bc_agent import BcAgent
+    from oaht_bench.models.liam_agent import LiamAgent
+    from oaht_bench.models.meliba_agent import MelibaAgent
+    from oaht_bench.models.omis_agent import OmisAgent
+    from oaht_bench.models.tao_agent import TaoAgent
+    from oaht_bench.offline.evaluate import dataset_target_return, evaluate_agent
     from oaht_bench.population import artifact_dir, population_from_run, released_members
 
     cfg = job.offline
@@ -208,60 +212,35 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
     target = dataset_target_return(batch)
     cond_target = target if windows.norm is None else windows.norm.apply_rtg(target)
 
-    from oaht_bench.models.liam_agent import LiamAgent
-    from oaht_bench.models.tao_agent import TaoAgent
-
-    # Baselines ported onto the ReturnConditionedAgent contract: the rolling window /
-    # RTG bookkeeping lives in the agent, so they run through the shared vmapped
-    # run_episodes rather than the per-step Python _rollout. The rest stay on the
-    # _rollout path below until they are ported too.
-    agent_classes = {"liam": LiamAgent, "tao": TaoAgent}
-
-    if resolved.network.architecture in agent_classes:
-        agent = agent_classes[resolved.network.architecture](
-            resolved,
-            context_length=cfg.context_length,
-            target_return=cond_target,
-            normalization=windows.norm,
-        )
-        agent.build_model()
-        scores = evaluate_agent(
-            agent,
-            params,
-            env,
-            loaded,
-            members,
-            rng=jax.random.PRNGKey(job.seed + 1),
-            target_return=cond_target,
-            max_episode_steps=job.env.rollout_length,
-            num_episodes=job.offline.eval_episodes,
-        )
-    else:
-        # The not-yet-ported baselines (meliba/omis/bc) rebuild from the (pure)
-        # resolved config and point the _rollout loop at policy.act.
-        policy = get_policy(resolved)(resolved)
-        policy.build_model()
-
-        def predict(rtg, obs, actions, timesteps, mask):
-            return policy.act(params, rtg, obs, actions, timesteps=timesteps, mask=mask)
-
-        # jit the whole ego forward pass: the rollout calls it once per environment
-        # step, and Flax's apply overhead dominates otherwise.
-        predict = jax.jit(predict)
-
-        scores = evaluate(
-            predict,
-            env,
-            loaded,
-            members,
-            rng=jax.random.PRNGKey(job.seed + 1),
-            context_length=cfg.context_length,
-            max_episode_steps=job.env.rollout_length,
-            target_return=cond_target,
-            normalization=windows.norm,
-            num_episodes=job.offline.eval_episodes,
-            obs_dim=windows.obs_dim,
-        )
+    # Every offline baseline is a ReturnConditionedAgent: the rolling window / RTG
+    # bookkeeping lives in the agent, so all of them evaluate through the shared
+    # vmapped run_episodes. The window transform and conditioning target are baked
+    # into the agent, so evaluate_agent needs nothing baseline-specific.
+    agent_classes = {
+        "liam": LiamAgent,
+        "tao": TaoAgent,
+        "meliba": MelibaAgent,
+        "omis": OmisAgent,
+        "bc": BcAgent,
+    }
+    agent = agent_classes[resolved.network.architecture](
+        resolved,
+        context_length=cfg.context_length,
+        target_return=cond_target,
+        normalization=windows.norm,
+    )
+    agent.build_model()
+    scores = evaluate_agent(
+        agent,
+        params,
+        env,
+        loaded,
+        members,
+        rng=jax.random.PRNGKey(job.seed + 1),
+        target_return=cond_target,
+        max_episode_steps=job.env.rollout_length,
+        num_episodes=job.offline.eval_episodes,
+    )
     for m, v in scores.per_teammate.items():
         logger.log_item(f"Eval/Return_teammate_{m}", v)
     logger.log_item("Eval/MeanReturn", scores.mean_return)

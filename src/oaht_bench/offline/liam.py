@@ -77,7 +77,9 @@ def liam_reconstruction_loss(params, encoder, decoder, batch, *, rngs=None, trai
     }
 
 
-def liam_policy_loss(params, policy, encoder, encoder_params, batch, *, rngs=None, train: bool = True):
+def liam_policy_loss(
+    params, policy, encoder, encoder_params, batch, *, rngs=None, train: bool = True
+):
     """Stage 2: behaviour cloning, conditioned on the frozen encoder.
 
     ``encoder_params`` come from stage 1 and are never differentiated, which is

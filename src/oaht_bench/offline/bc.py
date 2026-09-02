@@ -33,14 +33,13 @@ in the inventory is the thing the other nine baselines exist to open up.
 
 from __future__ import annotations
 
-import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
 
 from oaht_bench.dataset.dataset import Windows
-from oaht_bench.models.backbone import DecisionTransformer
+from oaht_bench.models.bc_agent import BcAgent
 from oaht_bench.offline.registry import BaseAhtPolicy
 from oaht_bench.offline.utils import mask_logits, masked_accuracy, to_jax
 
@@ -71,25 +70,6 @@ def _filter_by_return(windows: Windows, top_return_quantile: float) -> np.ndarra
             f"{len(windows)} -- the threshold {threshold} excluded every episode."
         )
     return idx
-
-
-class BcNetwork(nn.Module):
-    """The shared backbone, unmodified: no embedding, no context, no
-    conditioning on anything about the teammate."""
-
-    action_dim: int
-    hidden_dim: int = 32
-    dropout: float = 0.1
-
-    @nn.compact
-    def __call__(self, rtg, obs, actions, *, timesteps, mask=None, train: bool = False):
-        logits, _ = DecisionTransformer(
-            action_dim=self.action_dim,
-            hidden_dim=self.hidden_dim,
-            use_cross_attention=False,
-            dropout=self.dropout,
-        )(rtg, obs, actions, timesteps=timesteps, mask=mask, train=train)
-        return logits
 
 
 def bc_loss(params, network, batch, *, rngs=None, train: bool = True):
@@ -126,15 +106,10 @@ class BcPolicy(BaseAhtPolicy):
     name = "bc"
 
     def build_model(self) -> None:
-        net = self.config.network
-        if net.obs_dim is None or net.action_dim is None:
-            raise ValueError(
-                "obs_dim/action_dim are unresolved on the network config; the "
-                "runner must resolve them from the dataset before build_model()."
-            )
-        self.network = BcNetwork(
-            action_dim=net.action_dim, hidden_dim=net.hidden_dim, dropout=net.dropout
-        )
+        # The model and inference are a composed BcAgent; training reads its
+        # network, and act delegates to it.
+        self.agent = BcAgent(self.config)
+        self.agent.build_model()
 
     def prepare(self, dataset, logger, *, rng, np_rng) -> None:
         super().prepare(dataset, logger, rng=rng, np_rng=np_rng)
@@ -166,7 +141,7 @@ class BcPolicy(BaseAhtPolicy):
         del stage1_params  # unused: nothing from stage 1 to condition on.
         init_batch = self._sample_batch(0)
         self.rng, k = jax.random.split(self.rng)
-        params = self.network.init(
+        params = self.agent.network.init(
             k,
             init_batch["ego_rtg"],
             init_batch["ego_obs"],
@@ -176,7 +151,7 @@ class BcPolicy(BaseAhtPolicy):
         )
 
         def loss(p, b, rngs):
-            return bc_loss(p, self.network, b, rngs=rngs)
+            return bc_loss(p, self.agent.network, b, rngs=rngs)
 
         return self._run_stage(
             loss,
@@ -188,6 +163,4 @@ class BcPolicy(BaseAhtPolicy):
         )
 
     def act(self, params, rtg, obs, actions, *, timesteps, mask):
-        return self.network.apply(
-            params["stage2"], rtg, obs, actions, timesteps=timesteps, mask=mask, train=False
-        )
+        return self.agent.act(params, rtg, obs, actions, timesteps=timesteps, mask=mask)
