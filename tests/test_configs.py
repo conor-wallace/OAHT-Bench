@@ -166,15 +166,6 @@ def test_schema_version_defaults_to_current():
 # --- jax-aht interop -------------------------------------------------------
 
 
-def test_task_config_matches_jax_aht_task_schema():
-    """The shape jax-aht's runners read after OmegaConf.to_container."""
-    task = get_preset("lbf_12x12").task_config()
-    assert set(task) == {"ENV_NAME", "ENV_KWARGS", "ROLLOUT_LENGTH", "TASK_NAME"}
-    assert task["ENV_NAME"] == "lbf"
-    assert task["ROLLOUT_LENGTH"] == 128
-    assert task["ENV_KWARGS"]["grid_size"] == 12
-
-
 # --- naming boundary -------------------------------------------------------
 
 
@@ -183,7 +174,7 @@ def test_config_fields_are_snake_case():
 
     Config authors write JSON against these field names; jax-aht's Hydra
     convention is an implementation detail of the boundary, translated in exactly
-    one place (``to_algorithm_dict``).
+    one place (the runtime layer's ``from_config``).
     """
     from oaht_bench.configs.env import HanabiConfig, LbfConfig, OvercookedV1Config
     from oaht_bench.configs.job import TeammateGenerationJob
@@ -212,24 +203,11 @@ def test_config_fields_are_snake_case():
     assert not offenders, f"non-snake_case config fields: {offenders}"
 
 
-def test_generator_translates_to_upstream_keys():
-    """The boundary translation produces the keys the absorbed code reads."""
-    from oaht_bench.configs.teammate_gen import BrDivConfig, FcpConfig, LBrDivConfig
-
-    fcp = FcpConfig(population_size=5).to_algorithm_dict()
-    assert fcp["ALG"] == "fcp"
-    assert fcp["PARTNER_POP_SIZE"] == 5
-    assert fcp["LR"] == 1e-4  # from PpoHyperparams.learning_rate
-
-    assert BrDivConfig(cross_play_weight=0.05).to_algorithm_dict()["XP_LOSS_WEIGHTS"] == 0.05
-    assert LBrDivConfig(lagrange_learning_rate=0.0036).to_algorithm_dict()["LAGRANGE_LR"] == 0.0036
-
-
 def test_comedi_defaults_to_eight_minibatches():
     """CoMeDi's base config differs from the shared PPO default; keep it."""
     from oaht_bench.configs.teammate_gen import CoMeDiConfig
 
-    assert CoMeDiConfig().to_algorithm_dict()["NUM_MINIBATCHES"] == 8
+    assert CoMeDiConfig().ppo.num_minibatches == 8
 
 
 def test_validate_job_shares_load_job_error_handling(tmp_path):
@@ -1631,24 +1609,6 @@ def test_mismatch_needs_two_members():
 
 
 # --- AD-RPG (clean-room reimplementation) -----------------------------------
-
-
-def test_rpg_config_to_algorithm_dict_carries_diversity_knobs():
-    """The resolved-config dump must record the RPG-specific hyperparameters."""
-    from oaht_bench.configs.teammate_gen import RpgConfig
-
-    d = RpgConfig(
-        population_size=3,
-        partnerplay_ratio=0.1,
-        off_diag_factor=0.25,
-        n_lookahead=2,
-        dice_lambda=0.95,
-    ).to_algorithm_dict()
-    assert d["ALG"] == "rpg"
-    assert d["N_LOOKAHEAD"] == 2
-    assert d["DICE_LAMBDA"] == 0.95
-    assert d["PARTNERPLAY_RATIO"] == 0.1
-    assert d["OFF_DIAG_FACTOR"] == 0.25
 
 
 def test_rpg_runtime_derives_outer_updates():

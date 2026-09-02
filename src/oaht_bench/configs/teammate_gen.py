@@ -8,9 +8,9 @@ none of these — and a dict cannot say so.
 Fields are snake_case and named for what they mean. The absorbed training code
 reads SCREAMING_CASE keys inherited from jax-aht's Hydra configs, but that is an
 implementation detail of the boundary, not something a config author should have
-to know; ``to_algorithm_dict`` is the single place the translation happens, the
-same way :meth:`~oaht_bench.configs.env.EnvConfigBase.env_kwargs` handles it for
-environments.
+to know; the translation happens once at the runtime layer
+(:mod:`oaht_bench.teammate_gen.runtime`'s ``from_config`` / ``to_agent_dict``),
+which reads these typed fields directly.
 
 Defaults reproduce jax-aht's, so a config that sets nothing behaves as upstream
 does. Population-size scaling guidance from §7.3 is documented on the fields it
@@ -20,7 +20,7 @@ not visible until cross-play matrices are inspected much later.
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
@@ -64,20 +64,6 @@ class PpoHyperparams(BaseConfig):
     max_grad_norm: float = Field(default=1.0, gt=0)
     anneal_lr: bool = False
 
-    def to_algorithm_dict(self) -> dict[str, Any]:
-        return {
-            "LR": self.learning_rate,
-            "UPDATE_EPOCHS": self.update_epochs,
-            "NUM_MINIBATCHES": self.num_minibatches,
-            "GAMMA": self.gamma,
-            "GAE_LAMBDA": self.gae_lambda,
-            "CLIP_EPS": self.clip_eps,
-            "ENT_COEF": self.entropy_coef,
-            "VF_COEF": self.value_coef,
-            "MAX_GRAD_NORM": self.max_grad_norm,
-            "ANNEAL_LR": self.anneal_lr,
-        }
-
 
 class GeneratorBase(BaseConfig):
     """Fields common to every generator."""
@@ -116,20 +102,6 @@ class GeneratorBase(BaseConfig):
         "content hash.",
     )
 
-    def _base_algorithm_dict(self) -> dict[str, Any]:
-        """The SCREAMING_CASE keys the absorbed training code reads."""
-        return {
-            "ALG": self.generator,
-            "NUM_CHECKPOINTS": self.num_checkpoints,
-            "PARTNER_POP_SIZE": self.population_size,
-            "NUM_ENVS": self.num_envs,
-            "TRAIN_SEED": self.train_seed,
-            "NUM_SEEDS": self.num_seeds,
-            "NUM_EVAL_EPISODES": self.num_eval_episodes,
-            **self.ppo.to_algorithm_dict(),
-            **self.network.to_agent_dict(),
-        }
-
 
 class FcpConfig(GeneratorBase):
     """Fictitious Co-Play: independent self-play runs, snapshotted during training.
@@ -142,13 +114,6 @@ class FcpConfig(GeneratorBase):
     generator: Literal["fcp"] = "fcp"
     actor_type: ActorType = "mlp"
     total_timesteps: float = Field(default=1e6, gt=0, description="Per member trained.")
-
-    def to_algorithm_dict(self) -> dict[str, Any]:
-        return {
-            **self._base_algorithm_dict(),
-            "ACTOR_TYPE": self.actor_type,
-            "TOTAL_TIMESTEPS": self.total_timesteps,
-        }
 
 
 def _comedi_ppo() -> PpoHyperparams:
@@ -199,16 +164,6 @@ class CoMeDiConfig(GeneratorBase):
             )
         return self
 
-    def to_algorithm_dict(self) -> dict[str, Any]:
-        return {
-            **self._base_algorithm_dict(),
-            "ACTOR_TYPE": self.actor_type,
-            "TOTAL_TIMESTEPS_PER_ITERATION": self.total_timesteps_per_iteration,
-            "NUM_ARGMAX_ROLLOUT_EPS": self.num_argmax_rollout_episodes,
-            "COMEDI_ALPHA": self.cross_play_weight,
-            "COMEDI_BETA": self.mixed_play_weight,
-        }
-
 
 class BrDivConfig(GeneratorBase):
     """BRDiv: maximize best-response diversity over the conf x br cross-play matrix."""
@@ -231,14 +186,6 @@ class BrDivConfig(GeneratorBase):
         "`num_envs` and `total_timesteps` instead (§7.3).",
     )
 
-    def to_algorithm_dict(self) -> dict[str, Any]:
-        return {
-            **self._base_algorithm_dict(),
-            "ACTOR_TYPE": self.actor_type,
-            "TOTAL_TIMESTEPS": self.total_timesteps,
-            "XP_LOSS_WEIGHTS": self.cross_play_weight,
-        }
-
 
 class LBrDivConfig(GeneratorBase):
     """L-BRDiv: BRDiv's objective with the weights learned as Lagrange multipliers."""
@@ -260,15 +207,6 @@ class LBrDivConfig(GeneratorBase):
         "(n_ref=3 for the 0.01 default). Left unscaled at n=5 this produced entropy "
         "runaway to ~49 and pg_loss to -25 (§7.3).",
     )
-
-    def to_algorithm_dict(self) -> dict[str, Any]:
-        return {
-            **self._base_algorithm_dict(),
-            "ACTOR_TYPE": self.actor_type,
-            "TOTAL_TIMESTEPS": self.total_timesteps,
-            "TOLERANCE_FACTOR": self.tolerance_factor,
-            "LAGRANGE_LR": self.lagrange_learning_rate,
-        }
 
 
 class RpgConfig(GeneratorBase):
@@ -320,18 +258,6 @@ class RpgConfig(GeneratorBase):
     )
     manipulator_lr: float = Field(default=2.5e-4, gt=0)
     manipulator_entropy_coef: float = Field(default=0.0, ge=0)
-
-    def to_algorithm_dict(self) -> dict[str, Any]:
-        return {
-            **self._base_algorithm_dict(),
-            "TOTAL_TIMESTEPS": self.total_timesteps,
-            "N_LOOKAHEAD": self.n_lookahead,
-            "DICE_LAMBDA": self.dice_lambda,
-            "PARTNERPLAY_RATIO": self.partnerplay_ratio,
-            "OFF_DIAG_FACTOR": self.off_diag_factor,
-            "MANIPULATOR_LR": self.manipulator_lr,
-            "MANIPULATOR_ENT_COEF": self.manipulator_entropy_coef,
-        }
 
 
 #: Discriminated union, selected by ``generator``.

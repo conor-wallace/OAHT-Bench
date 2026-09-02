@@ -102,20 +102,6 @@ class EnvConfigBase(VersionedConfig):
         """
         raise NotImplementedError
 
-    def task_config(self) -> dict[str, Any]:
-        """The ``task`` block jax-aht's runners expect.
-
-        Mirrors ``teammate_generation/configs/task/*.yaml``. We build it rather
-        than reading their YAML so there is one source of truth for what
-        ``lbf_12x12`` means.
-        """
-        return {
-            "ENV_NAME": self.env_name,
-            "ENV_KWARGS": self.env_kwargs(),
-            "ROLLOUT_LENGTH": self.rollout_length,
-            "TASK_NAME": self.name,
-        }
-
 
 class LbfConfig(EnvConfigBase):
     """Level-Based Foraging (Jumanji), via jax-aht's wrapper."""
@@ -302,9 +288,9 @@ class OvercookedV2Config(EnvConfigBase):
 
     def env_kwargs(self) -> dict[str, Any]:
         # max_steps deliberately not derived from rollout_length -- neither
-        # LBF's nor Hanabi's env_kwargs() do that either. rollout_length is
-        # the training loop's ROLLOUT_LENGTH (task_config()); it isn't passed
-        # to the environment constructor for any environment family here.
+        # LBF's nor Hanabi's env_kwargs() do that either. rollout_length is the
+        # training loop's horizon, not an environment kwarg; it isn't passed to
+        # the environment constructor for any environment family here.
         # OvercookedV2's own max_steps default (400) matches v1's effective
         # one, so it's left unset.
         kwargs: dict[str, Any] = {

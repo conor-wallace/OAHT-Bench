@@ -63,7 +63,6 @@ def run(job: TeammateGenerationJob) -> Path:
         )
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    cfg = job.to_jax_aht_cfg()
     alg = job.generator.generator
 
     runners = _generators()
@@ -71,18 +70,16 @@ def run(job: TeammateGenerationJob) -> Path:
         raise ValueError(f"No runner for generator {alg!r}. Known: {sorted(runners)}")
 
     # Fully resolved, not the delta form the authored config uses: an artifact
-    # must stay self-describing even if a default later moves.
+    # must stay self-describing even if a default later moves. job.json (written
+    # minimal=False) is that record; the same serialisation is the wandb config.
     save_job(job, run_dir / "job.json", minimal=False)
-    (run_dir / "resolved_config.json").write_text(
-        json.dumps(cfg, indent=2, sort_keys=True, default=str) + "\n"
-    )
 
     with RunLogger(
         run_dir,
         use_wandb=job.logging.use_wandb,
         wandb_project=job.logging.wandb_project,
         wandb_entity=job.logging.wandb_entity,
-        config=cfg,
+        config=json.loads(job.canonical_json()),
         verbose=job.logging.verbose,
     ) as logger:
         # All four generators read the typed job directly.

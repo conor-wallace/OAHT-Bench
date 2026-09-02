@@ -37,7 +37,6 @@ from oaht_bench.population.rescore import artifact_dir
 #: summary of what a run's curve showed; the raw log stays in results/.
 _PROVENANCE_FILES = (
     "config.json",
-    "resolved_config.json",
     "population_crossplay.csv",
     "Eval_LastXPMatrix.csv",
 )

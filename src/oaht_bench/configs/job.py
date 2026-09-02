@@ -12,7 +12,7 @@ corresponding package (``oaht_bench.teammate_generation``, ``oaht_bench.dataset`
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
@@ -129,44 +129,6 @@ class TeammateGenerationJob(JobBase):
         "for a population whose training curve read 0.40. It also discards the "
         "policy entropy, which makes entropy_coef unmeasurable in a sweep.",
     )
-
-    def to_jax_aht_cfg(self) -> dict[str, Any]:
-        """Build the nested dict the absorbed training code expects.
-
-        jax-aht drops Hydra at the boundary — its runners call
-        ``OmegaConf.to_container`` and then pass a plain dict to
-        ``run_fcp``/``run_comedi``/``run_brdiv``/``run_lbrdiv`` — so this hands
-        off directly, with no Hydra and no generated YAML.
-        """
-        task = self.env.task_config()
-        algorithm = self.generator.to_algorithm_dict()
-        # The generators read env fields from inside the algorithm block too,
-        # because upstream Hydra interpolated them there.
-        algorithm.update(
-            {
-                "ENV_NAME": task["ENV_NAME"],
-                "ENV_KWARGS": task["ENV_KWARGS"],
-                "ROLLOUT_LENGTH": task["ROLLOUT_LENGTH"],
-            }
-        )
-        return {
-            **task,
-            "task": task,
-            # Where the absorbed training code writes checkpoints. Upstream read
-            # this from Hydra's global; we pass it explicitly.
-            "run_dir": self.run_dir(),
-            "algorithm": algorithm,
-            "label": self.label,
-            "name": f"{task['TASK_NAME']}/{algorithm['ALG']}/{self.label}",
-            "train_ego": False,
-            "run_heldout_eval": False,
-            "logger": {
-                "verbose": self.logging.verbose,
-                "log_train_out": True,
-                "log_eval_out": True,
-            },
-            "local_logger": {"save_train_out": True, "save_eval_out": True},
-        }
 
 
 class DatasetCollectionJob(JobBase):
