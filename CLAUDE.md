@@ -1,8 +1,8 @@
 # OAHT-Bench
 
-A survey and benchmark for **offline ad-hoc teamwork**, targeting ICML 2027
-(deadline ~late January 2027). Four teammate generators (FCP, CoMeDi, BRDiv,
-L-BRDiv) across three environments (LBF 12×12, Overcooked-v1, Hanabi), feeding
+A survey and benchmark for **offline ad-hoc teamwork**, targeting AAMAS 2027.
+Four teammate generators (FCP, CoMeDi, BRDiv, L-BRDiv) across three environments
+(LBF 12×12, Hanabi, Overcooked-v2), feeding
 offline datasets and a shared decision-transformer backbone.
 
 `docs/offline_aht_benchmark_project.md` is the plan. `docs/baseline_specs.md`
