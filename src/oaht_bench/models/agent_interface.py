@@ -21,7 +21,7 @@ class AgentPolicy(abc.ABC):
     @abc.abstractmethod
     @partial(jax.jit, static_argnums=(0,))
     def get_action(self, params, obs, done, avail_actions, hstate, rng,
-                   aux_obs=None, env_state=None, test_mode=False) -> Tuple[int, chex.Array]:
+                   aux_obs=None, env_state=None, test_mode=False, reward=None) -> Tuple[int, chex.Array]:
         """
         Only computes an action given an observation, done flag, available actions, hidden state, and random key.
 
@@ -34,6 +34,9 @@ class AgentPolicy(abc.ABC):
             key (jax.random.PRNGKey): The random key.
             env_state (chex.Array): The environment state.
             aux_obs (chex.Array): an optional auxiliary vector to append to the observation
+            reward (chex.Array): the reward from the previous environment step. Reactive
+                policies ignore it; return-conditioned policies (the decision-transformer
+                offline agents) use it to decrement their target return-to-go.
         Returns:
             Tuple[int, chex.Array]: A tuple containing the action and the new hidden state.
         """

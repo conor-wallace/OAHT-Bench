@@ -25,7 +25,7 @@ class MLPActorCriticPolicy(AgentPolicy):
 
     @partial(jax.jit, static_argnums=(0,))
     def get_action(self, params, obs, done, avail_actions, hstate, rng,
-                   aux_obs=None, env_state=None, test_mode=False):
+                   aux_obs=None, env_state=None, test_mode=False, reward=None):
         """Get actions for the MLP policy."""
         pi, _ = self.network.apply(params, (obs, avail_actions))
         action = jax.lax.cond(test_mode,
@@ -64,7 +64,7 @@ class ActorWithDoubleCriticPolicy(AgentPolicy):
 
     @partial(jax.jit, static_argnums=(0,))
     def get_action(self, params, obs, done, avail_actions, hstate, rng,
-                   aux_obs=None, env_state=None, test_mode=False):
+                   aux_obs=None, env_state=None, test_mode=False, reward=None):
         """Get actions for the policy with double critics.
         """
         pi, _, _ = self.network.apply(params, (obs, avail_actions))
@@ -119,7 +119,7 @@ class ActorWithConditionalCriticPolicy(AgentPolicy):
 
     @partial(jax.jit, static_argnums=(0,))
     def get_action(self, params, obs, done, avail_actions, hstate, rng,
-                   aux_obs=None, env_state=None, test_mode=False):
+                   aux_obs=None, env_state=None, test_mode=False, reward=None):
         """Get actions."""
         # The agent id is only used by the critic, so we pass in a
         # dummy vector to represent the one-hot agent id

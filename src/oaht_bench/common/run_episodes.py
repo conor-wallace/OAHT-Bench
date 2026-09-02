@@ -41,7 +41,8 @@ def run_single_episode(rng, env, agent_0_param, agent_0_policy,
         rng=act0_rng,
         aux_obs=(init_act_onehot["agent_0"].reshape(1, 1, -1), init_joint_act_onehot, init_reward["agent_0"].reshape(1, 1, -1)),
         env_state=init_env_state,
-        test_mode=agent_0_test_mode
+        test_mode=agent_0_test_mode,
+        reward=init_reward["agent_0"].reshape(1, 1, -1),
     )
     act_0 = act_0.squeeze()
 
@@ -90,7 +91,8 @@ def run_single_episode(rng, env, agent_0_param, agent_0_policy,
                 rng=act0_rng,
                 aux_obs=(act_onehot["agent_0"].reshape(1, 1, -1), joint_act_onehot, reward["agent_0"].reshape(1, 1, -1)),
                 env_state=env_state,
-                test_mode=agent_0_test_mode
+                test_mode=agent_0_test_mode,
+                reward=reward["agent_0"].reshape(1, 1, -1),
             )
             act_0 = act_0.squeeze()
 

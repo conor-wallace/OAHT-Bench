@@ -89,6 +89,7 @@ include = [
     "src/oaht_bench/envs/protocols.py",
     "src/oaht_bench/models/backbone.py",
     "src/oaht_bench/models/liam_agent.py",
+    "src/oaht_bench/models/masking.py",
     "src/oaht_bench/offline/**/*.py",
     "src/oaht_bench/population/pooled_crossplay.py",
     "src/oaht_bench/teammate_gen/rpg.py",

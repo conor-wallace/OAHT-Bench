@@ -35,7 +35,7 @@ class RNNActorCriticPolicy(AgentPolicy):
 
     @partial(jax.jit, static_argnums=(0,))
     def get_action(self, params, obs, done, avail_actions, hstate, rng,
-                   aux_obs=None, env_state=None, test_mode=False):
+                   aux_obs=None, env_state=None, test_mode=False, reward=None):
         """Get actions for the RNN policy.
         Shape of obs, done, avail_actions should correspond to (seq_len, batch_size, ...)
         Shape of hstate should correspond to (1, batch_size, -1). We maintain the extra first dimension for
@@ -118,7 +118,7 @@ class RNNActorWithConditionalCriticPolicy(AgentPolicy):
 
     @partial(jax.jit, static_argnums=(0,))
     def get_action(self, params, obs, done, avail_actions, hstate, rng,
-                   aux_obs=None, env_state=None, test_mode=False):
+                   aux_obs=None, env_state=None, test_mode=False, reward=None):
         """Get actions for the RNN conditional-critic policy.
         Shape of obs, done, avail_actions should correspond to (seq_len, batch_size, ...)
         Shape of hstate should correspond to (1, batch_size, -1).

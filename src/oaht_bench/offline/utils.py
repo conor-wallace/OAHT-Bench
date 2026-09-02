@@ -2,6 +2,19 @@ from typing import Any
 
 import jax.numpy as jnp
 
+# mask_logits moved to the model layer (models/masking.py) so the return-conditioned
+# agents can mask at inference without models importing offline; re-exported here so
+# the baselines keep importing it from offline.utils.
+from oaht_bench.models.masking import mask_logits
+
+__all__ = [
+    "mask_logits",
+    "masked_accuracy",
+    "to_jax",
+    "sample_window_batch",
+    "WINDOW_BATCH_KEYS",
+]
+
 
 def masked_accuracy(logits, labels, mask) -> jnp.ndarray:
     """Top-1 accuracy over valid timesteps.
@@ -14,23 +27,6 @@ def masked_accuracy(logits, labels, mask) -> jnp.ndarray:
     correct = (jnp.argmax(logits, axis=-1) == labels).astype(jnp.float32)
     m = mask.astype(jnp.float32)
     return (correct * m).sum() / jnp.maximum(m.sum(), 1.0)
-
-
-def mask_logits(logits, avail):
-    """Suppress unavailable actions, as every absorbed policy does.
-
-    ``logits - (1 - avail) * 1e10`` (``agents/mlp_actor_critic.py:36-37``) rather
-    than ``-inf``, which would make a fully-masked row NaN after softmax.
-
-    Collection already applies this: every seat's ``get_action`` receives
-    ``avail_actions``, so a recorded action is always legal. Without it here the
-    learned policy is trained and evaluated under a weaker constraint than the
-    data was generated under -- on LBF that is 20.5% of (step, action) pairs, and
-    action 5 is unavailable 67% of the time.
-    """
-    if avail is None:
-        return logits
-    return logits - (1.0 - avail) * 1e10
 
 
 def to_jax(data: dict[str, Any]) -> dict[str, jnp.ndarray]:
