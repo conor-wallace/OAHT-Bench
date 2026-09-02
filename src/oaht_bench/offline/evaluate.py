@@ -191,6 +191,64 @@ def _rollout(
     return total
 
 
+def evaluate_agent(
+    agent,
+    params,
+    env,
+    loaded,
+    members,
+    *,
+    rng,
+    target_return: float,
+    max_episode_steps: int,
+    num_episodes: int = 20,
+    ego_index: int = 0,
+) -> EvalScores:
+    """The :func:`evaluate` counterpart for an ego that is an ``AgentPolicy``.
+
+    Where :func:`evaluate` drives a bare ``predict`` callable through the Python
+    ``_rollout`` loop, this drives a real :class:`~oaht_bench.models.agent_interface.AgentPolicy`
+    (e.g. :class:`~oaht_bench.models.liam_agent.LiamAgent`) through the shared,
+    vmapped :func:`~oaht_bench.common.run_episodes.run_episodes`: the rolling
+    window and return-to-go bookkeeping now live in the agent, so nothing here
+    needs the context length, observation dimension or normalisation -- they are
+    baked into the agent. The ego takes seat ``agent_0``; the return is the ego
+    seat of LogWrapper's per-agent episode return, the same quantity ``_rollout``
+    summed by hand.
+    """
+    import jax
+
+    from oaht_bench.common.run_episodes import run_episodes
+    from oaht_bench.population.members import get_member_params
+
+    per_teammate, stderr = {}, {}
+    for m in members:
+        mate_params = get_member_params(loaded.params, int(m))
+        rng, ep_rng = jax.random.split(rng)
+        out = run_episodes(
+            ep_rng,
+            env,
+            agent_0_param=params,
+            agent_0_policy=agent,
+            agent_1_param=mate_params,
+            agent_1_policy=loaded.policy_cls,
+            max_episode_steps=max_episode_steps,
+            num_eps=num_episodes,
+        )
+        returns = np.asarray(out["returned_episode_returns"])[:, ego_index]
+        per_teammate[int(m)] = float(returns.mean())
+        stderr[int(m)] = (
+            float(returns.std(ddof=1) / np.sqrt(len(returns))) if len(returns) > 1 else 0.0
+        )
+
+    return EvalScores(
+        per_teammate=per_teammate,
+        per_teammate_stderr=stderr,
+        episodes_per_teammate=num_episodes,
+        target_return=float(target_return),
+    )
+
+
 def evaluate(
     predict,
     env,

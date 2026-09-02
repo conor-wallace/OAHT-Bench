@@ -139,8 +139,13 @@ def run(job: TrainingJob) -> Path:
         else:
             with nonfatal(f"{job.baseline} evaluation rollouts"):
                 eval_scores = _evaluate(
-                    job, dataset.batch, dataset.windows,
-                    stage1_params, stage2_params, action_dim, logger,
+                    job,
+                    dataset.batch,
+                    dataset.windows,
+                    stage1_params,
+                    stage2_params,
+                    action_dim,
+                    logger,
                 )
 
         with nonfatal(f"{job.baseline} post-training summary"):
@@ -187,7 +192,7 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
     from oaht_bench.envs import make_env
     from oaht_bench.envs.log_wrapper import LogWrapper
     from oaht_bench.offline import get_policy
-    from oaht_bench.offline.evaluate import dataset_target_return, evaluate
+    from oaht_bench.offline.evaluate import dataset_target_return, evaluate, evaluate_agent
     from oaht_bench.population import artifact_dir, population_from_run, released_members
 
     cfg = job.offline
@@ -198,35 +203,63 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
     loaded = population_from_run(gen_job, load_train_run(str(artifact_dir(run_dir))), env)
     members = released_members(gen_job, loaded.pop_size)
 
-    # Every baseline is on the BaseAhtPolicy contract: rebuild the policy from the
-    # (pure) config with resolved dims and point the eval loop at policy.act. TAO's
-    # deployment context is baked into stage2_params, so act needs no extra state.
     resolved = _resolve_dims(cfg, windows.obs_dim, action_dim)
-    policy = get_policy(resolved)(resolved)
-    policy.build_model()
     params = {"stage1": stage1_params, "stage2": stage2_params}
-
-    def predict(rtg, obs, actions, timesteps, mask):
-        return policy.act(params, rtg, obs, actions, timesteps=timesteps, mask=mask)
-
-    # jit the whole ego forward pass: the rollout calls it once per environment
-    # step, and Flax's apply overhead dominates otherwise.
-    predict = jax.jit(predict)
-
     target = dataset_target_return(batch)
-    scores = evaluate(
-        predict,
-        env,
-        loaded,
-        members,
-        rng=jax.random.PRNGKey(job.seed + 1),
-        context_length=cfg.context_length,
-        max_episode_steps=job.env.rollout_length,
-        target_return=target if windows.norm is None else windows.norm.apply_rtg(target),
-        normalization=windows.norm,
-        num_episodes=job.offline.eval_episodes,
-        obs_dim=windows.obs_dim,
-    )
+    cond_target = target if windows.norm is None else windows.norm.apply_rtg(target)
+
+    if resolved.network.architecture == "liam":
+        # LIAM is an AgentPolicy: the rolling window / RTG bookkeeping lives in the
+        # agent, so it runs through the shared vmapped run_episodes rather than the
+        # per-step Python _rollout. The other baselines still take the _rollout path
+        # below until they are ported onto the AgentPolicy contract too.
+        from oaht_bench.models.liam_agent import LiamAgent
+
+        agent = LiamAgent(
+            resolved,
+            context_length=cfg.context_length,
+            target_return=cond_target,
+            normalization=windows.norm,
+        )
+        agent.build_model()
+        scores = evaluate_agent(
+            agent,
+            params,
+            env,
+            loaded,
+            members,
+            rng=jax.random.PRNGKey(job.seed + 1),
+            target_return=cond_target,
+            max_episode_steps=job.env.rollout_length,
+            num_episodes=job.offline.eval_episodes,
+        )
+    else:
+        # The remaining baselines rebuild from the (pure) resolved config and point
+        # the _rollout loop at policy.act. TAO's deployment context is baked into
+        # stage2_params, so act needs no extra state.
+        policy = get_policy(resolved)(resolved)
+        policy.build_model()
+
+        def predict(rtg, obs, actions, timesteps, mask):
+            return policy.act(params, rtg, obs, actions, timesteps=timesteps, mask=mask)
+
+        # jit the whole ego forward pass: the rollout calls it once per environment
+        # step, and Flax's apply overhead dominates otherwise.
+        predict = jax.jit(predict)
+
+        scores = evaluate(
+            predict,
+            env,
+            loaded,
+            members,
+            rng=jax.random.PRNGKey(job.seed + 1),
+            context_length=cfg.context_length,
+            max_episode_steps=job.env.rollout_length,
+            target_return=cond_target,
+            normalization=windows.norm,
+            num_episodes=job.offline.eval_episodes,
+            obs_dim=windows.obs_dim,
+        )
     for m, v in scores.per_teammate.items():
         logger.log_item(f"Eval/Return_teammate_{m}", v)
     logger.log_item("Eval/MeanReturn", scores.mean_return)
