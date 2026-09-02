@@ -1,8 +1,13 @@
-"""The config layer's guarantees: strictness, provenance, and round-tripping.
+"""Config-driven logic that isn't itself a pydantic model.
 
-These do not need JAX. They cover the properties the reproducibility claim rests
-on — a config file fully determines a run, hashes stably, and rejects anything
-it cannot interpret rather than silently defaulting.
+The pure config-model tests (pydantic strictness, hashing, (de)serialization) were
+dropped: those exercise pydantic, not our code. What remains are behaviours the
+config *feeds* — teammate-generation runtime derivation and training plans, metric
+logging, cross-play and FCP scoring, dataset seating, and AD-RPG — each of which
+builds its config in memory (no shipped-file paths).
+
+TODO(tests): these still target teammate_gen/common/population/dataset; split them
+into ``tests/unit/<pkg>/`` to finish the source-mirrored layout (deferred).
 """
 
 from __future__ import annotations
@@ -12,9 +17,8 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from oaht_bench.configs import SCHEMA_VERSION, get_preset, load_job, save_job, validate_job
-from oaht_bench.configs.env import HanabiConfig, LbfConfig
-from oaht_bench.configs.job import JobConfig, TeammateGenerationJob
+from oaht_bench.configs import get_preset, load_job, save_job
+from oaht_bench.configs.job import TeammateGenerationJob
 from oaht_bench.configs.teammate_gen import FcpConfig
 
 
@@ -26,284 +30,6 @@ def _job(**overrides) -> TeammateGenerationJob:
     )
     kwargs.update(overrides)
     return TeammateGenerationJob(**kwargs)
-
-
-# --- strictness ------------------------------------------------------------
-
-
-def test_unknown_fields_are_rejected():
-    """The whole point of the typed layer.
-
-    jax-aht reads kwargs with ``dict.get(key, default)``, so a misspelled field
-    would otherwise fall through to a silent default and produce a *different
-    environment* than intended — an entire dataset collected against the wrong
-    config, with no error anywhere.
-    """
-    with pytest.raises(ValidationError, match="grid_sise"):
-        LbfConfig(name="typo", grid_size=12, num_food=6, rollout_length=128, grid_sise=12)
-
-
-def test_hanabi_kwargs_rejected_on_lbf():
-    """The discriminated union keeps each environment's parameters separate."""
-    with pytest.raises(ValidationError):
-        LbfConfig(name="x", grid_size=12, num_food=6, rollout_length=128, num_colors=5)
-
-
-def test_lbf_food_capacity_is_checked_at_config_load():
-    """Jumanji asserts this at reset(); catching it here names the conflicting fields."""
-    with pytest.raises(ValidationError, match="grid too small"):
-        LbfConfig(name="x", grid_size=7, num_food=6, rollout_length=128)
-
-
-def test_hanabi_deck_consistency_is_checked():
-    with pytest.raises(ValidationError, match="num_cards_of_rank"):
-        HanabiConfig(
-            name="x",
-            num_colors=5,
-            num_ranks=5,
-            hand_size=5,
-            max_info_tokens=8,
-            max_life_tokens=3,
-            num_cards_of_rank=(3, 2, 2),  # 3 entries, num_ranks=5
-            rollout_length=128,
-        )
-
-
-def test_hanabi_deck_must_outlast_the_deal():
-    with pytest.raises(ValidationError, match="leaves nothing to draw"):
-        HanabiConfig(
-            name="x",
-            num_colors=1,
-            num_ranks=1,
-            hand_size=5,
-            max_info_tokens=8,
-            max_life_tokens=3,
-            num_cards_of_rank=(2,),
-            rollout_length=128,
-        )
-
-
-# --- provenance ------------------------------------------------------------
-
-
-def test_content_hash_is_stable_and_order_independent():
-    """The hash is written into artifacts, so it must not depend on key order."""
-    a = _job()
-    b = TeammateGenerationJob.model_validate(json.loads(a.canonical_json()))
-    assert a.content_hash() == b.content_hash()
-
-
-def test_content_hash_changes_with_any_field():
-    base = _job()
-    assert base.content_hash() != _job(seed=1).content_hash()
-    assert base.content_hash() != _job(generator=FcpConfig(population_size=6)).content_hash()
-    assert base.content_hash() != _job(env=get_preset("hanabi")).content_hash()
-
-
-def test_run_dir_is_disambiguated_by_hash():
-    """Two runs sharing a label but differing in config must not collide."""
-    a, b = _job(seed=0), _job(seed=1)
-    assert a.label == b.label
-    assert a.run_dir() != b.run_dir()
-
-
-# --- serialization ---------------------------------------------------------
-
-
-def test_job_round_trips_through_json(tmp_path):
-    original = _job()
-    path = save_job(original, tmp_path / "job.json")
-    loaded = load_job(path)
-    assert loaded == original
-    assert loaded.content_hash() == original.content_hash()
-
-
-def test_job_type_selects_the_model():
-    """JobConfig is a real class, so pydantic's usual interface works on it."""
-    payload = {"job": json.loads(_job().canonical_json())}
-    assert JobConfig.model_validate(payload).job.job_type == "teammate_generation"
-    assert validate_job(payload).job_type == "teammate_generation"
-
-
-def test_flat_payload_gets_a_targeted_error():
-    """``extra="forbid"`` would otherwise report every job field as unexpected,
-    burying the actual mistake."""
-    with pytest.raises(ValueError, match='belong under a "job" key'):
-        validate_job(json.loads(_job().canonical_json()))
-
-
-def test_missing_job_key_is_a_clear_error(tmp_path):
-    p = tmp_path / "j.json"
-    p.write_text(json.dumps({"label": "x"}))
-    with pytest.raises(ValueError, match="missing 'job'"):
-        load_job(p)
-
-
-def test_malformed_json_names_the_file(tmp_path):
-    p = tmp_path / "j.json"
-    p.write_text("{not json")
-    with pytest.raises(ValueError, match="not valid JSON"):
-        load_job(p)
-
-
-# --- schema versioning -----------------------------------------------------
-
-
-def test_future_schema_version_is_refused(tmp_path):
-    """A newer config must fail loudly rather than load with fields dropped."""
-    payload = {"job": json.loads(_job().canonical_json())}
-    payload["schema_version"] = SCHEMA_VERSION + 1
-    p = tmp_path / "j.json"
-    p.write_text(json.dumps(payload))
-    with pytest.raises(ValidationError, match="Upgrade oaht-bench"):
-        load_job(p)
-
-
-def test_schema_version_defaults_to_current():
-    assert _job().schema_version == SCHEMA_VERSION
-
-
-# --- jax-aht interop -------------------------------------------------------
-
-
-# --- naming boundary -------------------------------------------------------
-
-
-def test_config_fields_are_snake_case():
-    """Our public API must not leak the absorbed code's SCREAMING_CASE keys.
-
-    Config authors write JSON against these field names; jax-aht's Hydra
-    convention is an implementation detail of the boundary, translated in exactly
-    one place (the runtime layer's ``from_config``).
-    """
-    from oaht_bench.configs.env import HanabiConfig, LbfConfig, OvercookedV1Config
-    from oaht_bench.configs.job import TeammateGenerationJob
-    from oaht_bench.configs.teammate_gen import (
-        BrDivConfig,
-        CoMeDiConfig,
-        FcpConfig,
-        LBrDivConfig,
-        PpoHyperparams,
-    )
-
-    models = [
-        LbfConfig,
-        HanabiConfig,
-        OvercookedV1Config,
-        TeammateGenerationJob,
-        PpoHyperparams,
-        FcpConfig,
-        CoMeDiConfig,
-        BrDivConfig,
-        LBrDivConfig,
-    ]
-    offenders = [
-        f"{m.__name__}.{name}" for m in models for name in m.model_fields if name != name.lower()
-    ]
-    assert not offenders, f"non-snake_case config fields: {offenders}"
-
-
-def test_comedi_defaults_to_eight_minibatches():
-    """CoMeDi's base config differs from the shared PPO default; keep it."""
-    from oaht_bench.configs.teammate_gen import CoMeDiConfig
-
-    assert CoMeDiConfig().ppo.num_minibatches == 8
-
-
-def test_validate_job_shares_load_job_error_handling(tmp_path):
-    """In-memory validation gives the same message as loading from a file."""
-    with pytest.raises(ValueError, match="missing 'job'"):
-        validate_job({"label": "x"})
-
-
-def test_public_api_does_not_leak_the_adapter():
-    """The adapter is an implementation detail of load_job/validate_job.
-
-    Exposing it would let callers bypass the error handling that turns a bad
-    config into a message naming the file and field.
-    """
-    import oaht_bench.configs as c
-
-    assert "JOB_ADAPTER" not in c.__all__
-    assert {"load_job", "validate_job"} <= set(c.__all__)
-
-
-# --- branching fields must be constrained ----------------------------------
-
-#: Field names whose value selects a code path. A plain ``str`` here reaches an
-#: if/elif chain with no ``else``, so a typo either crashes deep inside training
-#: or silently selects different behaviour.
-_BRANCHING_FIELD_SUFFIXES = ("_type", "_name", "baseline", "backbone", "variant", "generator")
-
-
-def _all_config_models():
-    from oaht_bench.configs import env as env_mod
-    from oaht_bench.configs import job as job_mod
-    from oaht_bench.configs import teammate_gen as tg_mod
-    from oaht_bench.configs.base import BaseConfig
-
-    seen = {}
-    for mod in (env_mod, job_mod, tg_mod):
-        for _name, obj in vars(mod).items():
-            if isinstance(obj, type) and issubclass(obj, BaseConfig) and obj is not BaseConfig:
-                seen[obj.__name__] = obj
-    return list(seen.values())
-
-
-def test_branching_fields_are_not_bare_strings():
-    """Any field that selects a code path must be a Literal, not a str.
-
-    ``job_type`` was already safe, but ``actor_type`` and ``baseline`` were not:
-    both feed if/elif dispatch in the absorbed code, so 'mpl' or 'LIAM' would
-    have passed validation and failed much later, or silently done the wrong
-    thing.
-    """
-    import typing
-
-    offenders = []
-    for model in _all_config_models():
-        for name, field in model.model_fields.items():
-            if not any(name.endswith(s) or name == s for s in _BRANCHING_FIELD_SUFFIXES):
-                continue
-            ann = field.annotation
-            # Unwrap Optional[...] and other unions to look for a Literal member.
-            args = typing.get_args(ann)
-            is_literal = typing.get_origin(ann) is typing.Literal or any(
-                typing.get_origin(a) is typing.Literal for a in args
-            )
-            if ann is str and not is_literal:
-                offenders.append(f"{model.__name__}.{name}")
-    assert not offenders, (
-        "branching fields typed as bare str; use Literal so a typo fails at "
-        f"config load: {offenders}"
-    )
-
-
-def test_actor_type_typo_is_rejected():
-    from oaht_bench.configs.teammate_gen import FcpConfig
-
-    with pytest.raises(ValidationError, match="Input should be"):
-        FcpConfig(actor_type="mpl")
-
-
-def test_baseline_typo_is_rejected():
-    from oaht_bench.configs.job import TrainingJob
-
-    with pytest.raises(ValidationError, match="Input should be"):
-        TrainingJob(label="t", env=get_preset("lbf_12x12"), dataset_path="d", baseline="LIAM")
-
-
-def test_baseline_roster_matches_the_plan():
-    """Thirteen baselines in four groups (§12.9)."""
-    import typing
-
-    from oaht_bench.configs.job import BaselineName
-
-    names = set(typing.get_args(BaselineName))
-    assert len(names) == 13
-    assert {"random", "bc", "oracle"} <= names  # floors and ceiling
-    assert {"ad", "dpt", "amago_offline", "hybrid_ad"} <= names  # learning-history
-    assert {"liam", "meliba", "tao", "omis", "taget"} <= names  # trajectory-view
 
 
 # --- derived runtime values ------------------------------------------------
@@ -561,7 +287,7 @@ def test_no_generator_reads_a_config_dict():
     import pathlib
     import re
 
-    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "oaht_bench" / "teammate_gen"
+    src = pathlib.Path(__file__).resolve().parents[2] / "src" / "oaht_bench" / "teammate_gen"
     # runtime.py quotes the old pattern in its module docstring to explain what
     # it replaced, so it is prose rather than a live read.
     offenders = []
@@ -572,71 +298,7 @@ def test_no_generator_reads_a_config_dict():
     assert not offenders, f"config dict reads remain: {offenders}"
 
 
-# --- shipped teammate-generation configs ------------------------------------
-
-
-def _shipped_configs():
-    import pathlib
-
-    root = pathlib.Path(__file__).resolve().parents[1] / "configs" / "teammate_gen"
-    return sorted(root.rglob("*.json"))
-
-
-def test_shipped_configs_exist_for_every_generator_and_tier1_env():
-    from oaht_bench.configs import preset_names
-
-    paths = _shipped_configs()
-    envs = {p.parent.name for p in paths}
-    gens = {p.stem for p in paths}
-    tier1 = set(preset_names("tier1"))
-    assert envs == tier1
-
-    # The four cooperative generators cover every tier1 environment. AD-RPG is
-    # shipped for LBF only: it is 2-player, ~n^2 in cost, and only validated on the
-    # environment the others are tuned on (see gen_teammate_configs.py and
-    # docs/tuning_record.md), so it is deliberately not emitted for the rest.
-    cooperative = {"fcp", "comedi", "brdiv", "lbrdiv"}
-    assert gens == cooperative | {"rpg"}
-    rpg_envs = {p.parent.name for p in paths if p.stem == "rpg"}
-    assert rpg_envs == {"lbf_12x12"}
-    assert len(paths) == len(cooperative) * len(tier1) + 1
-
-
-@pytest.mark.parametrize("path", _shipped_configs(), ids=lambda p: f"{p.parent.name}/{p.stem}")
-def test_shipped_config_builds_a_valid_runtime(path):
-    """Every shipped config must survive runtime construction.
-
-    That is where budget and minibatch constraints are checked, so this catches a
-    config that would train nothing or fail deep inside a vmap -- before anyone
-    queues it on a cluster.
-    """
-    from oaht_bench.configs import load_job
-    from oaht_bench.teammate_gen.runtime import (
-        CoMeDiRuntime,
-        PairedDiversityRuntime,
-        PpoRuntime,
-    )
-
-    job = load_job(path)
-    gen, rl = job.generator, job.env.rollout_length
-
-    if gen.generator == "fcp":
-        rt = PpoRuntime.from_config(
-            ppo=gen.ppo,
-            network=gen.network,
-            actor_type=gen.actor_type,
-            rollout_length=rl,
-            num_envs=gen.num_envs,
-            total_timesteps=gen.total_timesteps,
-            num_checkpoints=gen.num_checkpoints,
-            num_agents=2,
-        )
-    elif gen.generator == "comedi":
-        rt = CoMeDiRuntime.from_config(gen, rollout_length=rl, num_agents=2)
-    else:
-        rt = PairedDiversityRuntime.from_config(gen, rollout_length=rl, num_agents=2)
-
-    assert rt.num_updates >= 1
+# --- generator config invariants ------------------------------------------
 
 
 def test_overcooked_configs_enable_reward_shaping():
@@ -645,20 +307,18 @@ def test_overcooked_configs_enable_reward_shaping():
     A population trained without shaping solves a materially harder sparse-reward
     task and is not comparable to one trained with it.
     """
-    from oaht_bench.configs import load_job
+    from oaht_bench.configs import get_preset, preset_names
 
-    for path in _shipped_configs():
+    for env_name in preset_names():
         # v1 only: OvercookedV2Config has no do_reward_shaping field.
         # Whether v2 populations should train against shaped or sparse
         # reward is a real, open question -- v2's own SHAPED_REWARDS
         # mechanism exists (settings.py) but isn't folded into the
         # returned reward by the wrapper (see overcooked_v2_wrapper.py),
         # deliberately left undecided rather than defaulted silently.
-        if not path.parent.name.startswith("overcooked") or path.parent.name.startswith(
-            "overcooked_v2"
-        ):
+        if not env_name.startswith("overcooked") or env_name.startswith("overcooked_v2"):
             continue
-        env = load_job(path).env
+        env = get_preset(env_name)
         assert env.do_reward_shaping is True
         assert "reward_shaping_params" in env.env_kwargs()
 
@@ -671,95 +331,6 @@ def test_lagrange_lr_is_scaled_for_population_size():
     assert _lagrange_lr(5) == pytest.approx(0.0036, abs=1e-6)
 
 
-# --- minimal (delta) config files -------------------------------------------
-
-
-def test_minimal_dump_keeps_discriminator_tags():
-    """exclude_defaults alone drops job_type, env_name and generator.
-
-    Their values equal their defaults, but the discriminated unions need them to
-    choose a model, so a plain sparse dump produces an unloadable file.
-    """
-    from oaht_bench.configs.job import JobConfig
-
-    d = JobConfig(job=_job()).minimal_dump()
-    assert d["job"]["job_type"] == "teammate_generation"
-    assert d["job"]["env"]["env_name"] == "lbf"
-    assert d["job"]["generator"]["generator"] == "fcp"
-
-
-def test_minimal_dump_omits_defaults():
-    from oaht_bench.configs.job import JobConfig
-
-    d = JobConfig(job=_job()).minimal_dump()
-    assert "seed" not in d["job"]  # default 0
-    assert "logging" not in d["job"]  # all defaults
-    assert "ppo" not in d["job"]["generator"]  # FCP's LBF PPO block is all defaults here
-
-
-def test_minimal_dump_omits_all_default_nested_models():
-    """An untouched nested model is dropped whole, tag included.
-
-    Loading reconstructs it, so emitting a lone tag for it would be noise.
-    """
-    from oaht_bench.configs.job import JobConfig
-
-    d = JobConfig(job=_job()).minimal_dump()
-    assert "network" not in d["job"]["generator"]
-
-
-def test_minimal_dump_always_states_schema_version():
-    """A file without it is indistinguishable from one written against a schema
-    this build cannot interpret."""
-    from oaht_bench.configs.job import JobConfig
-
-    assert JobConfig(job=_job()).minimal_dump()["schema_version"] == SCHEMA_VERSION
-
-
-def test_minimal_and_full_forms_are_equivalent(tmp_path):
-    """The delta file must load to the same object, and the same hash, as the
-    full one -- otherwise provenance depends on which form was written."""
-    from oaht_bench.configs.job import JobConfig
-
-    original = _job()
-    lean = JobConfig(job=original).to_json_file(tmp_path / "lean.json", minimal=True)
-    fat = JobConfig(job=original).to_json_file(tmp_path / "fat.json", minimal=False)
-
-    a, b = load_job(lean), load_job(fat)
-    assert a == b == original
-    assert a.content_hash() == b.content_hash() == original.content_hash()
-    assert lean.read_text().count("\n") < fat.read_text().count("\n")
-
-
-@pytest.mark.parametrize("path", _shipped_configs(), ids=lambda p: f"{p.parent.name}/{p.stem}")
-def test_shipped_configs_are_deltas(path):
-    """Shipped configs state what the experiment changes, not every default."""
-    import json
-
-    payload = json.loads(path.read_text())
-    gen = payload["job"]["generator"]
-    # A generator block restating all ten PPO fields means the delta broke.
-    assert len(gen.get("ppo", {})) < 10
-
-
-def test_run_directories_record_the_full_config(tmp_path):
-    """Authored configs are deltas; recorded ones are not.
-
-    A run's job.json must remain self-describing even if a default later moves,
-    otherwise a released artifact's meaning depends on the code version that
-    reads it.
-    """
-    import json
-
-    from oaht_bench.configs import save_job
-
-    p = save_job(_job(), tmp_path / "job.json", minimal=False)
-    payload = json.loads(p.read_text())
-    ppo = payload["job"]["generator"]["ppo"]
-    assert len(ppo) == 10  # every PPO field stated
-    assert "logging" in payload["job"]
-
-
 # --- cross-generator metric parity ------------------------------------------
 
 
@@ -770,7 +341,6 @@ def test_log_training_curves_emits_the_shared_tags(tmp_path):
     L-BRDiv have their own loops and collected but never logged them, so
     convergence could not be compared across methods.
     """
-    import json
 
     import numpy as np
 
@@ -798,7 +368,6 @@ def test_log_training_curves_emits_the_shared_tags(tmp_path):
 
 def test_log_training_curves_averages_over_seeds(tmp_path):
     """Statistics arrive as (num_seeds, num_updates); only the update axis survives."""
-    import json
 
     import numpy as np
 
@@ -825,7 +394,7 @@ def test_all_generators_report_the_same_episode_statistics():
     """
     import pathlib
 
-    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "oaht_bench" / "teammate_gen"
+    src = pathlib.Path(__file__).resolve().parents[2] / "src" / "oaht_bench" / "teammate_gen"
     assert 'f"Train/{stat_name}"' in (src / "marl" / "ippo.py").read_text()
     for name in ("BRDiv.py", "LBRDiv.py"):
         assert "log_update_metrics" in (src / name).read_text()
@@ -837,7 +406,6 @@ def test_log_update_metrics_skips_non_scalars(tmp_path):
     The paired generators' loss terms carry a population axis; a partially
     reduced array is not meaningful plotted against an update step.
     """
-    import json
 
     import numpy as np
 
@@ -887,7 +455,7 @@ def test_paired_generators_stream_rather_than_batch():
     """
     import pathlib
 
-    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "oaht_bench" / "teammate_gen"
+    src = pathlib.Path(__file__).resolve().parents[2] / "src" / "oaht_bench" / "teammate_gen"
     for name in ("BRDiv.py", "LBRDiv.py"):
         text = (src / name).read_text()
         assert "io_callback" in text, f"{name} does not stream"
@@ -946,14 +514,6 @@ def test_training_plan_surfaces_an_unrunnable_budget():
         training_plan(_job(generator=gen))
 
 
-@pytest.mark.parametrize("path", _shipped_configs(), ids=lambda p: f"{p.parent.name}/{p.stem}")
-def test_shipped_configs_have_a_computable_plan(path):
-    from oaht_bench.configs import load_job
-    from oaht_bench.teammate_gen.plan import training_plan
-
-    assert training_plan(load_job(path)).sequential_updates >= 1
-
-
 def test_comedi_streams_its_outer_loop_not_only_the_warmup():
     """CoMeDi's Train/ curve must cover the whole run.
 
@@ -963,7 +523,7 @@ def test_comedi_streams_its_outer_loop_not_only_the_warmup():
     """
     import pathlib
 
-    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "oaht_bench" / "teammate_gen"
+    src = pathlib.Path(__file__).resolve().parents[2] / "src" / "oaht_bench" / "teammate_gen"
     text = (src / "CoMeDi.py").read_text()
     assert "io_callback" in text, "CoMeDi does not stream its outer loop"
     # The streamed step must continue past the warmup rather than restart at 0.
@@ -979,7 +539,7 @@ def test_comedi_streams_self_play_for_continuity():
     """
     import pathlib
 
-    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "oaht_bench" / "teammate_gen"
+    src = pathlib.Path(__file__).resolve().parents[2] / "src" / "oaht_bench" / "teammate_gen"
     text = (src / "CoMeDi.py").read_text()
     stream_block = text[
         text.index("sp_metric = jax.tree.map") : text.index("jax.experimental.io_callback(_stream")
@@ -998,7 +558,7 @@ def test_paired_generators_log_the_intended_pairing_only():
     """
     import pathlib
 
-    src = pathlib.Path(__file__).resolve().parents[1] / "src" / "oaht_bench" / "teammate_gen"
+    src = pathlib.Path(__file__).resolve().parents[2] / "src" / "oaht_bench" / "teammate_gen"
     for name in ("BRDiv.py", "LBRDiv.py"):
         text = (src / name).read_text()
         block = text[text.index("_paired = (") : text.index("jax.experimental.io_callback(_stream")]
@@ -1095,7 +655,6 @@ def test_sweep_rejects_an_unrunnable_cell_before_writing(tmp_path):
 
 def test_sweep_manifest_records_cost_per_cell(tmp_path):
     """Sizing a sweep needs the update count, not just the cell count."""
-    import json
 
     from scripts.sweep import generate
 
@@ -1165,7 +724,6 @@ def test_sweep_ranks_competence_before_separation(tmp_path):
     Cross-play falls both when members are genuinely distinct and when they
     cannot score at all, so competence has to gate the ranking.
     """
-    import json
 
     import numpy as np
 
@@ -1457,12 +1015,15 @@ def test_paired_generators_scale_envs_with_population_squared():
     The loss weighting genuinely is population-size invariant, which is what made
     this easy to miss -- it is the data behind each pairing that binds.
     """
-    from oaht_bench.configs import load_job
+    from scripts.gen_teammate_configs import build
 
     reference = 64 / 3**2  # the n=3 setting that produced a working population
     for env in ("lbf_12x12", "overcooked_counter_circuit", "hanabi"):
         for name in ("brdiv", "lbrdiv"):
-            gen = load_job(f"configs/teammate_gen/{env}/{name}.json").generator
+            # Build the generator config in memory from the source of truth, rather
+            # than loading a shipped file, so the invariant is pinned on what the
+            # generator produces (not on a config path that a reorg can move).
+            gen = build(name, env)
             per_pairing = gen.num_envs / gen.population_size**2
             assert per_pairing >= reference, (
                 f"{env}/{name}: {per_pairing:.1f} envs per (conf, br) pairing is "
