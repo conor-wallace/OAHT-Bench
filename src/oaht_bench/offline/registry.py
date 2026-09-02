@@ -1,13 +1,15 @@
-"""The baseline-policy contract and its registry.
+"""The baseline-trainer contract and its registry.
 
-Every offline baseline is a :class:`BaseAhtPolicy`: it owns its model, its
-per-stage batch sampling, its losses, and its inference (:meth:`act`). The runner
-resolves the concrete class from the config's ``network.architecture`` via
-:func:`get_policy` and then drives training and evaluation generically, so adding
-a baseline is subclassing rather than extending an ``if/elif``.
+Every offline baseline is a :class:`BaseAhtTrainer`: it owns its model, its
+per-stage batch sampling, and its losses. Inference is not its concern -- each
+trainer builds a :class:`~oaht_bench.models.return_conditioned_agent.ReturnConditionedAgent`
+(via ``build_model``) that acts, and evaluation drives that agent directly. The
+runner resolves the concrete trainer from the config's ``network.architecture`` via
+:func:`get_trainer` and then drives training generically, so adding a baseline is
+subclassing rather than extending an ``if/elif``.
 
 ``obs_dim`` and ``action_dim`` are resolved onto ``config.network`` from the
-dataset before a policy is constructed, so a policy is built from the config
+dataset before a trainer is constructed, so a trainer is built from the config
 alone -- ``build_model`` never needs the environment.
 """
 
@@ -19,16 +21,16 @@ from oaht_bench.configs.job import OfflineTrainingConfig
 from oaht_bench.offline.training import get_optimizer, train
 
 
-class BaseAhtPolicy:
-    """Interface the runner drives for training and evaluation.
+class BaseAhtTrainer:
+    """Interface the runner drives to train a baseline.
 
-    Lifecycle: ``build_model()`` (pure config) -> ``prepare(...)`` (inject data
-    and logging) -> ``train_stage_1()`` -> ``train_stage_2(stage1_params)`` ->
-    ``act(params, ...)`` at evaluation, where ``params`` is
-    ``{"stage1": ..., "stage2": ...}``.
+    Lifecycle: ``build_model()`` (pure config, also constructs the acting agent)
+    -> ``prepare(...)`` (inject data and logging) -> ``train_stage_1()`` ->
+    ``train_stage_2(stage1_params)``, returning the parameters
+    (``{"stage1": ..., "stage2": ...}``) the agent then acts with at evaluation.
     """
 
-    #: The ``architecture`` discriminator this policy answers to.
+    #: The ``architecture`` discriminator this trainer answers to.
     name: str
 
     def __init__(self, config: OfflineTrainingConfig):
@@ -63,16 +65,6 @@ class BaseAhtPolicy:
         """Train the policy against the frozen stage-1 representation."""
         raise NotImplementedError
 
-    # --- inference --------------------------------------------------------
-
-    def act(self, params, rtg, obs, actions, *, timesteps, mask):
-        """Ego action logits for one batch of windows, used by the eval rollout.
-
-        ``params`` carries both stages (``{"stage1", "stage2"}``). This is the
-        forward pass the runner's evaluation loop calls once per environment step.
-        """
-        raise NotImplementedError
-
     # --- shared machinery -------------------------------------------------
 
     def _run_stage(self, loss_fn, params, batch_fn, *, learning_rate, steps, prefix):
@@ -95,31 +87,31 @@ class BaseAhtPolicy:
         )
 
 
-def get_policy(config: OfflineTrainingConfig) -> type[BaseAhtPolicy]:
-    """Resolve the policy class for a config's ``network.architecture``.
+def get_trainer(config: OfflineTrainingConfig) -> type[BaseAhtTrainer]:
+    """Resolve the trainer class for a config's ``network.architecture``.
 
     Imports lazily so the registry does not depend on every baseline module (and
-    so a baseline can import :class:`BaseAhtPolicy` from here without a cycle).
+    so a baseline can import :class:`BaseAhtTrainer` from here without a cycle).
     """
     architecture = config.network.architecture
     if architecture == "liam":
-        from oaht_bench.offline.liam import LiamPolicy
+        from oaht_bench.offline.liam import LiamTrainer
 
-        return LiamPolicy
+        return LiamTrainer
     if architecture == "meliba":
-        from oaht_bench.offline.meliba import MelibaPolicy
+        from oaht_bench.offline.meliba import MelibaTrainer
 
-        return MelibaPolicy
+        return MelibaTrainer
     if architecture == "omis":
-        from oaht_bench.offline.omis import OmisPolicy
+        from oaht_bench.offline.omis import OmisTrainer
 
-        return OmisPolicy
+        return OmisTrainer
     if architecture == "tao":
-        from oaht_bench.offline.tao import TaoPolicy
+        from oaht_bench.offline.tao import TaoTrainer
 
-        return TaoPolicy
+        return TaoTrainer
     if architecture == "bc":
-        from oaht_bench.offline.bc import BcPolicy
+        from oaht_bench.offline.bc import BcTrainer
 
-        return BcPolicy
-    raise NotImplementedError(f"no BaseAhtPolicy is registered for architecture {architecture!r}.")
+        return BcTrainer
+    raise NotImplementedError(f"no BaseAhtTrainer is registered for architecture {architecture!r}.")

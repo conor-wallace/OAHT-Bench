@@ -1,8 +1,8 @@
 import pytest
 
 from oaht_bench.configs.job import OfflineTrainingConfig
-from oaht_bench.offline import get_policy
-from oaht_bench.offline.liam import LiamPolicy
+from oaht_bench.offline import get_trainer
+from oaht_bench.offline.liam import LiamTrainer
 
 
 @pytest.fixture
@@ -13,17 +13,17 @@ def liam_config() -> OfflineTrainingConfig:
     )
 
 
-class TestLiamPolicy:
+class TestLiamTrainer:
     def test_registry_resolves_liam(self, liam_config: OfflineTrainingConfig):
-        assert get_policy(liam_config) is LiamPolicy
+        assert get_trainer(liam_config) is LiamTrainer
 
     def test_construct(self, liam_config: OfflineTrainingConfig):
-        policy = LiamPolicy(liam_config)
+        policy = LiamTrainer(liam_config)
         assert policy is not None
         assert policy.name == "liam"
 
     def test_build_model_from_resolved_config(self, liam_config: OfflineTrainingConfig):
-        policy = LiamPolicy(liam_config)
+        policy = LiamTrainer(liam_config)
         policy.build_model()
         # Pure-config construction: the composed LiamAgent's three flax modules
         # exist without an env.
@@ -36,4 +36,4 @@ class TestLiamPolicy:
         # than construct a module with a None feature dimension.
         cfg = OfflineTrainingConfig.model_validate({"network": {"architecture": "liam"}})
         with pytest.raises(ValueError, match="unresolved"):
-            LiamPolicy(cfg).build_model()
+            LiamTrainer(cfg).build_model()

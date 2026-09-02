@@ -34,7 +34,8 @@ def _assert_matches(episodes, member_ids, batch: EpisodeBatch):
     for ep, e in enumerate(episodes):
         for f in ("obs", "actions", "rewards", "avail_actions", "dones"):
             np.testing.assert_array_equal(
-                np.asarray(getattr(batch.episodes[ep], f)), np.asarray(getattr(e, f)),
+                np.asarray(getattr(batch.episodes[ep], f)),
+                np.asarray(getattr(e, f)),
                 err_msg=f"{f}[{ep}]",
             )
 
@@ -93,7 +94,9 @@ def test_variants_are_separate_uids_under_one_vault(tmp_path):
     assert (tmp_path / "dataset.vlt" / "expert").is_dir()
     assert (tmp_path / "dataset.vlt" / "br_vs_worst").is_dir()
     assert read_vault(tmp_path / "dataset.vlt", variant="expert").meta["variant"] == "expert"
-    assert read_vault(tmp_path / "dataset.vlt", variant="br_vs_worst").meta["variant"] == "br_vs_worst"
+    assert (
+        read_vault(tmp_path / "dataset.vlt", variant="br_vs_worst").meta["variant"] == "br_vs_worst"
+    )
 
 
 def test_read_vault_autodiscovers_a_single_variant(tmp_path):

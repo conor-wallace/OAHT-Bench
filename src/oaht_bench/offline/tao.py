@@ -38,7 +38,7 @@ import optax
 
 from oaht_bench.dataset.sampler import sample_stage1, sample_stage2
 from oaht_bench.models.tao_agent import OpponentPolicyEncoder, TaoAgent
-from oaht_bench.offline.registry import BaseAhtPolicy
+from oaht_bench.offline.registry import BaseAhtTrainer
 from oaht_bench.offline.utils import mask_logits, to_jax
 
 
@@ -232,7 +232,7 @@ def tao_policy_loss(
     return bc, {"loss": bc, "bc": bc, "action_accuracy": acc}
 
 
-class TaoPolicy(BaseAhtPolicy):
+class TaoTrainer(BaseAhtTrainer):
     """TAO on the two-stage contract.
 
     Unlike the ego-history baselines, TAO's encoder reads the *teammate* stream
@@ -253,8 +253,8 @@ class TaoPolicy(BaseAhtPolicy):
     name = "tao"
 
     def build_model(self) -> None:
-        # The model and inference are a composed TaoAgent; training reads its
-        # encoder/decoder/network, and act delegates to it.
+        # Inference is the composed TaoAgent's; training reads its
+        # encoder/decoder/network.
         self.agent = TaoAgent(self.config)
         self.agent.build_model()
 
@@ -389,6 +389,3 @@ class TaoPolicy(BaseAhtPolicy):
         context = tokens[:c].reshape(1, -1, hidden)
         context_mask = jnp.asarray(self.dataset.windows.mask)[:c].reshape(1, -1)
         return context, context_mask
-
-    def act(self, params, rtg, obs, actions, *, timesteps, mask):
-        return self.agent.act(params, rtg, obs, actions, timesteps=timesteps, mask=mask)

@@ -19,7 +19,7 @@ import jax.numpy as jnp
 import optax
 
 from oaht_bench.models.liam_agent import LiamAgent
-from oaht_bench.offline.registry import BaseAhtPolicy
+from oaht_bench.offline.registry import BaseAhtTrainer
 from oaht_bench.offline.utils import mask_logits, masked_accuracy, sample_window_batch
 
 
@@ -116,13 +116,13 @@ def liam_policy_loss(
     return bc, {"loss": bc, "bc": bc, "action_accuracy": acc}
 
 
-class LiamPolicy(BaseAhtPolicy):
+class LiamTrainer(BaseAhtTrainer):
     """LIAM on the two-stage contract: ego-history encoder, embedding concatenated
     to the observation.
 
     Stage 1 trains the encoder and reconstruction decoder; stage 2 trains the
     policy against the frozen encoder. The model and inference are a composed
-    :class:`~oaht_bench.models.liam_agent.LiamAgent`; ``act`` delegates to it.
+    :class:`~oaht_bench.models.liam_agent.LiamAgent`, which does the acting.
     """
 
     name = "liam"
@@ -205,6 +205,3 @@ class LiamPolicy(BaseAhtPolicy):
             steps=self.config.stage2_steps,
             prefix="Stage2",
         )
-
-    def act(self, params, rtg, obs, actions, *, timesteps, mask):
-        return self.agent.act(params, rtg, obs, actions, timesteps=timesteps, mask=mask)

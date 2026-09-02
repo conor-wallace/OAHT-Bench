@@ -56,7 +56,7 @@ class BaseOfflineAhtNetworkConfig(BaseConfig):
     dropout: float = Field(default=0.1, ge=0.0, lt=1.0)
 
     # Resolved from the dataset before a policy is built (see
-    # ``offline.runner`` and ``BaseAhtPolicy``), so a policy is pure-config. Left
+    # ``offline.runner`` and ``BaseAhtTrainer``), so a policy is pure-config. Left
     # ``None`` in an authored config -- the dataset path already in the hash
     # determines them, so they are a derived convenience, not a tuning knob.
     obs_dim: int | None = Field(default=None, ge=1)

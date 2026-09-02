@@ -3,7 +3,7 @@
 A baseline supplies *what* to optimise -- a loss, an initial parameter tree, and
 a per-step batch sampler -- and this module supplies *how*: the AdamW-with-warmup
 optimizer and the jitted gradient loop that logs each stage. It lives apart from
-:mod:`oaht_bench.offline.runner` so that :class:`~oaht_bench.offline.registry.BaseAhtPolicy`
+:mod:`oaht_bench.offline.runner` so that :class:`~oaht_bench.offline.registry.BaseAhtTrainer`
 can drive a stage without importing the runner (which imports the policies).
 """
 

@@ -1,4 +1,4 @@
-"""The BaseAhtPolicy contract, per baseline.
+"""The BaseAhtTrainer contract, per baseline.
 
 End-to-end training and evaluation is covered by the parametrized runner tests in
 ``tests/test_offline_runner.py``; these pin the pure-config surface -- registry
@@ -8,17 +8,17 @@ resolution and model construction from a config alone -- for every baseline.
 import pytest
 
 from oaht_bench.configs.job import OfflineTrainingConfig
-from oaht_bench.offline import get_policy
-from oaht_bench.offline.liam import LiamPolicy
-from oaht_bench.offline.meliba import MelibaPolicy
-from oaht_bench.offline.omis import OmisPolicy
-from oaht_bench.offline.tao import TaoPolicy
+from oaht_bench.offline import get_trainer
+from oaht_bench.offline.liam import LiamTrainer
+from oaht_bench.offline.meliba import MelibaTrainer
+from oaht_bench.offline.omis import OmisTrainer
+from oaht_bench.offline.tao import TaoTrainer
 
 CASES = [
-    ("liam", LiamPolicy),
-    ("meliba", MelibaPolicy),
-    ("omis", OmisPolicy),
-    ("tao", TaoPolicy),
+    ("liam", LiamTrainer),
+    ("meliba", MelibaTrainer),
+    ("omis", OmisTrainer),
+    ("tao", TaoTrainer),
 ]
 
 
@@ -32,7 +32,7 @@ def _config(architecture: str, *, resolved: bool = True) -> OfflineTrainingConfi
 
 @pytest.mark.parametrize("architecture,cls", CASES)
 def test_registry_resolves_each_architecture(architecture, cls):
-    policy = get_policy(_config(architecture))
+    policy = get_trainer(_config(architecture))
     assert policy is cls
     assert cls(_config(architecture)).name == architecture
 

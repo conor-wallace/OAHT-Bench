@@ -15,7 +15,7 @@ method's definition.
 
 **One stage, not two.** :func:`oaht_bench.offline.runner.run` always calls
 ``train_stage_1`` then ``train_stage_2`` — every other baseline needs both, so
-the loop does not special-case a baseline that does not. :meth:`BcPolicy.
+the loop does not special-case a baseline that does not. :meth:`BcTrainer.
 train_stage_1` returns immediately with nothing to show for it, rather than
 running the shared step loop for zero steps to the same effect: an empty
 ``Stage1/`` block in the metrics would look like a bug, not a design choice.
@@ -40,7 +40,7 @@ import optax
 
 from oaht_bench.dataset.dataset import Windows
 from oaht_bench.models.bc_agent import BcAgent
-from oaht_bench.offline.registry import BaseAhtPolicy
+from oaht_bench.offline.registry import BaseAhtTrainer
 from oaht_bench.offline.utils import mask_logits, masked_accuracy, to_jax
 
 #: BC reads only the ego stream — no teammate fields, unlike
@@ -100,14 +100,13 @@ def bc_loss(params, network, batch, *, rngs=None, train: bool = True):
     return bc, {"loss": bc, "bc": bc, "action_accuracy": acc}
 
 
-class BcPolicy(BaseAhtPolicy):
+class BcTrainer(BaseAhtTrainer):
     """BC on the two-stage contract, with stage 1 empty by design."""
 
     name = "bc"
 
     def build_model(self) -> None:
-        # The model and inference are a composed BcAgent; training reads its
-        # network, and act delegates to it.
+        # Inference is the composed BcAgent's; training reads its network.
         self.agent = BcAgent(self.config)
         self.agent.build_model()
 
@@ -161,6 +160,3 @@ class BcPolicy(BaseAhtPolicy):
             steps=self.config.stage2_steps,
             prefix="Stage2",
         )
-
-    def act(self, params, rtg, obs, actions, *, timesteps, mask):
-        return self.agent.act(params, rtg, obs, actions, timesteps=timesteps, mask=mask)

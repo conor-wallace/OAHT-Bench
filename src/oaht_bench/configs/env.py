@@ -475,7 +475,9 @@ for _layout, (_tier, _notes) in _OVERCOOKED_V2_TIERS.items():
 del _layout, _tier, _notes
 
 #: Read-only view of the canonical presets.
-PRESETS: Mapping[str, LbfConfig | OvercookedV1Config | OvercookedV2Config | HanabiConfig] = MappingProxyType(_PRESETS)
+PRESETS: Mapping[str, LbfConfig | OvercookedV1Config | OvercookedV2Config | HanabiConfig] = (
+    MappingProxyType(_PRESETS)
+)
 
 
 def get_preset(name: str):

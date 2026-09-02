@@ -43,7 +43,7 @@ import jax.numpy as jnp
 import optax
 
 from oaht_bench.models.meliba_agent import MelibaAgent
-from oaht_bench.offline.registry import BaseAhtPolicy
+from oaht_bench.offline.registry import BaseAhtTrainer
 from oaht_bench.offline.utils import mask_logits, sample_window_batch
 
 
@@ -186,10 +186,10 @@ def meliba_policy_loss(
     return bc, {"loss": bc, "bc": bc, "action_accuracy": acc}
 
 
-class MelibaPolicy(BaseAhtPolicy):
+class MelibaTrainer(BaseAhtTrainer):
     """MeLIBA on the two-stage contract.
 
-    Same shape as :class:`~oaht_bench.offline.liam.model.LiamPolicy` -- an
+    Same shape as :class:`~oaht_bench.offline.liam.model.LiamTrainer` -- an
     ego-history encoder, window batches, two stages -- but the encoder is
     variational (two Gaussian latents) and the policy conditions on the belief
     *parameters* rather than a point embedding. ``latent_dim`` and ``kl_weight``
@@ -200,8 +200,8 @@ class MelibaPolicy(BaseAhtPolicy):
     name = "meliba"
 
     def build_model(self) -> None:
-        # The model and inference are a composed MelibaAgent; training reads its
-        # encoder/decoder/network, and act delegates to it.
+        # Inference is the composed MelibaAgent's; training reads its
+        # encoder/decoder/network.
         self.agent = MelibaAgent(self.config)
         self.agent.build_model()
 
@@ -280,6 +280,3 @@ class MelibaPolicy(BaseAhtPolicy):
             steps=self.config.stage2_steps,
             prefix="Stage2",
         )
-
-    def act(self, params, rtg, obs, actions, *, timesteps, mask):
-        return self.agent.act(params, rtg, obs, actions, timesteps=timesteps, mask=mask)

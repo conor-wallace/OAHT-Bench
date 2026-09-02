@@ -35,7 +35,7 @@ SUPPORTED = ("liam", "meliba", "omis", "tao", "bc")
 def _resolve_dims(cfg, obs_dim: int, action_dim: int):
     """Return a copy of the offline config with dataset dims on the network config.
 
-    A :class:`~oaht_bench.offline.registry.BaseAhtPolicy` is built from the config
+    A :class:`~oaht_bench.offline.registry.BaseAhtTrainer` is built from the config
     alone, so ``obs_dim``/``action_dim`` -- which come from the dataset -- are
     resolved onto ``config.network`` up front rather than threaded as arguments.
     """
@@ -53,7 +53,7 @@ def run(job: TrainingJob) -> Path:
     from oaht_bench.common.logging import RunLogger, nonfatal
     from oaht_bench.configs import save_job
     from oaht_bench.dataset.dataset import Dataset
-    from oaht_bench.offline import get_policy
+    from oaht_bench.offline import get_trainer
 
     if job.baseline not in SUPPORTED:
         raise NotImplementedError(
@@ -103,14 +103,14 @@ def run(job: TrainingJob) -> Path:
         verbose=job.logging.verbose,
     ) as logger:
         resolved = _resolve_dims(cfg, dataset.obs_dim, action_dim)
-        policy = get_policy(resolved)(resolved)
-        policy.build_model()
-        policy.prepare(dataset, logger, rng=rng, np_rng=np_rng)
+        trainer = get_trainer(resolved)(resolved)
+        trainer.build_model()
+        trainer.prepare(dataset, logger, rng=rng, np_rng=np_rng)
 
         log.info("stage 1: %d steps", cfg.stage1_steps)
-        stage1_params = policy.train_stage_1()
+        stage1_params = trainer.train_stage_1()
         log.info("stage 2: %d steps", cfg.stage2_steps)
-        stage2_params = policy.train_stage_2(stage1_params)
+        stage2_params = trainer.train_stage_2(stage1_params)
 
         # Save before reporting. A charting failure after a long run must not
         # discard it -- the lesson from teammate generation.

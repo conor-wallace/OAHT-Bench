@@ -27,7 +27,7 @@ backbone from a *policy* backbone (LIAM does the same). So here the imitator and
 critic ride the **stage-1 encoder** — they *are* the teammate representation, the
 analogue of LIAM's reconstruction decoder — and the **actor** is the stage-2
 policy conditioned on that frozen representation, exactly like
-:class:`liam.LiamPolicy`. The actor therefore conditions on the ego history only,
+:class:`liam.LiamTrainer`. The actor therefore conditions on the ego history only,
 not on live teammate actions: OMIS's perfect-information opponent-action input is
 dropped so the baseline is evaluated on the **same information set** as LIAM and
 MeLIBA (the shared rollout in :mod:`oaht_bench.offline.evaluate` is ego-stream
@@ -49,7 +49,7 @@ import jax.numpy as jnp
 import optax
 
 from oaht_bench.models.omis_agent import OmisAgent
-from oaht_bench.offline.registry import BaseAhtPolicy
+from oaht_bench.offline.registry import BaseAhtTrainer
 from oaht_bench.offline.utils import mask_logits, sample_window_batch
 
 
@@ -159,15 +159,15 @@ def omis_search(*args, **kwargs):
     be reported as a distinct *test-time-simulator-access* entry rather than
     compared against the forward-only baselines.
 
-    Deploying ``OMIS w/o S`` today uses the actor alone (see :meth:`OmisPolicy.act`).
+    Deploying ``OMIS w/o S`` today uses the actor alone (see :meth:`OmisTrainer.act`).
     """
     raise NotImplementedError(omis_search.__doc__)
 
 
-class OmisPolicy(BaseAhtPolicy):
+class OmisTrainer(BaseAhtTrainer):
     """OMIS (without search) on the two-stage contract.
 
-    Same shape as :class:`~oaht_bench.offline.liam.model.LiamPolicy`, but stage 1
+    Same shape as :class:`~oaht_bench.offline.liam.model.LiamTrainer`, but stage 1
     trains an opponent imitator and a best-response critic off the shared
     representation (rather than a reconstruction decoder), and stage 2 clones the
     ego best-response action. The imitator and critic are trained and saved for a
@@ -178,8 +178,8 @@ class OmisPolicy(BaseAhtPolicy):
     name = "omis"
 
     def build_model(self) -> None:
-        # The model and inference are a composed OmisAgent; training reads its
-        # encoder/model/actor, and act delegates to it.
+        # Inference is the composed OmisAgent's; training reads its
+        # encoder/model/actor.
         self.agent = OmisAgent(self.config)
         self.agent.build_model()
 
@@ -261,6 +261,3 @@ class OmisPolicy(BaseAhtPolicy):
             steps=self.config.stage2_steps,
             prefix="Stage2",
         )
-
-    def act(self, params, rtg, obs, actions, *, timesteps, mask):
-        return self.agent.act(params, rtg, obs, actions, timesteps=timesteps, mask=mask)

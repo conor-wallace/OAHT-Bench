@@ -28,7 +28,7 @@ from oaht_bench.configs.network import (
 from oaht_bench.configs.teammate_gen import GeneratorConfig
 
 #: Offline network config, selected by ``architecture``. Only LIAM is on the
-#: BaseAhtPolicy contract; the other three carry a config so their runs validate
+#: BaseAhtTrainer contract; the other three carry a config so their runs validate
 #: while they stay on the runner's inline path (transitional).
 OfflineNetworkConfig = Annotated[
     LiamNetworkConfig
