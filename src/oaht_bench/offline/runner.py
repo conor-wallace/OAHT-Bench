@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 
 #: Baselines this runner can train. The roster in ``BaselineName`` is larger;
 #: the rest raise rather than silently training something else.
-SUPPORTED = ("liam", "meliba", "omis", "tao", "pct_bc")
+SUPPORTED = ("liam", "meliba", "omis", "tao", "bc")
 
 
 def _resolve_dims(cfg, obs_dim: int, action_dim: int):
@@ -237,7 +237,7 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
             num_episodes=job.offline.eval_episodes,
         )
     else:
-        # The not-yet-ported baselines (meliba/omis/pct_bc) rebuild from the (pure)
+        # The not-yet-ported baselines (meliba/omis/bc) rebuild from the (pure)
         # resolved config and point the _rollout loop at policy.act.
         policy = get_policy(resolved)(resolved)
         policy.build_model()

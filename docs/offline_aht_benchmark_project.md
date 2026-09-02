@@ -465,7 +465,7 @@ oaht-bench/
   offline/                  # [rev 5] shared sequence-model backbone (§3.1)
     dt.py                   #   Decision Transformer — default backbone, adapted from JAX-CORL algos/dt.py
     iql.py                  #   backbone-sensitivity ablation, adapted from JAX-CORL algos/iql.py
-    pct_bc.py               #   filtered-BC reference floor
+    bc.py                   #   BC reference floor (optional return filter)
     conditioning.py         #   module(history) -> z interface; how z enters the DT token stream
   baselines/
     ad/ dpt/ amago/ hybrid_ad/     # adapted from ICRL4AHT; learning-history family, exempt from backbone

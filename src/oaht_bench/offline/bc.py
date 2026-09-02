@@ -1,21 +1,21 @@
-"""%BC — filtered behaviour cloning, the "no modeling module" floor (§6).
+"""BC — behaviour cloning, the "no modeling module" floor (§6).
 
 Every other baseline in this package contributes a `history -> z` module: an
-encoder, a set of policy embeddings, an in-context imitator. %BC contributes
+encoder, a set of policy embeddings, an in-context imitator. BC contributes
 nothing — it is the shared backbone (:mod:`oaht_bench.models.backbone`,
 §3.1) trained directly on the ego stream, so a comparison against it answers
 "did modelling the teammate help at all," which none of the other nine
 baselines in the inventory can answer on their own.
 
-**Filtered, not vanilla.** The "%" is a data-selection knob, not a modelling
-one: train only on the top ``top_return_quantile`` fraction of episodes by
-ego return (`JAX-CORL`'s convention). ``top_return_quantile=1.0`` — the
-default — keeps every episode, which is plain BC on the whole dataset; the
-filter is this baseline's one option, not its definition.
+**An optional return filter.** BC can train on the top ``top_return_quantile``
+fraction of episodes by ego return (`JAX-CORL`'s filtered-BC convention).
+``top_return_quantile=1.0`` — the default — keeps every episode, which is plain
+BC on the whole dataset; the filter is a data-selection knob, not part of the
+method's definition.
 
 **One stage, not two.** :func:`oaht_bench.offline.runner.run` always calls
 ``train_stage_1`` then ``train_stage_2`` — every other baseline needs both, so
-the loop does not special-case a baseline that does not. :meth:`PctBcPolicy.
+the loop does not special-case a baseline that does not. :meth:`BcPolicy.
 train_stage_1` returns immediately with nothing to show for it, rather than
 running the shared step loop for zero steps to the same effect: an empty
 ``Stage1/`` block in the metrics would look like a bug, not a design choice.
@@ -25,9 +25,9 @@ docstring already flags it for LIAM and TAO: the ego stream in a collected
 dataset is another population member's play, not a best response to the
 teammate on the other end of it, so cloning it trains toward population-average
 behaviour. LIAM and TAO at least condition the policy on *something* inferred
-about the teammate; %BC has no mechanism to condition on at all, so it clones
+about the teammate; BC has no mechanism to condition on at all, so it clones
 population-average play more directly than either. That is exactly why it is
-the floor rather than a competitor — the gap between %BC and everything else
+the floor rather than a competitor — the gap between BC and everything else
 in the inventory is the thing the other nine baselines exist to open up.
 """
 
@@ -44,7 +44,7 @@ from oaht_bench.models.backbone import DecisionTransformer
 from oaht_bench.offline.registry import BaseAhtPolicy
 from oaht_bench.offline.utils import mask_logits, masked_accuracy, to_jax
 
-#: %BC reads only the ego stream — no teammate fields, unlike
+#: BC reads only the ego stream — no teammate fields, unlike
 #: ``utils.WINDOW_BATCH_KEYS``, which every modelling baseline needs.
 _BATCH_KEYS = ("ego_obs", "ego_actions", "ego_rtg", "ego_avail", "timesteps", "mask")
 
@@ -73,7 +73,7 @@ def _filter_by_return(windows: Windows, top_return_quantile: float) -> np.ndarra
     return idx
 
 
-class PctBcNetwork(nn.Module):
+class BcNetwork(nn.Module):
     """The shared backbone, unmodified: no embedding, no context, no
     conditioning on anything about the teammate."""
 
@@ -92,7 +92,7 @@ class PctBcNetwork(nn.Module):
         return logits
 
 
-def pct_bc_loss(params, network, batch, *, rngs=None, train: bool = True):
+def bc_loss(params, network, batch, *, rngs=None, train: bool = True):
     """Plain masked behaviour cloning on the ego stream.
 
     Identical in shape to :func:`~oaht_bench.offline.liam.losses.
@@ -120,10 +120,10 @@ def pct_bc_loss(params, network, batch, *, rngs=None, train: bool = True):
     return bc, {"loss": bc, "bc": bc, "action_accuracy": acc}
 
 
-class PctBcPolicy(BaseAhtPolicy):
-    """%BC on the two-stage contract, with stage 1 empty by design."""
+class BcPolicy(BaseAhtPolicy):
+    """BC on the two-stage contract, with stage 1 empty by design."""
 
-    name = "pct_bc"
+    name = "bc"
 
     def build_model(self) -> None:
         net = self.config.network
@@ -132,7 +132,7 @@ class PctBcPolicy(BaseAhtPolicy):
                 "obs_dim/action_dim are unresolved on the network config; the "
                 "runner must resolve them from the dataset before build_model()."
             )
-        self.network = PctBcNetwork(
+        self.network = BcNetwork(
             action_dim=net.action_dim, hidden_dim=net.hidden_dim, dropout=net.dropout
         )
 
@@ -159,7 +159,7 @@ class PctBcPolicy(BaseAhtPolicy):
         return to_jax({k: getattr(self.dataset.windows, k)[idx] for k in _BATCH_KEYS})
 
     def train_stage_1(self):
-        """No representation to learn — %BC's entire point is having none."""
+        """No representation to learn — BC's entire point is having none."""
         return {}
 
     def train_stage_2(self, stage1_params):
@@ -176,7 +176,7 @@ class PctBcPolicy(BaseAhtPolicy):
         )
 
         def loss(p, b, rngs):
-            return pct_bc_loss(p, self.network, b, rngs=rngs)
+            return bc_loss(p, self.network, b, rngs=rngs)
 
         return self._run_stage(
             loss,

@@ -301,7 +301,7 @@ def test_baseline_roster_matches_the_plan():
 
     names = set(typing.get_args(BaselineName))
     assert len(names) == 13
-    assert {"random", "pct_bc", "oracle"} <= names  # floors and ceiling
+    assert {"random", "bc", "oracle"} <= names  # floors and ceiling
     assert {"ad", "dpt", "amago_offline", "hybrid_ad"} <= names  # learning-history
     assert {"liam", "meliba", "tao", "omis", "taget"} <= names  # trajectory-view
 

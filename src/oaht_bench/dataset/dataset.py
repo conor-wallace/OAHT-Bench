@@ -96,7 +96,7 @@ class Windows:
     #: (N,) — the ego's total return over its *whole* source episode (not the
     #: window's return-to-go, which is truncated to the window and, when
     #: ``normalize``, rescaled). Constant across every window cut from the same
-    #: episode. %BC's data-selection filter needs an episode-level quantity;
+    #: episode. BC's return filter needs an episode-level quantity;
     #: nothing else in this module did before it.
     episode_return: np.ndarray
     #: (N,) — which population member was the teammate. TAO's InfoNCE positives

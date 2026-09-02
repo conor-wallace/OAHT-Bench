@@ -42,7 +42,7 @@ def _job(tmp_path: Path, baseline: str, **overrides) -> TrainingJob:
     # a baseline with no network config yet (e.g. the unimplemented "taget"), fall
     # back to a valid architecture so the *runner's* SUPPORTED gate is what refuses,
     # not config validation.
-    architecture = baseline if baseline in ("liam", "meliba", "omis", "tao", "pct_bc") else "liam"
+    architecture = baseline if baseline in ("liam", "meliba", "omis", "tao", "bc") else "liam"
     offline = OfflineTrainingConfig(
         network={"architecture": architecture},
         context_length=6,
@@ -84,7 +84,7 @@ def test_runner_trains_and_writes_parameters(tmp_path, baseline):
     assert summary["baseline"] == baseline
 
 
-def test_pct_bc_stage_one_trains_nothing(tmp_path):
+def test_bc_stage_one_trains_nothing(tmp_path):
     """%BC's whole point is having no representation stage -- pinned directly
     rather than left as an inference from the loss tests.
 
@@ -93,7 +93,7 @@ def test_pct_bc_stage_one_trains_nothing(tmp_path):
     """
     from oaht_bench.offline.runner import run
 
-    run_dir = run(_job(tmp_path, "pct_bc"))
+    run_dir = run(_job(tmp_path, "bc"))
     assert (run_dir / "params.pkl").exists()
 
     records = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
@@ -102,13 +102,13 @@ def test_pct_bc_stage_one_trains_nothing(tmp_path):
     assert "Stage2/action_accuracy" in tags
 
 
-def test_pct_bc_filters_to_the_top_quantile_of_episodes_by_return(tmp_path):
+def test_bc_filters_to_the_top_quantile_of_episodes_by_return(tmp_path):
     """The '%' in %BC: only episodes above the return threshold contribute
     windows, and filtering is by episode, not by window, so a long episode's
     overlapping fragments cannot dominate the quantile.
     """
     from oaht_bench.dataset.dataset import _build_windows
-    from oaht_bench.offline.pct_bc import _filter_by_return
+    from oaht_bench.offline.bc import _filter_by_return
 
     n_ep, T, obs_dim = 4, 6, 3
     episodes = []

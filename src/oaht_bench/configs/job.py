@@ -19,10 +19,10 @@ from pydantic import Field, model_validator
 from oaht_bench.configs.base import BaseConfig, VersionedConfig
 from oaht_bench.configs.env import EnvConfig
 from oaht_bench.configs.network import (
+    BcNetworkConfig,
     LiamNetworkConfig,
     MelibaNetworkConfig,
     OmisNetworkConfig,
-    PctBcNetworkConfig,
     TaoNetworkConfig,
 )
 from oaht_bench.configs.teammate_gen import GeneratorConfig
@@ -35,7 +35,7 @@ OfflineNetworkConfig = Annotated[
     | MelibaNetworkConfig
     | OmisNetworkConfig
     | TaoNetworkConfig
-    | PctBcNetworkConfig,
+    | BcNetworkConfig,
     Field(discriminator="architecture"),
 ]
 
@@ -46,7 +46,7 @@ OfflineNetworkConfig = Annotated[
 BaselineName = Literal[
     # floors and reference
     "random",
-    "pct_bc",
+    "bc",
     "prompt_dt",
     # ceiling: privileged teammate model, bounds how much headroom modeling has
     "oracle",
@@ -318,7 +318,7 @@ class TrainingJob(JobBase):
     env: EnvConfig
     dataset_path: str
     baseline: BaselineName = Field(description="Which baseline to train (§6).")
-    backbone: Literal["dt", "iql", "pct_bc"] = Field(
+    backbone: Literal["dt", "iql", "bc"] = Field(
         default="dt",
         description="Shared sequence-model backbone (§3.1). 'iql' is the "
         "backbone-sensitivity ablation.",

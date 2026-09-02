@@ -25,6 +25,7 @@ CoMeDi have no best response and would need one trained.
 """
 
 from oaht_bench.models.backbone import DecisionTransformer
+from oaht_bench.offline.bc import BcNetwork, BcPolicy, bc_loss
 from oaht_bench.offline.liam import (
     LiamPolicy,
     liam_policy_loss,
@@ -48,7 +49,6 @@ from oaht_bench.offline.omis import (
     omis_representation_loss,
     omis_search,
 )
-from oaht_bench.offline.pct_bc import PctBcNetwork, PctBcPolicy, pct_bc_loss
 from oaht_bench.offline.registry import BaseAhtPolicy, get_policy
 from oaht_bench.offline.tao import (
     TaoPolicy,
@@ -70,9 +70,9 @@ __all__ = [
     "OmisEncoder",
     "OmisModel",
     "OmisPolicy",
-    "PctBcNetwork",
-    "PctBcPolicy",
-    "pct_bc_loss",
+    "BcNetwork",
+    "BcPolicy",
+    "bc_loss",
     "TaoPolicy",
     "embedding_loss",
     "supervised_contrastive",
