@@ -208,14 +208,17 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
     target = dataset_target_return(batch)
     cond_target = target if windows.norm is None else windows.norm.apply_rtg(target)
 
-    if resolved.network.architecture == "liam":
-        # LIAM is an AgentPolicy: the rolling window / RTG bookkeeping lives in the
-        # agent, so it runs through the shared vmapped run_episodes rather than the
-        # per-step Python _rollout. The other baselines still take the _rollout path
-        # below until they are ported onto the AgentPolicy contract too.
-        from oaht_bench.models.liam_agent import LiamAgent
+    from oaht_bench.models.liam_agent import LiamAgent
+    from oaht_bench.models.tao_agent import TaoAgent
 
-        agent = LiamAgent(
+    # Baselines ported onto the ReturnConditionedAgent contract: the rolling window /
+    # RTG bookkeeping lives in the agent, so they run through the shared vmapped
+    # run_episodes rather than the per-step Python _rollout. The rest stay on the
+    # _rollout path below until they are ported too.
+    agent_classes = {"liam": LiamAgent, "tao": TaoAgent}
+
+    if resolved.network.architecture in agent_classes:
+        agent = agent_classes[resolved.network.architecture](
             resolved,
             context_length=cfg.context_length,
             target_return=cond_target,
@@ -234,9 +237,8 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
             num_episodes=job.offline.eval_episodes,
         )
     else:
-        # The remaining baselines rebuild from the (pure) resolved config and point
-        # the _rollout loop at policy.act. TAO's deployment context is baked into
-        # stage2_params, so act needs no extra state.
+        # The not-yet-ported baselines (meliba/omis/pct_bc) rebuild from the (pure)
+        # resolved config and point the _rollout loop at policy.act.
         policy = get_policy(resolved)(resolved)
         policy.build_model()
 

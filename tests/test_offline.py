@@ -15,11 +15,9 @@ import pytest
 
 from oaht_bench.dataset.dataset import _build_windows, return_to_go
 from oaht_bench.models.liam_agent import LiamDecoder, LiamEncoder, LiamNetwork
+from oaht_bench.models.tao_agent import AncillaryActionDecoder, OpponentPolicyEncoder, TaoNetwork
 from oaht_bench.offline import (
-    AncillaryActionDecoder,
     DecisionTransformer,
-    OpponentPolicyEncoder,
-    TaoNetwork,
     liam_reconstruction_loss,
     supervised_contrastive,
 )

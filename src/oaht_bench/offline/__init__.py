@@ -51,9 +51,6 @@ from oaht_bench.offline.omis import (
 from oaht_bench.offline.pct_bc import PctBcNetwork, PctBcPolicy, pct_bc_loss
 from oaht_bench.offline.registry import BaseAhtPolicy, get_policy
 from oaht_bench.offline.tao import (
-    AncillaryActionDecoder,
-    OpponentPolicyEncoder,
-    TaoNetwork,
     TaoPolicy,
     embedding_loss,
     supervised_contrastive,
@@ -61,7 +58,6 @@ from oaht_bench.offline.tao import (
 )
 
 __all__ = [
-    "AncillaryActionDecoder",
     "BaseAhtPolicy",
     "DecisionTransformer",
     "LiamPolicy",
@@ -74,11 +70,9 @@ __all__ = [
     "OmisEncoder",
     "OmisModel",
     "OmisPolicy",
-    "OpponentPolicyEncoder",
     "PctBcNetwork",
     "PctBcPolicy",
     "pct_bc_loss",
-    "TaoNetwork",
     "TaoPolicy",
     "embedding_loss",
     "supervised_contrastive",

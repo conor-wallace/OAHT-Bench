@@ -32,13 +32,12 @@ one token per timestep.
 
 from __future__ import annotations
 
-import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import optax
 
 from oaht_bench.dataset.sampler import sample_stage1, sample_stage2
-from oaht_bench.models.backbone import DecisionTransformer
+from oaht_bench.models.tao_agent import OpponentPolicyEncoder, TaoAgent
 from oaht_bench.offline.registry import BaseAhtPolicy
 from oaht_bench.offline.utils import mask_logits, to_jax
 
@@ -54,144 +53,6 @@ def _masked_accuracy(logits, labels, mask) -> jnp.ndarray:
     correct = (jnp.argmax(logits, axis=-1) == labels).astype(jnp.float32)
     m = mask.astype(jnp.float32)
     return (correct * m).sum() / jnp.maximum(m.sum(), 1.0)
-
-
-class OpponentPolicyEncoder(nn.Module):
-    """``M_θe``: the teammate's stream to a sequence of policy-embedding tokens.
-
-    Returns the full token sequence. Stage 1 average-pools it into ``z̄⁻¹``;
-    stages 2 and 3 feed the sequence itself as key/value into the decoder's
-    cross-attention.
-    """
-
-    action_dim: int
-    hidden_dim: int = 32
-    ff_dim: int = 128
-    num_blocks: int = 3
-    dropout: float = 0.1
-    max_timesteps: int = 4096
-
-    @nn.compact
-    def __call__(
-        self, mate_next_obs, mate_actions, mate_rewards, *, mask, timesteps, train: bool = False
-    ):
-        """``mate_next_obs`` is deliberate.
-
-        The reference feeds ``traj['next_observations']`` alongside ``actions``
-        and ``rewards`` at the *same* index (``offline_stage_1/utils.py:109-111``),
-        which is how the paper's ``(a_{t-1}, r_{t-1}, o_t)`` fusion is realised —
-        by choosing next-observations, not by shifting the action and reward
-        streams. An index shift gets the same pairing but labels each token with
-        a different timestep, and the timestep embedding below is not symmetric.
-        """
-        # Modality-specific linear layers with ELU, 32 nodes (Appendix F).
-        a = nn.elu(nn.Dense(self.hidden_dim)(jax.nn.one_hot(mate_actions, self.action_dim)))
-        r = nn.elu(nn.Dense(self.hidden_dim)(mate_rewards[..., None]))
-        o = nn.elu(nn.Dense(self.hidden_dim)(mate_next_obs))
-
-        # Reference net.py:48-55 -- obs and reward take the timestep embedding at
-        # t, the action takes t-1, clamped at 0. The paper mentions no positional
-        # encoding in the encoder at all.
-        embed_t = nn.Embed(self.max_timesteps, self.hidden_dim)
-        pos = embed_t(timesteps)
-        pos_m1 = embed_t(jnp.where(timesteps > 0, timesteps - 1, timesteps))
-        a, r, o = a + pos_m1, r + pos, o + pos
-
-        # LayerNorm over the concatenated 3*hidden vector, then fuse to one token
-        # per timestep (reference `embed_ln` is LayerNorm(3 * hidden_size)).
-        fused = nn.Dense(self.hidden_dim)(nn.LayerNorm()(jnp.concatenate([a, r, o], axis=-1)))
-
-        # Encoder blocks: no causal mask -- the whole teammate trajectory is
-        # available when building a policy embedding.
-        pad = nn.make_attention_mask(mask, mask)
-        x = fused
-        for _ in range(self.num_blocks):
-            attn = nn.SelfAttention(
-                num_heads=1,
-                qkv_features=self.hidden_dim,
-                dropout_rate=self.dropout,
-                deterministic=not train,
-            )(x, mask=pad)
-            x = nn.LayerNorm()(x + attn)
-            ff = nn.Dense(self.hidden_dim)(nn.relu(nn.Dense(self.ff_dim)(x)))
-            x = nn.LayerNorm()(x + ff)
-        return x
-
-    @staticmethod
-    def pool(tokens, mask=None):
-        """``AP``, giving ``z̄⁻¹``.
-
-        The reference pools with a plain ``nn.AvgPool1d(kernel_size=NUM_STEPS)``
-        (``nn_trainer.py:32,109``) — an unmasked mean over every position,
-        padding included. That is what produced the published numbers, so it is
-        the default here; ``mask`` is accepted for the masked variant but is not
-        what TAO does.
-        """
-        if mask is None:
-            return tokens.mean(axis=1)
-        m = mask.astype(tokens.dtype)[..., None]
-        return (tokens * m).sum(axis=1) / jnp.maximum(m.sum(axis=1), 1.0)
-
-
-class AncillaryActionDecoder(nn.Module):
-    """Predicts the teammate's actions from its own observations plus ``z̄⁻¹``.
-
-    Stage 1's generative loss (Eq. 2). Deliberately weak — it exists to shape the
-    embedding, not to be a good teammate model.
-    """
-
-    action_dim: int
-    hidden_dim: int = 32
-
-    @nn.compact
-    def __call__(self, mate_obs, embedding):
-        # Reference MLPDecoder (offline_stage_1/net.py:116-133): the *raw*
-        # observation is concatenated with the latent, then one hidden layer with
-        # ReLU followed by LayerNorm. Embedding the observation first, or
-        # dropping the activation, is a different function.
-        z = jnp.broadcast_to(embedding[:, None, :], (*mate_obs.shape[:2], embedding.shape[-1]))
-        h = nn.LayerNorm()(
-            nn.relu(nn.Dense(self.hidden_dim)(jnp.concatenate([mate_obs, z], axis=-1)))
-        )
-        return nn.Dense(self.action_dim)(h)
-
-
-class TaoNetwork(nn.Module):
-    """Stage 2: the shared backbone, cross-attending to the policy embedding."""
-
-    action_dim: int
-    hidden_dim: int = 32
-    dropout: float = 0.1
-
-    @nn.compact
-    def __call__(
-        self,
-        rtg,
-        obs,
-        actions,
-        *,
-        timesteps,
-        context,
-        mask=None,
-        context_mask=None,
-        train: bool = False,
-    ):
-        logits, _ = DecisionTransformer(
-            action_dim=self.action_dim,
-            hidden_dim=self.hidden_dim,
-            use_cross_attention=True,  # Appendix F: z^-1 enters as key/value.
-            dropout=self.dropout,
-        )(
-            rtg,
-            obs,
-            actions,
-            timesteps=timesteps,
-            mask=mask,
-            context=context,
-            context_mask=context_mask,
-            train=train,
-        )
-        return logits
 
 
 def supervised_contrastive(
@@ -392,23 +253,10 @@ class TaoPolicy(BaseAhtPolicy):
     name = "tao"
 
     def build_model(self) -> None:
-        net = self.config.network
-        if net.obs_dim is None or net.action_dim is None:
-            raise ValueError(
-                "obs_dim/action_dim are unresolved on the network config; the "
-                "runner must resolve them from the dataset before build_model()."
-            )
-        self.encoder = OpponentPolicyEncoder(
-            action_dim=net.action_dim,
-            hidden_dim=net.hidden_dim,
-            ff_dim=net.ff_dim,
-            num_blocks=net.num_blocks,
-            dropout=net.dropout,
-        )
-        self.decoder = AncillaryActionDecoder(action_dim=net.action_dim, hidden_dim=net.hidden_dim)
-        self.network = TaoNetwork(
-            action_dim=net.action_dim, hidden_dim=net.hidden_dim, dropout=net.dropout
-        )
+        # The model and inference are a composed TaoAgent; training reads its
+        # encoder/decoder/network, and act delegates to it.
+        self.agent = TaoAgent(self.config)
+        self.agent.build_model()
 
     def _stage1_batch(self, _step):
         return to_jax(
@@ -435,7 +283,7 @@ class TaoPolicy(BaseAhtPolicy):
     def train_stage_1(self):
         init_batch = self._stage1_batch(0)
         self.rng, k1, k2 = jax.random.split(self.rng, 3)
-        encoder_params = self.encoder.init(
+        encoder_params = self.agent.encoder.init(
             k1,
             init_batch["mate_next_obs"],
             init_batch["mate_actions"],
@@ -443,7 +291,7 @@ class TaoPolicy(BaseAhtPolicy):
             mask=init_batch["mask"],
             timesteps=init_batch["timesteps"],
         )
-        init_tokens = self.encoder.apply(
+        init_tokens = self.agent.encoder.apply(
             encoder_params,
             init_batch["mate_next_obs"],
             init_batch["mate_actions"],
@@ -451,15 +299,20 @@ class TaoPolicy(BaseAhtPolicy):
             mask=init_batch["mask"],
             timesteps=init_batch["timesteps"],
         )
-        decoder_params = self.decoder.init(
+        decoder_params = self.agent.decoder.init(
             k2, init_batch["cross_mate_obs"], OpponentPolicyEncoder.pool(init_tokens)
         )
         params = {"encoder": encoder_params, "decoder": decoder_params}
 
         def loss(p, b, rngs):
             return embedding_loss(
-                p, self.encoder, self.decoder, b,
-                alpha=self.config.alpha, lam=self.config.lam, rngs=rngs,
+                p,
+                self.agent.encoder,
+                self.agent.decoder,
+                b,
+                alpha=self.config.alpha,
+                lam=self.config.lam,
+                rngs=rngs,
             )
 
         return self._run_stage(
@@ -474,7 +327,7 @@ class TaoPolicy(BaseAhtPolicy):
     def train_stage_2(self, stage1_params):
         init_batch = self._stage2_batch(0)
         self.rng, k = jax.random.split(self.rng)
-        init_context = self.encoder.apply(
+        init_context = self.agent.encoder.apply(
             stage1_params["encoder"],
             init_batch["context_mate_next_obs"],
             init_batch["context_mate_actions"],
@@ -482,7 +335,7 @@ class TaoPolicy(BaseAhtPolicy):
             mask=init_batch["context_mask"],
             timesteps=init_batch["context_timesteps"],
         )
-        policy_params = self.network.init(
+        policy_params = self.agent.network.init(
             k,
             init_batch["ego_rtg"],
             init_batch["ego_obs"],
@@ -498,8 +351,12 @@ class TaoPolicy(BaseAhtPolicy):
 
         def loss(p, b, rngs):
             return tao_policy_loss(
-                p, self.network, self.encoder, b,
-                freeze_encoder=self.config.freeze_encoder, rngs=rngs,
+                p,
+                self.agent.network,
+                self.agent.encoder,
+                b,
+                freeze_encoder=self.config.freeze_encoder,
+                rngs=rngs,
             )
 
         trained = self._run_stage(
@@ -520,7 +377,7 @@ class TaoPolicy(BaseAhtPolicy):
         """The C-trajectory Opponent Context Window, encoded from the dataset."""
         c = self.config.context_trajectories
         hidden = self.config.network.hidden_dim
-        tokens = self.encoder.apply(
+        tokens = self.agent.encoder.apply(
             encoder_params,
             jnp.asarray(self.dataset.windows.mate_next_obs),
             jnp.asarray(self.dataset.windows.mate_actions),
@@ -534,9 +391,4 @@ class TaoPolicy(BaseAhtPolicy):
         return context, context_mask
 
     def act(self, params, rtg, obs, actions, *, timesteps, mask):
-        stage2 = params["stage2"]
-        return self.network.apply(
-            stage2["policy"], rtg, obs, actions,
-            timesteps=timesteps, context=stage2["context"],
-            mask=mask, context_mask=stage2["context_mask"], train=False,
-        )
+        return self.agent.act(params, rtg, obs, actions, timesteps=timesteps, mask=mask)
