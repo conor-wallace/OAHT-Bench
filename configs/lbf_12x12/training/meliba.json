@@ -10,12 +10,12 @@
       "rollout_length": 128,
       "tier": "tier1"
     },
-    "dataset_path": "results/dataset_collection/fcp_lbf_12x12-187ca62dbe39/dataset.npz",
-    "baseline": "tao",
-    "label": "tao_fcp_lbf_12x12",
+    "dataset_path": "results/dataset_collection/pooled_lbf_12x12-3e827fef4050/dataset.vlt",
+    "baseline": "meliba",
+    "label": "meliba_pooled_lbf_12x12",
     "offline": {
       "network": {
-        "architecture": "tao"
+        "architecture": "meliba"
       },
       "stride": 20,
       "stage1_steps": 2000,

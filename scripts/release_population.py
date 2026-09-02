@@ -3,7 +3,7 @@
 populations/ is the durable, git-tracked record of the benchmark's official
 population checkpoints -- distinct from results/ (gitignored, every sweep
 attempt) in that it holds only the one adopted checkpoint per
-(environment, generator), organized to match configs/teammate_gen/'s layout::
+(environment, generator), organized to match the configs/<env>/teammate_gen/ layout::
 
     uv run python scripts/release_population.py \\
         results/teammate_generation/brdiv_lbf_budget2__..-3ddef8e7b353 \\
@@ -56,8 +56,7 @@ def release(run_dir: Path, dest_root: Path, *, force: bool = False) -> Path:
     job_path = run_dir / "job.json"
     if not job_path.exists():
         raise FileNotFoundError(
-            f"{job_path} does not exist -- {run_dir} does not look like a "
-            f"finished run directory."
+            f"{job_path} does not exist -- {run_dir} does not look like a finished run directory."
         )
     job = load_job(job_path)
     if job.job_type != "teammate_generation":
@@ -90,10 +89,23 @@ def release(run_dir: Path, dest_root: Path, *, force: bool = False) -> Path:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("run_dir", type=Path, help="A finished results/teammate_generation/<run> directory.")
-    parser.add_argument("--dest", type=Path, default=Path("populations"), help="Root to release into (default: populations).")
-    parser.add_argument("--force", action="store_true", help="Overwrite an existing release for this (environment, generator).")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "run_dir", type=Path, help="A finished results/teammate_generation/<run> directory."
+    )
+    parser.add_argument(
+        "--dest",
+        type=Path,
+        default=Path("populations"),
+        help="Root to release into (default: populations).",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing release for this (environment, generator).",
+    )
     args = parser.parse_args()
 
     dest = release(args.run_dir, args.dest, force=args.force)

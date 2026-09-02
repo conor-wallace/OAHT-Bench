@@ -37,7 +37,8 @@ from oaht_bench.configs.teammate_gen import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-OUT_ROOT = REPO_ROOT / "configs" / "teammate_gen"
+# Configs are laid out environment-first: configs/<env>/<step>/<name>.json.
+CONFIGS_ROOT = REPO_ROOT / "configs"
 
 
 #: Which environment family a preset belongs to, for looking up tuning below.
@@ -553,7 +554,7 @@ def main() -> int:
             job = TeammateGenerationJob(
                 label=f"{generator}_{env_name}", env=env, generator=gen, **kwargs
             )
-            path = OUT_ROOT / env_name / f"{generator}.json"
+            path = CONFIGS_ROOT / env_name / "teammate_gen" / f"{generator}.json"
             save_job(job, path, minimal=True)
             written.append((env_name, generator, gen, job))
 
@@ -564,7 +565,7 @@ def main() -> int:
             f"{env_name:30s} {generator:8s} {gen.population_size:4d} "
             f"{gen.num_envs:5d} {budget:10.1e}  {job.short_hash()}"
         )
-    print(f"\n{len(written)} configs -> {OUT_ROOT.relative_to(REPO_ROOT)}/")
+    print(f"\n{len(written)} configs -> configs/<env>/teammate_gen/")
     return 0
 
 

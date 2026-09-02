@@ -1,14 +1,29 @@
-# Teammate-generation configs
+# Configs
 
-Twelve configs: four generators × the three Tier 1 environments (§10.3). Regenerate
-with `uv run python scripts/gen_teammate_configs.py`, or `--all-envs` for all seven
-results configurations.
+Configs are laid out **environment-first**, one directory per experiment step, so
+the full path for an environment reads top to bottom:
 
 ```
-uv run oaht-bench config=configs/teammate_gen/lbf_12x12/fcp.json
+configs/<env>/teammate_gen/<generator>.json    # 1. train a teammate population
+configs/<env>/crossplay/pooled.json            # 2. pooled cross-play matrix
+configs/<env>/data_collection/<variant>.json   # 3. collect a dataset
+configs/<env>/training/<baseline>.json         # 4. train an offline baseline
 ```
 
-## Where the numbers come from
+Every step runs the same way: `uv run oaht-bench config=<path>`. (`configs/sweeps/`
+is generated and gitignored, so it stays outside the per-environment tree.)
+
+## Teammate-generation configs
+
+Four generators × the Tier 1 environments (§10.3). Regenerate with
+`uv run python scripts/gen_teammate_configs.py`, or `--all-envs` for all results
+configurations — the generator writes to `configs/<env>/teammate_gen/`.
+
+```
+uv run oaht-bench config=configs/lbf_12x12/teammate_gen/fcp.json
+```
+
+### Where the numbers come from
 
 Hyperparameters are **ported from jax-aht's per-environment Hydra configs**, not
 invented. That tuning is real and environment-specific — Hanabi wants
@@ -29,14 +44,14 @@ Two values are ours rather than upstream's:
   jax-aht's task configs enable it; a population trained without shaping solves a
   materially harder, sparse-reward task and is not comparable to one trained with.
 
-## These are starting points, not the tuned configuration
+### These are starting points, not the tuned configuration
 
 §7.2 of the project plan makes the per-environment tuning record a contribution.
 This is the baseline that record gets built against. Every value here is
 provisional, and the ones most likely to move are the diversity weights
 (`cross_play_weight`, `mixed_play_weight`, `tolerance_factor`) and the budgets.
 
-## Known comparability problem: population sizes differ
+### Known comparability problem: population sizes differ
 
 The generators do not produce populations of the same size, because upstream tuned
 each at a different `population_size` and because "population size" does not mean

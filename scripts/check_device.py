@@ -16,7 +16,7 @@ card the Hanabi configs are the ones to worry about.
 Usage::
 
     uv run python scripts/check_device.py
-    uv run python scripts/check_device.py configs/teammate_gen/lbf_12x12/brdiv.json
+    uv run python scripts/check_device.py configs/lbf_12x12/teammate_gen/brdiv.json
 """
 
 from __future__ import annotations

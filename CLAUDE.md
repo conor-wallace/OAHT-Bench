@@ -78,7 +78,7 @@ uv run ruff format . && uv run ruff check . --fix
 
 uv run python scripts/check_device.py [config.json]     # GPU + memory preflight
 uv run python scripts/gen_teammate_configs.py --wandb   # regenerate configs
-uv run python scripts/sweep.py run configs/teammate_gen/lbf_12x12/ --jobs 2
+uv run python scripts/sweep.py run configs/lbf_12x12/teammate_gen/ --jobs 2
 uv run python scripts/sweep.py generate --base ... --set path=v1,v2
 uv run python scripts/sweep.py collect --sweep configs/sweeps/<name>
 uv run python scripts/sweep.py rescore results/teammate_generation/<run>/

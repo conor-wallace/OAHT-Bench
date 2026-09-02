@@ -5,7 +5,7 @@ Two modes.
 **Generate** — expand a grid over a base config and write one JSON per cell::
 
     uv run python scripts/sweep.py generate \\
-        --base configs/teammate_gen/lbf_12x12/brdiv.json \\
+        --base configs/lbf_12x12/teammate_gen/brdiv.json \\
         --name brdiv_lbf_xpw \\
         --set generator.cross_play_weight=0.005,0.05,0.5 \\
         --set generator.ppo.learning_rate=1e-4,5e-4
