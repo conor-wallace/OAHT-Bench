@@ -1,0 +1,39 @@
+{
+  "job": {
+    "env": {
+      "env_name": "hanabi",
+      "hand_size": 5,
+      "max_info_tokens": 8,
+      "max_life_tokens": 3,
+      "name": "hanabi",
+      "notes": "Turn-based, action-masked, hidden own hand. The abstraction stress test.",
+      "num_cards_of_rank": [
+        3,
+        2,
+        2,
+        2,
+        1
+      ],
+      "num_colors": 5,
+      "num_ranks": 5,
+      "rollout_length": 128,
+      "tier": "tier1"
+    },
+    "generator": {
+      "cross_play_weight": 0.05,
+      "generator": "brdiv",
+      "num_envs": 384,
+      "ppo": {
+        "anneal_lr": true,
+        "clip_eps": 0.2,
+        "gamma": 0.999,
+        "learning_rate": 0.0005,
+        "update_epochs": 4
+      },
+      "total_timesteps": 1500000000.0
+    },
+    "job_type": "teammate_generation",
+    "label": "brdiv_hanabi"
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,25 @@
+{
+  "job": {
+    "env": {
+      "env_name": "lbf",
+      "grid_size": 12,
+      "name": "lbf_12x12",
+      "notes": "Gridworld. Matches the existing checkpoints/lbf/lbf_12x12 populations.",
+      "num_food": 6,
+      "rollout_length": 128,
+      "tier": "tier1"
+    },
+    "generator": {
+      "generator": "fcp",
+      "ppo": {
+        "clip_eps": 0.03,
+        "entropy_coef": 0.003,
+        "learning_rate": 0.001
+      },
+      "total_timesteps": 24000000.0
+    },
+    "job_type": "teammate_generation",
+    "label": "fcp_lbf_12x12"
+  },
+  "schema_version": 1
+}

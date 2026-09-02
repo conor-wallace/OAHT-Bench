@@ -1,0 +1,27 @@
+{
+  "job": {
+    "env": {
+      "agent_view_size": 2,
+      "env_name": "overcooked-v2",
+      "layout": "counter_circuit",
+      "name": "overcooked_v2_counter_circuit",
+      "notes": "Full resource-sharing; discriminates between methods in v1.",
+      "rollout_length": 400,
+      "tier": "tier1"
+    },
+    "generator": {
+      "actor_type": "rnn_actor_with_conditional_critic",
+      "generator": "comedi",
+      "ppo": {
+        "clip_eps": 0.01,
+        "entropy_coef": 0.05,
+        "learning_rate": 0.001,
+        "num_minibatches": 8
+      },
+      "total_timesteps_per_iteration": 480000000.0
+    },
+    "job_type": "teammate_generation",
+    "label": "comedi_overcooked_v2_counter_circuit"
+  },
+  "schema_version": 1
+}

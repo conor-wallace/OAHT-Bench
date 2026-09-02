@@ -1,0 +1,26 @@
+{
+  "job": {
+    "env": {
+      "env_name": "lbf",
+      "grid_size": 12,
+      "name": "lbf_12x12",
+      "notes": "Gridworld. Matches the existing checkpoints/lbf/lbf_12x12 populations.",
+      "num_food": 6,
+      "rollout_length": 128,
+      "tier": "tier1"
+    },
+    "generator": {
+      "generator": "rpg",
+      "ppo": {
+        "learning_rate": 0.00025
+      }
+    },
+    "logging": {
+      "use_wandb": true,
+      "wandb_project": "lbf_teammate_gen"
+    },
+    "job_type": "teammate_generation",
+    "label": "rpg_lbf_12x12"
+  },
+  "schema_version": 1
+}

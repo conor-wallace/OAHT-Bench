@@ -1,0 +1,182 @@
+[
+  {
+    "index": 0,
+    "generator": "brdiv",
+    "member": 0,
+    "role": "conf"
+  },
+  {
+    "index": 1,
+    "generator": "brdiv",
+    "member": 0,
+    "role": "br"
+  },
+  {
+    "index": 2,
+    "generator": "brdiv",
+    "member": 1,
+    "role": "conf"
+  },
+  {
+    "index": 3,
+    "generator": "brdiv",
+    "member": 1,
+    "role": "br"
+  },
+  {
+    "index": 4,
+    "generator": "brdiv",
+    "member": 2,
+    "role": "conf"
+  },
+  {
+    "index": 5,
+    "generator": "brdiv",
+    "member": 2,
+    "role": "br"
+  },
+  {
+    "index": 6,
+    "generator": "brdiv",
+    "member": 3,
+    "role": "conf"
+  },
+  {
+    "index": 7,
+    "generator": "brdiv",
+    "member": 3,
+    "role": "br"
+  },
+  {
+    "index": 8,
+    "generator": "brdiv",
+    "member": 4,
+    "role": "conf"
+  },
+  {
+    "index": 9,
+    "generator": "brdiv",
+    "member": 4,
+    "role": "br"
+  },
+  {
+    "index": 10,
+    "generator": "comedi",
+    "member": 0,
+    "role": "self"
+  },
+  {
+    "index": 11,
+    "generator": "comedi",
+    "member": 1,
+    "role": "self"
+  },
+  {
+    "index": 12,
+    "generator": "comedi",
+    "member": 2,
+    "role": "self"
+  },
+  {
+    "index": 13,
+    "generator": "comedi",
+    "member": 3,
+    "role": "self"
+  },
+  {
+    "index": 14,
+    "generator": "comedi",
+    "member": 4,
+    "role": "self"
+  },
+  {
+    "index": 15,
+    "generator": "fcp",
+    "member": 4,
+    "role": "self"
+  },
+  {
+    "index": 16,
+    "generator": "fcp",
+    "member": 9,
+    "role": "self"
+  },
+  {
+    "index": 17,
+    "generator": "fcp",
+    "member": 14,
+    "role": "self"
+  },
+  {
+    "index": 18,
+    "generator": "fcp",
+    "member": 19,
+    "role": "self"
+  },
+  {
+    "index": 19,
+    "generator": "fcp",
+    "member": 24,
+    "role": "self"
+  },
+  {
+    "index": 20,
+    "generator": "lbrdiv",
+    "member": 0,
+    "role": "conf"
+  },
+  {
+    "index": 21,
+    "generator": "lbrdiv",
+    "member": 0,
+    "role": "br"
+  },
+  {
+    "index": 22,
+    "generator": "lbrdiv",
+    "member": 1,
+    "role": "conf"
+  },
+  {
+    "index": 23,
+    "generator": "lbrdiv",
+    "member": 1,
+    "role": "br"
+  },
+  {
+    "index": 24,
+    "generator": "lbrdiv",
+    "member": 2,
+    "role": "conf"
+  },
+  {
+    "index": 25,
+    "generator": "lbrdiv",
+    "member": 2,
+    "role": "br"
+  },
+  {
+    "index": 26,
+    "generator": "lbrdiv",
+    "member": 3,
+    "role": "conf"
+  },
+  {
+    "index": 27,
+    "generator": "lbrdiv",
+    "member": 3,
+    "role": "br"
+  },
+  {
+    "index": 28,
+    "generator": "lbrdiv",
+    "member": 4,
+    "role": "conf"
+  },
+  {
+    "index": 29,
+    "generator": "lbrdiv",
+    "member": 4,
+    "role": "br"
+  }
+]

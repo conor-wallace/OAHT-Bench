@@ -1,0 +1,94 @@
+{
+  "ENV_KWARGS": {
+    "hand_size": 5,
+    "max_info_tokens": 8,
+    "max_life_tokens": 3,
+    "num_agents": 2,
+    "num_cards_of_rank": [
+      3,
+      2,
+      2,
+      2,
+      1
+    ],
+    "num_colors": 5,
+    "num_ranks": 5
+  },
+  "ENV_NAME": "hanabi",
+  "ROLLOUT_LENGTH": 128,
+  "TASK_NAME": "hanabi",
+  "algorithm": {
+    "ACTIVATION": "tanh",
+    "ACTOR_TYPE": "mlp",
+    "ALG": "fcp",
+    "ANNEAL_LR": true,
+    "CLIP_EPS": 0.2,
+    "ENT_COEF": 0.01,
+    "ENV_KWARGS": {
+      "hand_size": 5,
+      "max_info_tokens": 8,
+      "max_life_tokens": 3,
+      "num_agents": 2,
+      "num_cards_of_rank": [
+        3,
+        2,
+        2,
+        2,
+        1
+      ],
+      "num_colors": 5,
+      "num_ranks": 5
+    },
+    "ENV_NAME": "hanabi",
+    "FC_HIDDEN_DIM": 64,
+    "GAE_LAMBDA": 0.95,
+    "GAMMA": 0.999,
+    "LR": 0.0005,
+    "MAX_GRAD_NORM": 1.0,
+    "NUM_CHECKPOINTS": 5,
+    "NUM_ENVS": 64,
+    "NUM_EVAL_EPISODES": 20,
+    "NUM_MINIBATCHES": 4,
+    "NUM_SEEDS": 1,
+    "PARTNER_POP_SIZE": 5,
+    "ROLLOUT_LENGTH": 128,
+    "TOTAL_TIMESTEPS": 2000000000.0,
+    "TRAIN_SEED": 20374,
+    "UPDATE_EPOCHS": 4,
+    "VF_COEF": 0.5
+  },
+  "label": "fcp_hanabi_budget_ref__num_envs=64_total_timesteps=2000000000.0",
+  "local_logger": {
+    "save_eval_out": true,
+    "save_train_out": true
+  },
+  "logger": {
+    "log_eval_out": true,
+    "log_train_out": true,
+    "verbose": false
+  },
+  "name": "hanabi/fcp/fcp_hanabi_budget_ref__num_envs=64_total_timesteps=2000000000.0",
+  "run_dir": "results/teammate_generation/fcp_hanabi_budget_ref__num_envs=64_total_timesteps=2000000000.0-d698db40e0f9",
+  "run_heldout_eval": false,
+  "task": {
+    "ENV_KWARGS": {
+      "hand_size": 5,
+      "max_info_tokens": 8,
+      "max_life_tokens": 3,
+      "num_agents": 2,
+      "num_cards_of_rank": [
+        3,
+        2,
+        2,
+        2,
+        1
+      ],
+      "num_colors": 5,
+      "num_ranks": 5
+    },
+    "ENV_NAME": "hanabi",
+    "ROLLOUT_LENGTH": 128,
+    "TASK_NAME": "hanabi"
+  },
+  "train_ego": false
+}

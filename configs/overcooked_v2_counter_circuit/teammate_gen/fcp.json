@@ -1,0 +1,28 @@
+{
+  "job": {
+    "env": {
+      "agent_view_size": 2,
+      "env_name": "overcooked-v2",
+      "layout": "counter_circuit",
+      "name": "overcooked_v2_counter_circuit",
+      "notes": "Full resource-sharing; discriminates between methods in v1.",
+      "rollout_length": 400,
+      "tier": "tier1"
+    },
+    "generator": {
+      "actor_type": "rnn",
+      "generator": "fcp",
+      "ppo": {
+        "anneal_lr": true,
+        "clip_eps": 0.2,
+        "learning_rate": 0.00025,
+        "num_minibatches": 64,
+        "update_epochs": 4
+      },
+      "total_timesteps": 60000000.0
+    },
+    "job_type": "teammate_generation",
+    "label": "fcp_overcooked_v2_counter_circuit"
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,30 @@
+{
+  "job": {
+    "job_type": "training",
+    "env": {
+      "env_name": "lbf",
+      "grid_size": 12,
+      "name": "lbf_12x12",
+      "notes": "Gridworld. Matches the existing checkpoints/lbf/lbf_12x12 populations.",
+      "num_food": 6,
+      "rollout_length": 128,
+      "tier": "tier1"
+    },
+    "dataset_path": "results/dataset_collection/pooled_lbf_12x12-3e827fef4050/dataset.vlt",
+    "baseline": "tao",
+    "label": "tao_pooled_lbf_12x12",
+    "offline": {
+      "network": {
+        "architecture": "tao"
+      },
+      "stride": 20,
+      "stage1_steps": 2000,
+      "stage2_steps": 20000,
+      "log_every": 250,
+      "eval_episodes": 20
+    },
+    "logging": {
+      "use_wandb": false
+    }
+  }
+}

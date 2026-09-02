@@ -1,0 +1,397 @@
+'''
+Based on the IPPO implementation from JaxMarl. Trains a parameter-shared IPPO agent on a
+fully cooperative multi-agent environment.
+
+Recommended run command:
+python marl/run.py task=lbf/lbf_7x7_nolevels algorithm=ippo/lbf/lbf_7x7_nolevels
+'''
+import shutil
+
+import numpy as np
+import jax
+from tqdm import tqdm
+import jax.numpy as jnp
+import optax
+from flax.training.train_state import TrainState
+
+from oaht_bench.models.initialize_agents import initialize_s5_agent, initialize_mlp_agent, \
+    initialize_rnn_agent, initialize_pseudo_actor_with_double_critic, initialize_pseudo_actor_with_conditional_critic, \
+    initialize_pseudo_rnn_actor_with_conditional_critic
+from oaht_bench.common.plot_utils import get_stats, get_metric_names
+from oaht_bench.common.save_load_utils import save_train_run
+from oaht_bench.envs import make_env
+from oaht_bench.envs.log_wrapper import LogWrapper
+from oaht_bench.teammate_gen.marl.ppo_utils import Transition, batchify, unbatchify, _create_minibatches
+
+
+def initialize_agent(actor_type, algorithm_config, env, init_rng):
+    if actor_type == "s5":
+        policy, init_params = initialize_s5_agent(algorithm_config, env, init_rng)
+    elif actor_type == "mlp":
+        policy, init_params = initialize_mlp_agent(algorithm_config, env, init_rng)
+    elif actor_type == "rnn":
+        policy, init_params = initialize_rnn_agent(algorithm_config, env, init_rng)
+    elif actor_type == "pseudo_actor_with_double_critic":
+        policy, init_params = initialize_pseudo_actor_with_double_critic(algorithm_config, env, init_rng)
+    elif actor_type == "pseudo_actor_with_conditional_critic":
+        policy, init_params = initialize_pseudo_actor_with_conditional_critic(algorithm_config, env, init_rng)
+    elif actor_type == "pseudo_rnn_actor_with_conditional_critic":
+        policy, init_params = initialize_pseudo_rnn_actor_with_conditional_critic(algorithm_config, env, init_rng)
+    return policy, init_params
+
+def make_train(runtime, env, logger, progress_callback=None):
+    """Build the PPO training function.
+
+    OAHT-Bench: takes a typed :class:`~oaht_bench.teammate_gen.runtime.PpoRuntime`
+    instead of a config dict. Upstream computed NUM_ACTORS/NUM_UPDATES/
+    MINIBATCH_SIZE here and wrote them back into the config; they are now derived
+    once in ``PpoRuntime.from_config``, which also rejects budgets that would make
+    training a silent no-op.
+    """
+    config = runtime  # kept as a local alias to minimise the diff below
+
+    def linear_schedule(count):
+        frac = 1.0 - (count // (config.ppo.num_minibatches * config.ppo.update_epochs)) / config.num_updates
+        return config.ppo.learning_rate * frac
+
+    def train(rng):
+        # INIT NETWORK
+        rng, init_rng = jax.random.split(rng)
+        policy, init_params = initialize_agent(
+            config.actor_type, config.to_agent_dict(), env, init_rng
+        )
+
+        if config.ppo.anneal_lr:
+            tx = optax.chain(
+                optax.clip_by_global_norm(config.ppo.max_grad_norm),
+                optax.adam(learning_rate=linear_schedule, eps=1e-5),
+            )
+        else:
+            tx = optax.chain(
+                optax.clip_by_global_norm(config.ppo.max_grad_norm), 
+                optax.adam(config.ppo.learning_rate, eps=1e-5))
+        train_state = TrainState.create(
+            apply_fn=policy.network.apply,
+            params=init_params,
+            tx=tx,
+        )
+
+        # INIT ENV
+        rng, _rng = jax.random.split(rng)
+        reset_rng = jax.random.split(_rng, config.num_envs)
+        obsv, env_state = jax.vmap(env.reset, in_axes=(0,))(reset_rng)
+
+        # TRAIN LOOP
+        def _update_step(update_runner_state, unused):
+            runner_state, update_steps = update_runner_state
+
+            def _env_step(runner_state, unused):
+                train_state, env_state, last_obs, last_done, last_hstate, rng = runner_state
+
+                rng, act_rng = jax.random.split(rng, 2)
+
+                last_obs_batch = batchify(last_obs, env.agents, config.num_actors)
+                last_done_batch = batchify(last_done, env.agents, config.num_actors)
+
+                # Other-Play color permutation, when active, is applied by
+                # SymmetryAugmentationWrapper inside env.reset/step/get_avail_actions.
+                # See envs/common/symmetry_wrapper.py and envs/hanabi/other_play.py.
+                avail_actions = jax.vmap(env.get_avail_actions)(env_state.env_state)
+                avail_actions = jax.lax.stop_gradient(batchify(avail_actions,
+                    env.agents, config.num_actors).astype(jnp.float32))
+
+                action, value, pi, new_hstate = policy.get_action_value_policy(
+                    params=train_state.params,
+                    obs=last_obs_batch.reshape(1, config.num_actors, -1),
+                    done=last_done_batch.reshape(1, config.num_actors),
+                    avail_actions=avail_actions.reshape(1, config.num_actors, -1),
+                    hstate=last_hstate,
+                    rng=act_rng
+                )
+                log_prob = pi.log_prob(action)
+
+                action = action.squeeze()
+                log_prob = log_prob.squeeze()
+                value = value.squeeze()
+
+                env_act = unbatchify(action, env.agents, config.num_envs, env.num_agents)
+                env_act = {k:v.flatten() for k,v in env_act.items()}
+
+                rng, _rng = jax.random.split(rng)
+                rng_step = jax.random.split(_rng, config.num_envs)
+
+                new_obs, new_env_state, reward, new_done, info = jax.vmap(env.step, in_axes=(0,0,0))(
+                    rng_step, env_state, env_act
+                )
+                
+                # note that num_actors = num_envs * num_agents
+                info = jax.tree.map(lambda x: x.reshape((config.num_actors)), info)
+
+                transition = Transition(
+                    batchify(new_done, env.agents, config.num_actors).squeeze(),
+                    action,
+                    value,
+                    batchify(reward, env.agents, config.num_actors).squeeze(),
+                    log_prob,
+                    last_obs_batch,
+                    info,
+                    avail_actions
+                )
+                runner_state = (train_state, new_env_state, new_obs, new_done, new_hstate, rng)
+                return runner_state, transition
+            
+            runner_state, traj_batch = jax.lax.scan(
+                _env_step, runner_state, None, config.rollout_length
+            )
+
+            # Get final value estimate for completed trajectory
+            train_state, env_state, last_obs, last_done, last_hstate, rng = runner_state
+            last_obs_batch = batchify(last_obs, env.agents, config.num_actors)
+            last_obs_batch = last_obs_batch.reshape(1, config.num_actors, -1)
+            last_done_batch = batchify(last_done, env.agents, config.num_actors)
+            last_done_batch = last_done_batch.reshape(1, config.num_actors)
+            last_avail_batch = jax.vmap(env.get_avail_actions)(env_state.env_state)
+            last_avail_batch = jax.lax.stop_gradient(batchify(last_avail_batch, 
+                env.agents, config.num_actors).astype(jnp.float32))
+            
+            _, last_val, _, _ = policy.get_action_value_policy(
+                params=train_state.params,
+                obs=last_obs_batch,
+                done=last_done_batch,
+                avail_actions=last_avail_batch,
+                hstate=last_hstate,
+                rng=jax.random.PRNGKey(0)  # Dummy key since we're just extracting the value
+            )
+            last_val = last_val.squeeze()
+
+            def _calculate_gae(traj_batch, last_val):
+                def _get_advantages(gae_and_next_value, transition):
+                    gae, next_value = gae_and_next_value
+                    done, value, reward = (
+                        transition.done,
+                        transition.value,
+                        transition.reward,
+                    )
+                    delta = reward + config.ppo.gamma * next_value * (1 - done) - value
+                    gae = (
+                        delta
+                        + config.ppo.gamma * config.ppo.gae_lambda * (1 - done) * gae
+                    )
+                    return (gae, value), gae
+
+                _, advantages = jax.lax.scan(
+                    _get_advantages,
+                    (jnp.zeros_like(last_val), last_val),
+                    traj_batch,
+                    reverse=True,
+                    unroll=16,
+                )
+                return advantages, advantages + traj_batch.value
+
+            advantages, targets = _calculate_gae(traj_batch, last_val)
+
+            def _update_epoch(update_state, unused):
+                def _update_minbatch(train_state, batch_info):
+                    init_hstate, traj_batch, advantages, targets = batch_info
+                    def _loss_fn(params, traj_batch, gae, targets):
+                        # RERUN NETWORK
+                        _, value, pi, _ = policy.get_action_value_policy(
+                            params=params,
+                            obs=traj_batch.obs,
+                            done=traj_batch.done,
+                            avail_actions=traj_batch.avail_actions,
+                            hstate=init_hstate,
+                            rng=jax.random.PRNGKey(0) # only used for action sampling, which is unused here
+                        )
+                        log_prob = pi.log_prob(traj_batch.action)
+
+                        # CALCULATE VALUE LOSS
+                        value_pred_clipped = traj_batch.value + (
+                            value - traj_batch.value
+                        ).clip(-config.ppo.clip_eps, config.ppo.clip_eps)
+                        value_losses = jnp.square(value - targets)
+                        value_losses_clipped = jnp.square(value_pred_clipped - targets)
+                        value_loss = (
+                            jnp.maximum(value_losses, value_losses_clipped).mean()
+                        )
+
+                        # CALCULATE ACTOR LOSS
+                        ratio = jnp.exp(log_prob - traj_batch.log_prob)
+                        gae = (gae - gae.mean()) / (gae.std() + 1e-8)
+                        loss_actor1 = ratio * gae
+                        loss_actor2 = (
+                            jnp.clip(
+                                ratio,
+                                1.0 - config.ppo.clip_eps,
+                                1.0 + config.ppo.clip_eps,
+                            )
+                            * gae
+                        )
+                        loss_actor = -jnp.minimum(loss_actor1, loss_actor2)
+                        loss_actor = loss_actor.mean()
+                        entropy = pi.entropy().mean()
+
+                        total_loss = (
+                            loss_actor
+                            + config.ppo.value_coef * value_loss
+                            - config.ppo.entropy_coef * entropy
+                        )
+                        return total_loss, (value_loss, loss_actor, entropy)
+
+                    grad_fn = jax.value_and_grad(_loss_fn, has_aux=True)
+                    total_loss, grads = grad_fn(
+                        train_state.params, traj_batch, advantages, targets
+                    )
+                    train_state = train_state.apply_gradients(grads=grads)
+                    return train_state, total_loss
+
+                train_state, init_hstate, traj_batch, advantages, targets, rng = update_state
+                rng, perm_rng = jax.random.split(rng)
+                minibatches = _create_minibatches(traj_batch, advantages, targets, init_hstate, 
+                                                  config.num_actors, config.ppo.num_minibatches, perm_rng)
+
+                train_state, total_loss = jax.lax.scan(
+                    _update_minbatch, train_state, minibatches
+                )
+                update_state = (train_state, init_hstate, traj_batch, advantages, targets, rng)
+                return update_state, total_loss
+            init_hstate = policy.init_hstate(config.num_actors)
+            update_state = (train_state, init_hstate, traj_batch, advantages, targets, rng)
+            update_state, loss_info = jax.lax.scan(
+                _update_epoch, update_state, None, config.ppo.update_epochs
+            )
+            train_state = update_state[0]
+            def mask_and_mean(x, mask):
+                return jnp.where(mask, x, 0).sum() / jnp.maximum(1, mask.sum())
+            
+            mask = traj_batch.info.get("returned_episode", jnp.ones_like(traj_batch.reward))
+            metric = jax.tree.map(lambda x: mask_and_mean(x, mask), traj_batch.info)
+            metric["update_steps"] = update_steps
+
+            def callback(metrics):
+                log_metrics_intermediate(metrics, logger)
+                if progress_callback is not None:
+                    progress_callback()
+
+            # metrics: scalars
+            jax.experimental.io_callback(callback, None, metric)
+
+            rng = update_state[-1]
+            update_steps += 1
+            runner_state = (train_state, env_state, last_obs, last_done, last_hstate, rng)
+
+            # Condense metrics to per-update scalars for the scan output.
+            # Full per-timestep metrics are already logged via io_callback above.
+            # Without condensation, storing (ROLLOUT_LENGTH, NUM_ACTORS) per key
+            # per update step causes OOM for long runs (e.g. 1e9 steps).
+            mask = metric["returned_episode"]  # (ROLLOUT_LENGTH, NUM_ACTORS)
+            n_episodes = mask.sum()
+            condensed_metric = {}
+            for key, val in metric.items():
+                if key == "update_steps":
+                    condensed_metric[key] = val
+                elif key == "returned_episode":
+                    condensed_metric[key] = n_episodes.astype(jnp.float32)
+                else:
+                    # Episode-masked mean: average only over timesteps where
+                    # an episode ended (where returned_episode == True)
+                    condensed_metric[key] = jnp.where(
+                        n_episodes > 0,
+                        jnp.where(mask, val, 0.0).sum() / jnp.maximum(n_episodes, 1),
+                        0.0,
+                    )
+            # Add loss statistics from the PPO update epochs.
+            # loss_info structure: (total_loss, (value_loss, actor_loss, entropy))
+            # each with shape (UPDATE_EPOCHS, NUM_MINIBATCHES)
+            condensed_metric["value_loss"] = loss_info[1][0].mean()
+            condensed_metric["actor_loss"] = loss_info[1][1].mean()
+            condensed_metric["entropy_loss"] = loss_info[1][2].mean()
+
+            return (runner_state, update_steps), condensed_metric
+
+        ckpt_and_eval_interval = config.num_updates // max(1, config.num_checkpoints - 1)
+        num_ckpts = config.num_checkpoints
+
+        # build a pytree that can hold the parameters for all checkpoints.
+        def init_ckpt_array(params_pytree):
+            return jax.tree.map(
+                lambda x: jnp.zeros((num_ckpts,) + x.shape, x.dtype),
+                params_pytree
+            )
+
+        def _update_step_with_checkpoint(update_with_ckpt_runner_state, unused):
+            (update_runner_state, checkpoint_array, ckpt_idx) = update_with_ckpt_runner_state
+            # update_runner_state is ((train_state, env_state, obs, done, hstate, rng), update_steps)
+            # Run one PPO update step
+            update_runner_state, metric = _update_step(update_runner_state, None)
+            _, update_steps = update_runner_state
+            # update steps is 1-indexed because it was incremented at the end of the update step
+            to_store = jnp.logical_or(jnp.equal(jnp.mod(update_steps-1, ckpt_and_eval_interval), 0),
+                                      jnp.equal(update_steps, config.num_updates))
+
+            def store_ckpt_fn(args):
+                # Write current runner_state[0].params into checkpoint_array at ckpt_idx
+                # and increment ckpt_idx
+                _checkpoint_array, _ckpt_idx = args
+                new_checkpoint_array = jax.tree.map(
+                    lambda c_arr, p: c_arr.at[_ckpt_idx].set(p),
+                    _checkpoint_array,
+                    update_runner_state[0][0].params
+                )
+                return new_checkpoint_array, _ckpt_idx + 1 
+            # TODO: potential issue is that if this function is always executed regardless of whether to_store is true or false, then _ckpt_idx will be wrong
+
+            def skip_ckpt_fn(args):
+                return args  # No changes if we don't store
+
+            checkpoint_array, ckpt_idx = jax.lax.cond(
+                to_store, # if to_store, execute true function(operand). else, execute false function(operand).
+                store_ckpt_fn, # true fn
+                skip_ckpt_fn, # false fn
+                (checkpoint_array, ckpt_idx),
+            )
+
+            runner_state = (update_runner_state, checkpoint_array, ckpt_idx)
+            return runner_state, metric
+
+        # (5) Use lax.scan over NUM_UPDATES
+        rng, _rng = jax.random.split(rng)
+        update_steps = 0
+        init_hstate = policy.init_hstate(config.num_actors)
+        init_done = {k: jnp.zeros((config.num_envs), dtype=bool) for k in env.agents + ["__all__"]}
+        update_runner_state = ((train_state, env_state, obsv, init_done, init_hstate, _rng), update_steps)
+        checkpoint_array = init_ckpt_array(train_state.params)
+        ckpt_idx = 0
+        update_with_ckpt_runner_state = (update_runner_state, checkpoint_array, ckpt_idx)
+
+        runner_state, metrics = jax.lax.scan(
+            _update_step_with_checkpoint,
+            update_with_ckpt_runner_state,
+            xs=None,  # No per-step input data
+            length=config.num_updates,
+        )
+
+        update_runner_state, checkpoint_array, final_ckpt_idx = runner_state
+
+        return {
+            "final_params": update_runner_state[0][0].params,
+            "metrics": metrics,
+            "checkpoints": checkpoint_array,
+            "final_ckpt_idx": final_ckpt_idx # CLEANUP FLAG
+        }
+    return train
+
+
+def log_metrics_intermediate(train_stats, logger):
+    """Log one update step's metrics from inside the training loop.
+
+    Called through ``jax.experimental.io_callback``, so it must stay a
+    module-level function.
+    """
+    step = int(np.array(train_stats.pop("update_steps")))
+
+    metric_names = [k for k in train_stats if k != "returned_episode"]
+    for stat_name in metric_names:
+        stat_mean = float(np.array(train_stats[stat_name]))
+        logger.log_item(f"Train/{stat_name}", stat_mean, train_step=step, commit=True)
+    logger.commit()

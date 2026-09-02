@@ -1,0 +1,113 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oaht-bench"
+version = "0.1.0"
+description = "A survey and benchmark for offline ad-hoc teamwork"
+requires-python = ">=3.11,<3.12"
+license = {text = "MIT"}
+
+dependencies = [
+    # --- ours ---
+    "pydantic>=2.7",
+    "h5py>=3.10",
+    # Flat-transition dataset store (docs/dataset_design.md §2). Same format
+    # OG-MARL publishes (`<env>.vlt/{Good,Medium,Poor}/`), JAX-native and
+    # memory-mapped. 0.1.3 requires only jax>=0.4.25, satisfied by the pinned
+    # jax==0.5.3 below; it pulls tensorstore for the on-disk arrays.
+    "flashbax==0.1.3",
+    # --- inherited with the absorbed jax-aht code (PROVENANCE.md) ---
+    # Pinned to the JAX AI stack v2025.2.5 versions the absorbed code was
+    # written against. Bumping these can change environment dynamics, which
+    # invalidates collected datasets and trained populations.
+    "jax[cuda12]==0.5.3; platform_system == 'Linux'",
+    "jax==0.5.3; platform_system == 'Darwin'",
+    "chex==0.1.88",
+    "flax==0.10.2",
+    "ml_dtypes==0.4.0",
+    "optax==0.2.4",
+    "orbax-checkpoint==0.11.1",
+    "jumanji==1.1.0",
+    # jaxmarl==0.1.0 -- the first release with overcooked_v2 -- declares
+    # jax<=0.4.38 and can't be installed alongside jax==0.5.3 above, so
+    # overcooked_v2 is absorbed separately rather than a version bump. See
+    # PROVENANCE.md.
+    "jaxmarl==0.0.7",
+    "distrax",
+    "gymnax",
+    "numpy",
+    "pandas<=2.3.3",
+    "safetensors",
+    "huggingface-hub",
+    "matplotlib",
+    "prettytable",
+    "rliable",  # IQM aggregation for BR-Prox (§8)
+    "wandb",
+    "setuptools<81",
+]
+
+[project.scripts]
+oaht-bench = "oaht_bench.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff==0.14.2"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["oaht_bench*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# scripts/ is importable so tests can check the config generator's scaling rules
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+# An allowlist, not an excludelist. Most of src/oaht_bench/ is absorbed from
+# jax-aht (see PROVENANCE.md). Reformatting that code would bury every real
+# difference from the recorded upstream under whitespace, so absorbed files are
+# left untouched; listing only what we authored is the safe direction to fail in.
+#
+# Four generators (fcp, CoMeDi, BRDiv, LBRDiv) are absorbed but heavily modified
+# by us. They stay excluded for the same reason: they are still the files to diff
+# against upstream.
+include = [
+    "src/oaht_bench/cli.py",
+    "src/oaht_bench/configs/**/*.py",
+    "src/oaht_bench/common/logging.py",
+    "src/oaht_bench/dataset/construction/epsilon_sampler.py",
+    "src/oaht_bench/dataset/dataset.py",
+    "src/oaht_bench/dataset/sampler.py",
+    "src/oaht_bench/dataset/vault.py",
+    "src/oaht_bench/envs/factory.py",
+    "src/oaht_bench/envs/protocols.py",
+    "src/oaht_bench/models/backbone.py",
+    "src/oaht_bench/models/bc_agent.py",
+    "src/oaht_bench/models/liam_agent.py",
+    "src/oaht_bench/models/masking.py",
+    "src/oaht_bench/models/meliba_agent.py",
+    "src/oaht_bench/models/omis_agent.py",
+    "src/oaht_bench/models/return_conditioned_agent.py",
+    "src/oaht_bench/models/tao_agent.py",
+    "src/oaht_bench/offline/**/*.py",
+    "src/oaht_bench/population/pooled_crossplay.py",
+    "src/oaht_bench/teammate_gen/rpg.py",
+    "src/oaht_bench/teammate_gen/crossplay.py",
+    "src/oaht_bench/teammate_gen/plan.py",
+    "src/oaht_bench/teammate_gen/rescore.py",
+    "src/oaht_bench/teammate_gen/runner.py",
+    "src/oaht_bench/teammate_gen/runtime.py",
+    "scripts/**/*.py",
+    "tests/**/*.py",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+ignore = [
+    "E501",  # line length is formatted, not linted; long prose in docstrings stays
+    "B008",  # pydantic Field(...) in defaults is the whole idiom here
+]
