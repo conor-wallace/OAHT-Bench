@@ -57,10 +57,10 @@ def population_from_run(job: TeammateGenerationJob, out: Any, env: Any):
     definition of what a generator's population *is*, instead of a second copy
     here that could drift.
     """
-    from oaht_bench.teammate_gen.BRDiv import get_brdiv_population
-    from oaht_bench.teammate_gen.CoMeDi import get_comedi_population
+    from oaht_bench.teammate_gen.brdiv import get_brdiv_population
+    from oaht_bench.teammate_gen.comedi import get_comedi_population
     from oaht_bench.population.loading import get_fcp_population
-    from oaht_bench.teammate_gen.LBRDiv import get_lbrdiv_population
+    from oaht_bench.teammate_gen.lbrdiv import get_lbrdiv_population
 
     builders = {
         "fcp": get_fcp_population,

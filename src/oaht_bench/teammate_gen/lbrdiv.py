@@ -41,7 +41,7 @@ PairedPopulation = tuple[chex.ArrayTree, AgentPopulation]
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper
 from oaht_bench.teammate_gen.marl.ppo_utils import unbatchify, _create_minibatches
-from oaht_bench.teammate_gen.BRDiv import _get_all_ids, XPTransition, gather_params
+from oaht_bench.teammate_gen.brdiv import _get_all_ids, XPTransition, gather_params
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)

@@ -23,11 +23,11 @@ log = logging.getLogger(__name__)
 
 def _generators() -> dict[str, Callable[..., Any]]:
     """Import the generators lazily so the CLI can validate without loading JAX."""
-    from oaht_bench.teammate_gen.BRDiv import run_brdiv
-    from oaht_bench.teammate_gen.CoMeDi import run_comedi
+    from oaht_bench.teammate_gen.brdiv import run_brdiv
+    from oaht_bench.teammate_gen.comedi import run_comedi
     from oaht_bench.teammate_gen.fcp import run_fcp
-    from oaht_bench.teammate_gen.LBRDiv import run_lbrdiv
-    from oaht_bench.teammate_gen.RPG import run_rpg
+    from oaht_bench.teammate_gen.lbrdiv import run_lbrdiv
+    from oaht_bench.teammate_gen.rpg import run_rpg
 
     return {
         "fcp": run_fcp,

@@ -109,9 +109,9 @@ def test_no_dangling_references_to_unabsorbed_upstream():
     "module",
     [
         "oaht_bench.teammate_gen.fcp",
-        "oaht_bench.teammate_gen.CoMeDi",
-        "oaht_bench.teammate_gen.BRDiv",
-        "oaht_bench.teammate_gen.LBRDiv",
+        "oaht_bench.teammate_gen.comedi",
+        "oaht_bench.teammate_gen.brdiv",
+        "oaht_bench.teammate_gen.lbrdiv",
     ],
 )
 def test_absorbed_modules_import(module: str):

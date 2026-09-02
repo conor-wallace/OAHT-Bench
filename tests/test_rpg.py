@@ -14,7 +14,7 @@ import numpy as np
 
 def test_magic_box_is_one_in_value_and_carries_gradient():
     """magic_box(x) == 1 everywhere, but d/dx magic_box(a*x) == a."""
-    from oaht_bench.teammate_gen.RPG import magic_box
+    from oaht_bench.teammate_gen.rpg import magic_box
 
     x = jnp.array([-2.0, 0.0, 3.5])
     np.testing.assert_allclose(np.asarray(magic_box(x)), 1.0, atol=1e-6)
@@ -32,7 +32,7 @@ def _logp(theta, actions):
 
 def test_dice_ratio_is_zero_in_value():
     """The DiCE surrogate is a pure gradient object: exactly 0 in the forward pass."""
-    from oaht_bench.teammate_gen.RPG import dice_ratio
+    from oaht_bench.teammate_gen.rpg import dice_ratio
 
     rng = np.random.default_rng(0)
     log_p = jnp.asarray(rng.normal(size=(4, 6)))
@@ -48,7 +48,7 @@ def test_dice_ratio_couples_gradient_to_both_learner_and_partner():
     The manipulator's higher-order gradient flows through exactly this coupling;
     if the partner gradient were zero, opponent shaping could not work.
     """
-    from oaht_bench.teammate_gen.RPG import dice_ratio
+    from oaht_bench.teammate_gen.rpg import dice_ratio
 
     rng = np.random.default_rng(1)
     a_base = jnp.asarray(rng.integers(0, 3, size=(4, 6)))
@@ -77,7 +77,7 @@ def test_dice_ratio_first_order_is_the_advantage_policy_gradient():
     future return, so `lam` and `starts` affect only *higher* orders (the meta
     gradient), tested separately. Ground truth: grad of ``(logp * gae).sum()``.
     """
-    from oaht_bench.teammate_gen.RPG import dice_ratio
+    from oaht_bench.teammate_gen.rpg import dice_ratio
 
     rng = np.random.default_rng(2)
     a_base = jnp.asarray(rng.integers(0, 3, size=(2, 5)))
@@ -109,7 +109,7 @@ def test_dice_ratio_higher_order_is_nonzero_and_depends_on_lam_and_starts():
     gradient lives. It must be nonzero (a plain surrogate would give zero) and must
     actually depend on the loaded discount `lam` and on episode boundaries `starts`.
     """
-    from oaht_bench.teammate_gen.RPG import dice_ratio
+    from oaht_bench.teammate_gen.rpg import dice_ratio
 
     rng = np.random.default_rng(3)
     a_base = jnp.asarray(rng.integers(0, 3, size=(1, 6)))
@@ -166,7 +166,7 @@ def _toy_traj(rng, T=4, E=3, obs_dim=6, act_dim=6):
 def _meta_grad(off_diag_factor, base_lr=0.05):
     """Meta-gradient of the diversity objective w.r.t. the manipulator, on a toy."""
     from oaht_bench.models.mlp_actor_critic_agent import MLPActorCriticPolicy
-    from oaht_bench.teammate_gen.RPG import _manipulator_meta_loss
+    from oaht_bench.teammate_gen.rpg import _manipulator_meta_loss
 
     rng = np.random.default_rng(7)
     runtime = _toy_runtime(pop_size=2, n_lookahead=1, off_diag_factor=off_diag_factor)

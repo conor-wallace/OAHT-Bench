@@ -255,7 +255,7 @@ class RpgRuntime(BaseConfig):
     agents optimize task return (with DiCE coupling to their manipulator); the
     manipulators optimize the diversity objective through an inner lookahead. This
     is authored, not absorbed, so there is no ``to_agent_dict`` bridge to a
-    SCREAMING_CASE dict — :func:`~oaht_bench.teammate_gen.RPG.run_rpg` reads the
+    SCREAMING_CASE dict — :func:`~oaht_bench.teammate_gen.rpg.run_rpg` reads the
     typed fields directly.
 
     ``num_updates`` counts *outer* steps; each spends one manipulator update plus

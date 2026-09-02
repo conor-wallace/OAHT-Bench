@@ -1423,13 +1423,13 @@ def test_every_generator_saves_before_it_reports():
     """
     import inspect
 
-    from oaht_bench.teammate_gen import BRDiv, CoMeDi, LBRDiv, fcp
+    from oaht_bench.teammate_gen import brdiv, comedi, fcp, lbrdiv
 
     for mod, runner in (
         (fcp, "run_fcp"),
-        (CoMeDi, "run_comedi"),
-        (BRDiv, "run_brdiv"),
-        (LBRDiv, "run_lbrdiv"),
+        (comedi, "run_comedi"),
+        (brdiv, "run_brdiv"),
+        (lbrdiv, "run_lbrdiv"),
     ):
         src = inspect.getsource(getattr(mod, runner))
         assert "save_train_run(" in src, f"{runner} must save its own checkpoint"
@@ -1439,7 +1439,7 @@ def test_every_generator_saves_before_it_reports():
         assert "nonfatal(" in src, f"{runner} must not let reporting raise"
 
     # And log_metrics must no longer do the saving itself.
-    for mod in (fcp, CoMeDi, BRDiv, LBRDiv):
+    for mod in (fcp, comedi, brdiv, lbrdiv):
         assert "save_train_run(" not in inspect.getsource(mod.log_metrics), (
             f"{mod.__name__}.log_metrics still writes the checkpoint"
         )
