@@ -115,10 +115,9 @@ def initialize_actor_with_conditional_critic(config, env, rng):
     """Initialize an actor with conditional critic with the given config.
 
     Dispatches on ACTOR_TYPE the same way initialize_rnn_agent's callers do --
-    a single fix-point for both of this function's callers (CoMeDi.py and
-    common/agent_loader_from_config.py), since neither builds the policy
-    directly. agent_loader_from_config.py doesn't set ACTOR_TYPE, so the
-    .get() default keeps it on the MLP path unaffected.
+    a single fix-point for its caller (CoMeDi.py), which does not build the
+    policy directly. The ``.get()`` default keeps a config that omits ACTOR_TYPE
+    on the MLP path.
     """
     policy_cls = (
         RNNActorWithConditionalCriticPolicy

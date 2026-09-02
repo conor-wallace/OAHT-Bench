@@ -47,7 +47,6 @@ def test_no_top_level_namespace_pollution(name: str):
         "oaht_bench.teammate_gen",
         "oaht_bench.teammate_gen.marl",
         "oaht_bench.population",
-        "oaht_bench.population.scripted",
         "oaht_bench.common",
         "oaht_bench.offline",
         "oaht_bench.dataset",
@@ -80,9 +79,8 @@ def test_baselines_live_in_offline():
     """LIAM and MeLIBA are methods under evaluation, not agent infrastructure.
 
     They are reimplemented offline (§3.1); the online jax-aht versions were not
-    absorbed. After the adopt reorg the shared architectures live in ``models`` and
-    the scripted teammates under ``population.scripted``, so neither an ``agents``
-    nor an ``algorithms`` package exists any more.
+    absorbed. After the adopt reorg the shared architectures live in ``models``, so
+    neither an ``agents`` nor an ``algorithms`` package exists any more.
     """
     import oaht_bench.offline.liam  # noqa: F401
     import oaht_bench.offline.meliba  # noqa: F401

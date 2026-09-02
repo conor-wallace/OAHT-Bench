@@ -281,16 +281,13 @@ class LoadedPopulation:
         ]
 
 
-#: Which builder reads which *generated* population's checkpoint. Scripted
-#: populations (§7.6 OOD teammates) are the other population kind and are **not**
-#: here: they have no checkpoint and are heterogeneous (each member a different
-#: policy class), so they do not fit ``LoadedPopulation``'s "one ``policy_cls`` +
-#: a member-indexed param tree" shape. Their policies are built by
-#: :mod:`oaht_bench.population.scripted.loader`; wiring them in as population
-#: members alongside the generated ones is the §8 path -- it belongs on the
-#: heterogeneous roster (:mod:`oaht_bench.population.pooled_crossplay`'s
-#: ``RosterEntry``, which already carries a per-member ``policy_cls``), not on
-#: this checkpoint dispatch.
+#: Which builder reads which *generated* population's checkpoint. Scripted OOD
+#: teammates (§7.6) would be the other population kind, but they are not built yet:
+#: they have no checkpoint and are heterogeneous (each member a different policy
+#: class), so they do not fit ``LoadedPopulation``'s "one ``policy_cls`` + a
+#: member-indexed param tree" shape. When added, they belong on the heterogeneous
+#: roster (:mod:`oaht_bench.population.pooled_crossplay`'s ``RosterEntry``, which
+#: already carries a per-member ``policy_cls``), not on this checkpoint dispatch.
 _BUILDERS = {
     "fcp": get_fcp_population,
     "comedi": get_comedi_population,
