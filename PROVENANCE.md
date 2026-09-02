@@ -21,7 +21,6 @@ the absorption script.
 | `teammate_generation/` | `src/oaht_bench/teammate_gen/` | FCP, CoMeDi, BRDiv, L-BRDiv (§7). |
 | `marl/` | `src/oaht_bench/teammate_gen/marl/` | IPPO and PPO utilities; teammate generation is the only consumer. |
 | `common/` | `src/oaht_bench/common/` | Rollout helpers, checkpoint save/load, plotting. |
-| `ego_agent_training/` | `src/oaht_bench/algorithms/` | MeLIBA network components only. The online PPO ego trainers are deliberately excluded -- §3.1 replaces them with the shared DT backbone. |
 
 Import rewrites applied:
 
@@ -31,8 +30,14 @@ agents                 -> oaht_bench.agents
 teammate_generation    -> oaht_bench.teammate_gen
 marl                   -> oaht_bench.teammate_gen.marl
 common                 -> oaht_bench.common
-ego_agent_training     -> oaht_bench.algorithms
 ```
+
+The one exception is jax-aht's `ego_agent_training/` (its online PPO LIAM and
+MeLIBA learners). Its MeLIBA network components were absorbed once into
+`src/oaht_bench/algorithms/` but were never wired into this pipeline -- §3.1
+replaces the online ego trainers with the shared decision-transformer backbone --
+so that copy was removed. LIAM and MeLIBA are instead reimplemented offline in
+`src/oaht_bench/offline/{liam,meliba}` (clean-room, from the papers).
 
 ## JaxMARL (`overcooked_v2`)
 

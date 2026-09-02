@@ -2,8 +2,9 @@
 
 Sources, in the priority the port was written against:
 
-1. **The jax-aht implementation** (:mod:`oaht_bench.algorithms.meliba_agent`) is the
-   source of truth for the objective and modelling design. From it:
+1. **The jax-aht implementation** (its ``ego_agent_training/meliba_agent.py``, the
+   MeLIBA online learner we did not absorb) is the source of truth for the
+   objective and modelling design. From it:
    - the encoder emits **two Gaussian latents** — an *agent character* and a
      *mental state* — each ``(mean, logvar)`` (``meliba_agent.py:138-145``);
    - the decoder is trained by a **VariBAD-style sequential KL** in which the prior

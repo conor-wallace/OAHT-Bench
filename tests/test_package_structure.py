@@ -47,7 +47,6 @@ def test_no_top_level_namespace_pollution(name: str):
         "oaht_bench.teammate_gen",
         "oaht_bench.teammate_gen.marl",
         "oaht_bench.common",
-        "oaht_bench.algorithms",
         "oaht_bench.offline",
         "oaht_bench.dataset",
         "oaht_bench.dataset.construction",
@@ -75,19 +74,18 @@ def test_configs_do_not_require_jax():
     assert r.returncode == 0, r.stderr
 
 
-def test_baselines_live_in_algorithms_not_agents():
+def test_baselines_live_in_offline_not_agents():
     """LIAM and MeLIBA are methods under evaluation, not agent infrastructure.
 
-    Keeping them beside the actor-critic primitives conflated "a network we build
-    things from" with "a baseline we are measuring" (§6).
+    They are reimplemented offline (§3.1); the online jax-aht versions were not
+    absorbed, so neither an ``agents`` nor an ``algorithms`` module should exist.
     """
-    import oaht_bench.algorithms.liam_agent  # noqa: F401
-    import oaht_bench.algorithms.meliba_agent  # noqa: F401
+    import oaht_bench.offline.liam  # noqa: F401
+    import oaht_bench.offline.meliba  # noqa: F401
 
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("oaht_bench.agents.liam_agent")
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("oaht_bench.agents.meliba_agent")
+    for gone in ("oaht_bench.algorithms", "oaht_bench.agents.liam_agent"):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(gone)
 
 
 def test_no_dangling_references_to_unabsorbed_upstream():
@@ -112,9 +110,6 @@ def test_no_dangling_references_to_unabsorbed_upstream():
         "oaht_bench.teammate_gen.CoMeDi",
         "oaht_bench.teammate_gen.BRDiv",
         "oaht_bench.teammate_gen.LBRDiv",
-        "oaht_bench.algorithms.liam_agent",
-        "oaht_bench.algorithms.meliba_agent",
-        "oaht_bench.algorithms.initialize_baselines",
     ],
 )
 def test_absorbed_modules_import(module: str):

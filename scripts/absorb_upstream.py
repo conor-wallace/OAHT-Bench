@@ -71,13 +71,6 @@ JAX_AHT_SUBTREES = (
         "IPPO and PPO utilities; teammate generation is the only consumer.",
     ),
     Subtree("common", "common", "Rollout helpers, checkpoint save/load, plotting."),
-    Subtree(
-        "ego_agent_training",
-        "algorithms",
-        "MeLIBA network components only. The online PPO ego trainers are "
-        "deliberately excluded -- §3.1 replaces them with the shared DT backbone.",
-        only=("meliba_utils.py",),
-    ),
 )
 
 #: Deliberately NOT absorbed, with the reason, so the omissions are auditable:

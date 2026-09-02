@@ -1,8 +1,9 @@
 """LIAM — Local Information Agent Modelling, adapted to the offline setting.
 
-Follows the original method (Papoudakis et al.; the online port in
-:mod:`oaht_bench.algorithms.liam_agent`) rather than TAO's Appendix F sketch,
-which drops LIAM's encoder and hangs a reconstruction head off the policy trunk.
+Follows the original method (Papoudakis et al.; jax-aht's online learner in its
+``ego_agent_training/liam_agent.py``, which we did not absorb) rather than TAO's
+Appendix F sketch, which drops LIAM's encoder and hangs a reconstruction head off
+the policy trunk.
 
 **What LIAM is.** An encoder summarises the ego agent's *local* history into an
 embedding; a decoder reconstructs the *teammate's* observation and action from
