@@ -24,11 +24,8 @@ confederate (``final_params_br``), so for those two the data exists; FCP and
 CoMeDi have no best response and would need one trained.
 """
 
-from oaht_bench.offline.backbone import DecisionTransformer
+from oaht_bench.models.backbone import DecisionTransformer
 from oaht_bench.offline.liam import (
-    LiamDecoder,
-    LiamEncoder,
-    LiamNetwork,
     LiamPolicy,
     liam_policy_loss,
     liam_reconstruction_loss,
@@ -67,9 +64,6 @@ __all__ = [
     "AncillaryActionDecoder",
     "BaseAhtPolicy",
     "DecisionTransformer",
-    "LiamDecoder",
-    "LiamEncoder",
-    "LiamNetwork",
     "LiamPolicy",
     "get_policy",
     "MelibaDecoder",

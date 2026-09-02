@@ -14,12 +14,10 @@ import optax
 import pytest
 
 from oaht_bench.dataset.dataset import _build_windows, return_to_go
+from oaht_bench.models.liam_agent import LiamDecoder, LiamEncoder, LiamNetwork
 from oaht_bench.offline import (
     AncillaryActionDecoder,
     DecisionTransformer,
-    LiamDecoder,
-    LiamEncoder,
-    LiamNetwork,
     OpponentPolicyEncoder,
     TaoNetwork,
     liam_reconstruction_loss,
@@ -140,7 +138,7 @@ def test_liam_reconstructs_the_teammate_at_the_same_timestep():
     """
     import inspect
 
-    from oaht_bench.offline.liam import model as liam_mod
+    from oaht_bench.offline import liam as liam_mod
 
     src = inspect.getsource(liam_mod.liam_reconstruction_loss)
     assert 'batch["mate_actions"]' in src
@@ -475,8 +473,8 @@ def test_available_actions_are_enforced_everywhere_the_data_enforces_them():
 
     from oaht_bench.dataset import dataset as ds
     from oaht_bench.offline import evaluate as ev
+    from oaht_bench.offline import liam as liam_mod
     from oaht_bench.offline import tao as tao_mod
-    from oaht_bench.offline.liam import model as liam_mod
 
     # windows carry the masks for both seats
     w = _windows()

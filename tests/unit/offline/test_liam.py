@@ -2,7 +2,7 @@ import pytest
 
 from oaht_bench.configs.job import OfflineTrainingConfig
 from oaht_bench.offline import get_policy
-from oaht_bench.offline.liam.model import LiamPolicy
+from oaht_bench.offline.liam import LiamPolicy
 
 
 @pytest.fixture
@@ -25,10 +25,11 @@ class TestLiamPolicy:
     def test_build_model_from_resolved_config(self, liam_config: OfflineTrainingConfig):
         policy = LiamPolicy(liam_config)
         policy.build_model()
-        # Pure-config construction: the three flax modules exist without an env.
-        assert policy.encoder is not None
-        assert policy.decoder is not None
-        assert policy.network is not None
+        # Pure-config construction: the composed LiamAgent's three flax modules
+        # exist without an env.
+        assert policy.agent.encoder is not None
+        assert policy.agent.decoder is not None
+        assert policy.agent.network is not None
 
     def test_build_model_requires_resolved_dims(self):
         # Without the runner's dim resolution, build_model must fail loudly rather

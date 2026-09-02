@@ -103,7 +103,7 @@ def get_policy(config: OfflineTrainingConfig) -> type[BaseAhtPolicy]:
     """
     architecture = config.network.architecture
     if architecture == "liam":
-        from oaht_bench.offline.liam.model import LiamPolicy
+        from oaht_bench.offline.liam import LiamPolicy
 
         return LiamPolicy
     if architecture == "meliba":

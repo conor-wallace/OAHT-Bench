@@ -55,7 +55,7 @@ class Windows:
 
     Leading axis is the window. ``T`` is the context length: TAO and TAGET both
     train on fixed-length fragments rather than whole episodes, and
-    :mod:`oaht_bench.offline.backbone` needs a static shape to jit.
+    :mod:`oaht_bench.models.backbone` needs a static shape to jit.
     """
 
     #: (N, T, obs_dim) — the learner's observations.

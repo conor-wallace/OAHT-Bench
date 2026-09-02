@@ -9,7 +9,7 @@ import pytest
 
 from oaht_bench.configs.job import OfflineTrainingConfig
 from oaht_bench.offline import get_policy
-from oaht_bench.offline.liam.model import LiamPolicy
+from oaht_bench.offline.liam import LiamPolicy
 from oaht_bench.offline.meliba import MelibaPolicy
 from oaht_bench.offline.omis import OmisPolicy
 from oaht_bench.offline.tao import TaoPolicy

@@ -43,7 +43,7 @@ import jax
 import jax.numpy as jnp
 import optax
 
-from oaht_bench.offline.backbone import DecisionTransformer
+from oaht_bench.models.backbone import DecisionTransformer
 from oaht_bench.offline.registry import BaseAhtPolicy
 from oaht_bench.offline.utils import mask_logits, sample_window_batch
 

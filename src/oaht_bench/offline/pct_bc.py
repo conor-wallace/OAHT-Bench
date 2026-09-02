@@ -2,7 +2,7 @@
 
 Every other baseline in this package contributes a `history -> z` module: an
 encoder, a set of policy embeddings, an in-context imitator. %BC contributes
-nothing — it is the shared backbone (:mod:`oaht_bench.offline.backbone`,
+nothing — it is the shared backbone (:mod:`oaht_bench.models.backbone`,
 §3.1) trained directly on the ego stream, so a comparison against it answers
 "did modelling the teammate help at all," which none of the other nine
 baselines in the inventory can answer on their own.
@@ -40,7 +40,7 @@ import numpy as np
 import optax
 
 from oaht_bench.dataset.dataset import Windows
-from oaht_bench.offline.backbone import DecisionTransformer
+from oaht_bench.models.backbone import DecisionTransformer
 from oaht_bench.offline.registry import BaseAhtPolicy
 from oaht_bench.offline.utils import mask_logits, masked_accuracy, to_jax
 
