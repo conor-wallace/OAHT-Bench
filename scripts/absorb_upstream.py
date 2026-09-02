@@ -1,5 +1,13 @@
 """Copy upstream subtrees into ``src/oaht_bench/`` and rewrite their imports.
 
+.. note::
+   **Historical.** The absorbed code has since been *adopted* -- fully forked, no
+   longer synced from upstream -- and the local layout has diverged from jax-aht's
+   (its ``agents/`` is now split across ``models/`` and ``population/scripted/``,
+   and ``ego_agent_training`` was dropped). Re-running this against upstream would
+   not reproduce the current tree; it is kept only as the record of how the code
+   first entered the repo. Attribution lives in ``PROVENANCE.md``.
+
 OAHT-Bench cannot depend on both jax-aht and ICRL4AHT as packages: they declare
 the same top-level names (``agents``, ``common``, ``envs``, ``marl``,
 ``teammate_generation``), so installing both makes ``from envs import ...``

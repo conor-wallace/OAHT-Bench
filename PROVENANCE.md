@@ -17,7 +17,7 @@ the absorption script.
 | upstream path | local path | contents |
 |---|---|---|
 | `envs/` | `src/oaht_bench/envs/` | LBF, Overcooked-v1 and Hanabi wrappers over Jumanji/JaxMARL. |
-| `agents/` | `src/oaht_bench/models/` (policy architectures, population interfaces) and `src/oaht_bench/agents/` (scripted teammates, §7.6) | jax-aht's single `agents/` tree, split locally after adoption: the reusable actor-critic architectures and population interfaces moved to `models/`; the scripted/heuristic teammates stay in `agents/`. |
+| `agents/` | `src/oaht_bench/models/` (policy architectures, population interfaces) and `src/oaht_bench/population/scripted/` (scripted teammates + their config loader, §7.6) | jax-aht's single `agents/` tree, split locally after adoption: the reusable actor-critic architectures and population interfaces moved to `models/`; the scripted/heuristic teammates and `agent_loader_from_config` (now `population/scripted/loader.py`) became `population/scripted/`, since scripted OOD policies are population members. |
 | `teammate_generation/` | `src/oaht_bench/teammate_gen/` | FCP, CoMeDi, BRDiv, L-BRDiv (§7). |
 | `marl/` | `src/oaht_bench/teammate_gen/marl/` | IPPO and PPO utilities; teammate generation is the only consumer. |
 | `common/` | `src/oaht_bench/common/` | Rollout helpers, checkpoint save/load, plotting. |

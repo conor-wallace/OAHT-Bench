@@ -44,9 +44,10 @@ def test_no_top_level_namespace_pollution(name: str):
         "oaht_bench.configs",
         "oaht_bench.envs",
         "oaht_bench.models",
-        "oaht_bench.agents",
         "oaht_bench.teammate_gen",
         "oaht_bench.teammate_gen.marl",
+        "oaht_bench.population",
+        "oaht_bench.population.scripted",
         "oaht_bench.common",
         "oaht_bench.offline",
         "oaht_bench.dataset",
@@ -75,16 +76,18 @@ def test_configs_do_not_require_jax():
     assert r.returncode == 0, r.stderr
 
 
-def test_baselines_live_in_offline_not_agents():
+def test_baselines_live_in_offline():
     """LIAM and MeLIBA are methods under evaluation, not agent infrastructure.
 
     They are reimplemented offline (§3.1); the online jax-aht versions were not
-    absorbed, so neither an ``agents`` nor an ``algorithms`` module should exist.
+    absorbed. After the adopt reorg the shared architectures live in ``models`` and
+    the scripted teammates under ``population.scripted``, so neither an ``agents``
+    nor an ``algorithms`` package exists any more.
     """
     import oaht_bench.offline.liam  # noqa: F401
     import oaht_bench.offline.meliba  # noqa: F401
 
-    for gone in ("oaht_bench.algorithms", "oaht_bench.agents.liam_agent"):
+    for gone in ("oaht_bench.algorithms", "oaht_bench.agents"):
         with pytest.raises(ModuleNotFoundError):
             importlib.import_module(gone)
 
