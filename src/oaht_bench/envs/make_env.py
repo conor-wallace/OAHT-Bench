@@ -1,8 +1,6 @@
 import copy
 import numpy as np
 
-from omegaconf import ListConfig
-
 import jaxmarl
 import jumanji
 from jumanji.environments.routing.lbf.generator import RandomGenerator as LbfGenerator
@@ -90,7 +88,7 @@ def make_env(env_name: str, env_kwargs: dict = {}):
                 if type(payload) == int or type(payload) == float:
                     # turn the param into symmetric form
                     env_kwargs["reward_shaping_params"][param] = [payload, payload]
-                elif type(payload) == tuple or type(payload) == list or type(payload) == ListConfig:
+                elif type(payload) == tuple or type(payload) == list:
                     # this is the correct format
                     pass
                 else:

@@ -1,10 +1,10 @@
 """Run logging, with Weights & Biases off by default.
 
-The absorbed :class:`oaht_bench.common.wandb_visualizations.Logger` calls
-``wandb.init`` unconditionally and reads ``config["logger"]["entity"]`` without a
-default, so it fails on a machine with no wandb credentials and, worse, will
-happily publish to whatever entity a config happens to carry. A benchmark should
-run identically for someone who has never heard of wandb.
+jax-aht's ``Logger`` (its ``common/wandb_visualizations.py``, not absorbed here)
+calls ``wandb.init`` unconditionally and reads ``config["logger"]["entity"]``
+without a default, so it fails on a machine with no wandb credentials and, worse,
+will happily publish to whatever entity a config happens to carry. A benchmark
+should run identically for someone who has never heard of wandb.
 
 :class:`RunLogger` therefore defaults to local-only. Metrics still go somewhere —
 a JSONL file under the run directory — so a disabled run is *quiet*, not

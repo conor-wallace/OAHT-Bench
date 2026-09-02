@@ -41,7 +41,6 @@ dependencies = [
     "pandas<=2.3.3",
     "safetensors",
     "huggingface-hub",
-    "omegaconf",
     "matplotlib",
     "prettytable",
     "rliable",  # IQM aggregation for BR-Prox (§8)
