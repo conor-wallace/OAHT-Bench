@@ -239,3 +239,6 @@ wandb/
 # Duplicate results tree: save_load_utils.REPO_PATH resolves to src/oaht_bench
 # rather than the repo root, so every run also writes its checkpoints here.
 src/oaht_bench/results/
+
+# macOS Finder metadata
+.DS_Store

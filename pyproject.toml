@@ -68,15 +68,13 @@ line-length = 100
 target-version = "py311"
 
 # An allowlist, not an excludelist. Most of src/oaht_bench/ is absorbed from
-# jax-aht (see PROVENANCE.md), and absorb_upstream.py exists so that re-running
-# it against a newer upstream shows what drifted. Reformatting that code would
-# bury every real difference under whitespace and make the next upstream sync
-# unreadable. Listing what we authored means a new absorbed file is untouched by
-# default, which is the safe direction to fail in.
+# jax-aht (see PROVENANCE.md). Reformatting that code would bury every real
+# difference from the recorded upstream under whitespace, so absorbed files are
+# left untouched; listing only what we authored is the safe direction to fail in.
 #
 # Four generators (fcp, CoMeDi, BRDiv, LBRDiv) are absorbed but heavily modified
-# by us. They stay excluded for the same reason: they are still the files a sync
-# has to diff.
+# by us. They stay excluded for the same reason: they are still the files to diff
+# against upstream.
 include = [
     "src/oaht_bench/cli.py",
     "src/oaht_bench/configs/**/*.py",

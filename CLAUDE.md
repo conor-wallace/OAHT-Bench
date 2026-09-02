@@ -14,14 +14,15 @@ appendix** (§7.2) — record what a sweep concluded *and what it could not*.
 All code lives under `src/oaht_bench/`. Most of it is **absorbed** from
 jax-aht (MIT, commit `0885df95c386121b9c94cb0fb516531895e29702`) rather than
 depended on, because jax-aht and ICRL4AHT claim colliding top-level package
-names. See `PROVENANCE.md` and `scripts/absorb_upstream.py`.
+names. See `PROVENANCE.md`.
 
-**Never reformat absorbed code.** `absorb_upstream.py` exists so that re-running
-it against a newer upstream shows what drifted; whitespace churn destroys that.
-Ruff is configured with an *allowlist* of the ~22 files we authored
-(`[tool.ruff] include` in `pyproject.toml`). A newly absorbed file is untouched
-by default. The four generators (`fcp.py`, `CoMeDi.py`, `BRDiv.py`, `LBRDiv.py`)
-are absorbed-but-heavily-modified and stay excluded for the same reason.
+**Never reformat absorbed code.** Keeping the absorbed files untouched preserves
+their diff against the recorded upstream commit (`PROVENANCE.md`); whitespace
+churn destroys that. Ruff is configured with an *allowlist* of the ~22 files we
+authored (`[tool.ruff] include` in `pyproject.toml`). An absorbed file is
+untouched by default. The four generators (`fcp.py`, `CoMeDi.py`, `BRDiv.py`,
+`LBRDiv.py`) are absorbed-but-heavily-modified and stay excluded for the same
+reason.
 
 ## Conventions the user has established
 
@@ -76,7 +77,6 @@ uv sync --extra dev
 uv run python -m pytest tests/ -q                       # 270 tests, ~8min
 uv run ruff format . && uv run ruff check . --fix
 
-uv run python scripts/check_device.py [config.json]     # GPU + memory preflight
 uv run python scripts/gen_teammate_configs.py --wandb   # regenerate configs
 uv run python scripts/sweep.py run configs/lbf_12x12/teammate_gen/ --jobs 2
 uv run python scripts/sweep.py generate --base ... --set path=v1,v2

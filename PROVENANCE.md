@@ -2,11 +2,11 @@
 
 Parts of `src/oaht_bench/` originate in other projects and were absorbed
 rather than depended on, because the upstreams claim colliding top-level
-package names (see `scripts/absorb_upstream.py` for the reasoning).
+package names.
 
 Absorbed code is **owned and modified** here. To see our changes relative to
-upstream, diff against the recorded commit. Regenerate this file by re-running
-the absorption script.
+upstream, diff against the recorded commit. Because it is a modified copy of the
+upstream sources, their licenses are retained under `LICENSES/`.
 
 ## jax-aht
 
