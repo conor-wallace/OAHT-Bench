@@ -25,11 +25,15 @@ import wandb
 
 from oaht_bench.models.mlp_actor_critic_agent import ActorWithConditionalCriticPolicy
 from oaht_bench.models.rnn_actor_critic_agent import RNNActorWithConditionalCriticPolicy
+from oaht_bench.models.cnn_rnn_actor_critic_agent import CNNRNNActorWithConditionalCriticPolicy
+from oaht_bench.models.initialize_agents import _unwrap_obs_shape
+from oaht_bench.teammate_gen.marl.lr_schedule import make_lr_schedule
 from oaht_bench.models.population_interface import AgentPopulation
 from oaht_bench.common.plot_utils import get_metric_names
 from oaht_bench.common.run_episodes import run_episodes
 from oaht_bench.common.save_load_utils import save_train_run
 from oaht_bench.common.logging import RunLogger, log_update_metrics, nonfatal
+from oaht_bench.teammate_gen.marl.reward_shaping import add_shaped_reward
 from oaht_bench.configs.job import TeammateGenerationJob
 from oaht_bench.population.loading import TrainOutput, get_lbrdiv_population
 from oaht_bench.envs.protocols import TrainingEnv
@@ -58,9 +62,7 @@ def train_lbrdiv_partners(
 
 
     def make_lbrdiv_agents(config):
-        def linear_schedule(count):
-            frac = 1.0 - (count // (config.ppo.num_minibatches * config.ppo.update_epochs)) / config.num_updates
-            return config.ppo.learning_rate * frac
+        lr = make_lr_schedule(config.ppo, config.num_updates)
 
         def train(rng):
             rng, init_conf_rng, init_br_rng = jax.random.split(rng, 3)
@@ -83,13 +85,11 @@ def train_lbrdiv_partners(
                 # Define optimizers for both confederate and BR policy
                 tx = optax.chain(
                     optax.clip_by_global_norm(config.ppo.max_grad_norm),
-                    optax.adam(learning_rate=linear_schedule if config.ppo.anneal_lr else config.ppo.learning_rate,
-                    eps=1e-5),
+                    optax.adam(learning_rate=lr, eps=1e-5),
                 )
                 tx_br = optax.chain(
                     optax.clip_by_global_norm(config.ppo.max_grad_norm),
-                    optax.adam(learning_rate=linear_schedule if config.ppo.anneal_lr else config.ppo.learning_rate,
-                    eps=1e-5),
+                    optax.adam(learning_rate=lr, eps=1e-5),
                 )
 
                 train_state_conf = TrainState.create(
@@ -149,7 +149,7 @@ def train_lbrdiv_partners(
                 """
                 (
                     all_train_state_conf, all_train_state_br, last_conf_ids, last_br_ids,
-                    env_state, last_obs, last_done, last_conf_h, last_br_h, rng
+                    env_state, last_obs, last_done, last_conf_h, last_br_h, rng, update_steps
                 ) = runner_state
                 rng, act0_rng, act1_rng, step_rng, conf_sampling_rng, br_sampling_rng = jax.random.split(rng, 6)
 
@@ -263,6 +263,14 @@ def train_lbrdiv_partners(
                 obs_next, env_state_next, reward, done, info = jax.vmap(env.step, in_axes=(0,0,0))(
                     step_rngs, env_state, env_act
                 )
+                # Overcooked-v2: fold the annealed shaped reward into the base reward
+                # before L-BRDiv's conf/br reward transformation. No-op when horizon==0
+                # or the env surfaces no shaped_reward. update_steps constant this rollout.
+                reward = add_shaped_reward(
+                    reward, info, env.agents,
+                    horizon=config.ppo.reward_shaping_horizon,
+                    global_env_step=update_steps * config.rollout_length * config.num_envs,
+                )
                 # note that num_actors = num_envs * num_agents
                 info_0 = jax.tree.map(lambda x: x[:, 0], info)
                 info_1 = jax.tree.map(lambda x: x[:, 1], info)
@@ -294,7 +302,7 @@ def train_lbrdiv_partners(
                     avail_actions=avail_actions_1
                 )
                 new_runner_state = (all_train_state_conf, all_train_state_br, updated_conf_ids, updated_br_ids,
-                                    env_state_next, obs_next, done, new_conf_h, new_br_h, rng)
+                                    env_state_next, obs_next, done, new_conf_h, new_br_h, rng, update_steps)
                 return new_runner_state, (transition_0, transition_1)
 
             def _calculate_gae(traj_batch, last_val):
@@ -544,12 +552,12 @@ def train_lbrdiv_partners(
 
                 runner_state = (
                     all_train_state_conf, all_train_state_br, conf_ids, br_ids,
-                    last_env_state, last_obs, last_done, last_conf_h, last_br_h, rng
+                    last_env_state, last_obs, last_done, last_conf_h, last_br_h, rng, update_steps
                 )
                 runner_state, traj_batch = jax.lax.scan(
                     _env_step, runner_state, None, config.rollout_length)
                 (all_train_state_conf, all_train_state_br, last_conf_ids, last_br_ids,
-                 last_env_state, last_obs, last_done, last_conf_h, last_br_h, rng) = runner_state
+                 last_env_state, last_obs, last_done, last_conf_h, last_br_h, rng, update_steps) = runner_state
 
                 # Get the last conf and br params and ids
                 last_conf_params = gather_params(all_train_state_conf.params, last_conf_ids)
@@ -1057,24 +1065,29 @@ def run_lbrdiv(job: TeammateGenerationJob, wandb_logger: RunLogger) -> PairedPop
     rng = jax.random.PRNGKey(gen.train_seed)
     rngs = jax.random.split(rng, gen.num_seeds)
 
-    # Initialize br and conf policies. actor_type="rnn_actor_with_conditional_critic"
-    # is the only other value _env_step/hstate handling below understands --
+    # Initialize br and conf policies. The recurrent actor_types
+    # "rnn_actor_with_conditional_critic" (flat obs) and
+    # "cnn_rnn_actor_with_conditional_critic" (Overcooked-v2 grid, App. C.1.1)
+    # are the only values _env_step/hstate handling below understands --
     # everything else stays on the non-recurrent policy. See docs/tuning_record.md.
-    policy_cls = (
-        RNNActorWithConditionalCriticPolicy
-        if gen.actor_type == "rnn_actor_with_conditional_critic"
-        else ActorWithConditionalCriticPolicy
-    )
-    conf_policy = policy_cls(
+    policy_cls = {
+        "rnn_actor_with_conditional_critic": RNNActorWithConditionalCriticPolicy,
+        "cnn_rnn_actor_with_conditional_critic": CNNRNNActorWithConditionalCriticPolicy,
+    }.get(gen.actor_type, ActorWithConditionalCriticPolicy)
+    policy_kwargs = dict(
         action_dim=env.action_space(env.agents[0]).n,
         obs_dim=env.observation_space(env.agents[0]).shape[0],
         pop_size=gen.population_size,
     )
-    br_policy = policy_cls(
-        action_dim=env.action_space(env.agents[0]).n,
-        obs_dim=env.observation_space(env.agents[0]).shape[0],
-        pop_size=gen.population_size,
-    )
+    if policy_cls is CNNRNNActorWithConditionalCriticPolicy:
+        # fc/gru dims from the same sources CoMeDi and get_lbrdiv_population read
+        # them (network.hidden_dim; GRU default 128), so a scored checkpoint
+        # reconstructs to the exact shape it trained at. See docs/tuning_record.md.
+        policy_kwargs["obs_shape"] = _unwrap_obs_shape(env)
+        policy_kwargs["fc_hidden_dim"] = gen.network.hidden_dim
+        policy_kwargs["gru_hidden_dim"] = 128
+    conf_policy = policy_cls(**policy_kwargs)
+    br_policy = policy_cls(**policy_kwargs)
 
     # Create a vmapped version of train_lbrdiv_partners
     with jax.disable_jit(False):

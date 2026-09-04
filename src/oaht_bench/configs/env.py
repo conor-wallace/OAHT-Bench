@@ -466,10 +466,14 @@ for _layout, (_tier, _notes) in _OVERCOOKED_V2_TIERS.items():
             tier=_tier,
             notes=_notes,
             # Partial observability is v2's headline feature over v1 and the
-            # reason to use it -- agent_view_size=2 matches upstream's only
-            # validated reference config. Requires an RNN policy
-            # (actor_type='rnn' on the generator config) to be meaningful.
+            # reason to use it -- agent_view_size=2 matches the source paper's
+            # setting (Gessler et al., ICLR 2025). Requires a recurrent policy
+            # (the cnn_rnn actor types on the generator config) to be meaningful.
             agent_view_size=2,
+            # The paper's Counter Circuit setting (App. D.2.1): incorrect
+            # deliveries are penalised. Left off for v1, which has no penalty
+            # term; on here to match the reference the v2 generators are tuned to.
+            negative_rewards=True,
         )
     )
 del _layout, _tier, _notes

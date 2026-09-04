@@ -33,6 +33,7 @@ from oaht_bench.common.plot_utils import get_metric_names
 from oaht_bench.common.run_episodes import run_episodes
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper, LogEnvState
+from oaht_bench.teammate_gen.marl.reward_shaping import add_shaped_reward
 from oaht_bench.teammate_gen.marl.ippo import make_train as make_ppo_train
 from oaht_bench.common.logging import RunLogger, log_update_metrics, nonfatal
 from oaht_bench.configs.job import TeammateGenerationJob
@@ -290,6 +291,11 @@ def train_comedi_partners(
                         obs_next, env_state_next, reward, done, info = jax.vmap(env.step, in_axes=(0,0,0))(
                             step_rngs, env_state, env_act
                         )
+                        reward = add_shaped_reward(
+                            reward, info, env.agents,
+                            horizon=config.ppo.reward_shaping_horizon,
+                            global_env_step=update_steps * config.rollout_length * config.num_envs,
+                        )
                         # note that num_actors = num_envs * num_agents
                         info_0 = jax.tree.map(lambda x: x[:, 0], info)
 
@@ -431,6 +437,11 @@ def train_comedi_partners(
                         obs_next, env_state_next, reward, done, info = jax.vmap(env.step, in_axes=(0,0,0))(
                             step_rngs, env_state, env_act
                         )
+                        reward = add_shaped_reward(
+                            reward, info, env.agents,
+                            horizon=config.ppo.reward_shaping_horizon,
+                            global_env_step=update_steps * config.rollout_length * config.num_envs,
+                        )
                         info_0 = jax.tree.map(lambda x: x[:, 0], info)
                         info_1 = jax.tree.map(lambda x: x[:, 1], info)
 
@@ -541,6 +552,11 @@ def train_comedi_partners(
                         step_rngs = jax.random.split(step_rng, config.num_envs)
                         obs_next, env_state_next, reward, done, info = jax.vmap(env.step, in_axes=(0,0,0))(
                             step_rngs, env_state, env_act
+                        )
+                        reward = add_shaped_reward(
+                            reward, info, env.agents,
+                            horizon=config.ppo.reward_shaping_horizon,
+                            global_env_step=update_steps * config.rollout_length * config.num_envs,
                         )
 
                         reset_transition = ResetTransition(

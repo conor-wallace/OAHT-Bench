@@ -210,11 +210,10 @@ class CoMeDiRuntime(BaseConfig):
         needs the RNN pseudo variant, not the MLP one. See
         docs/tuning_record.md.
         """
-        pseudo_actor_type = (
-            "pseudo_rnn_actor_with_conditional_critic"
-            if self.actor_type == "rnn_actor_with_conditional_critic"
-            else "pseudo_actor_with_conditional_critic"
-        )
+        pseudo_actor_type = {
+            "rnn_actor_with_conditional_critic": "pseudo_rnn_actor_with_conditional_critic",
+            "cnn_rnn_actor_with_conditional_critic": "pseudo_cnn_rnn_actor_with_conditional_critic",
+        }.get(self.actor_type, "pseudo_actor_with_conditional_critic")
         return PpoRuntime.from_config(
             ppo=self.ppo,
             network=self.network,

@@ -5,22 +5,32 @@
       "env_name": "overcooked-v2",
       "layout": "counter_circuit",
       "name": "overcooked_v2_counter_circuit",
+      "negative_rewards": true,
       "notes": "Full resource-sharing; discriminates between methods in v1.",
       "rollout_length": 400,
       "tier": "tier1"
     },
     "generator": {
-      "actor_type": "rnn_actor_with_conditional_critic",
-      "cross_play_weight": 0.005,
+      "actor_type": "cnn_rnn_actor_with_conditional_critic",
+      "cross_play_weight": 0.5,
       "generator": "brdiv",
-      "num_envs": 96,
-      "ppo": {
-        "clip_eps": 0.01,
-        "entropy_coef": 0.05,
-        "learning_rate": 0.001,
-        "num_minibatches": 8
+      "network": {
+        "activation": "relu",
+        "architecture": "mlp",
+        "hidden_dim": 128
       },
-      "total_timesteps": 675000000.0
+      "num_envs": 256,
+      "ppo": {
+        "anneal_lr": true,
+        "clip_eps": 0.2,
+        "learning_rate": 0.0005,
+        "lr_warmup": 0.05,
+        "max_grad_norm": 0.25,
+        "num_minibatches": 64,
+        "reward_shaping_horizon": 5000000.0,
+        "update_epochs": 4
+      },
+      "total_timesteps": 1800000000.0
     },
     "job_type": "teammate_generation",
     "label": "brdiv_overcooked_v2_counter_circuit"

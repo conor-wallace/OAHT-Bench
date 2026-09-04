@@ -31,6 +31,11 @@ from oaht_bench.models.rnn_actor_critic_agent import (
     RNNActorCriticPolicy,
     RNNActorWithConditionalCriticPolicy,
 )
+from oaht_bench.models.cnn_rnn_actor_critic_agent import (
+    CNNRNNActorCriticPolicy,
+    CNNRNNActorWithConditionalCriticPolicy,
+)
+from oaht_bench.models.initialize_agents import _unwrap_obs_shape
 from oaht_bench.configs.job import TeammateGenerationJob
 from oaht_bench.envs.protocols import TrainingEnv
 from oaht_bench.population.members import get_member_params
@@ -108,6 +113,18 @@ def get_fcp_population(
             activation=gen.network.activation,
             gru_hidden_dim=64,
         )
+    elif gen.actor_type == "cnn_rnn":
+        # GRU_HIDDEN_DIM isn't a network config field, so training used
+        # initialize_cnn_rnn_agent's default of 128 (the paper's value);
+        # matched here, like the rnn branch matches its own default.
+        partner_policy = CNNRNNActorCriticPolicy(
+            action_dim=env.action_space(env.agents[1]).n,
+            obs_dim=env.observation_space(env.agents[1]).shape[0],
+            obs_shape=_unwrap_obs_shape(env),
+            activation=gen.network.activation,
+            fc_hidden_dim=gen.network.hidden_dim,
+            gru_hidden_dim=128,
+        )
     else:
         partner_policy = MLPActorCriticPolicy(
             action_dim=env.action_space(env.agents[1]).n,
@@ -124,6 +141,33 @@ def get_fcp_population(
     return flattened_partner_params, partner_population
 
 
+def _conditional_critic_policy(job: TeammateGenerationJob, env: TrainingEnv, pop_size: int):
+    """Reconstruct the conditional-critic policy a CoMeDi/BRDiv/L-BRDiv checkpoint
+    was trained with, for scoring. Mirrors the construction each generator and
+    ``initialize_actor_with_conditional_critic`` make: the recurrent flat-obs
+    variant, the CNN+GRU grid variant (Overcooked-v2), or the MLP default. GRU/FC
+    dims match the training-time defaults for the same reason the fcp/rnn branch
+    does -- they are not independently chosen. See docs/tuning_record.md.
+    """
+    actor_type = job.generator.actor_type
+    kwargs = dict(
+        action_dim=env.action_space(env.agents[1]).n,
+        obs_dim=env.observation_space(env.agents[1]).shape[0],
+        pop_size=pop_size,  # used to create onehot agent id
+        activation=job.generator.network.activation,
+    )
+    if actor_type == "rnn_actor_with_conditional_critic":
+        return RNNActorWithConditionalCriticPolicy(**kwargs)
+    if actor_type == "cnn_rnn_actor_with_conditional_critic":
+        return CNNRNNActorWithConditionalCriticPolicy(
+            obs_shape=_unwrap_obs_shape(env),
+            fc_hidden_dim=job.generator.network.hidden_dim,
+            gru_hidden_dim=128,
+            **kwargs,
+        )
+    return ActorWithConditionalCriticPolicy(**kwargs)
+
+
 def get_comedi_population(
     job: TeammateGenerationJob, out: TrainOutput, env: TrainingEnv
 ) -> CoMeDiPopulation:
@@ -133,19 +177,7 @@ def get_comedi_population(
     # partner_params has shape (num_seeds, comedi_pop_size, ...)
     partner_params = out['final_params_conf']
 
-    # Same dispatch as get_fcp_population/get_brdiv_population above, and the
-    # same construction CoMeDi.py itself now uses -- see docs/tuning_record.md.
-    policy_cls = (
-        RNNActorWithConditionalCriticPolicy
-        if job.generator.actor_type == "rnn_actor_with_conditional_critic"
-        else ActorWithConditionalCriticPolicy
-    )
-    partner_policy = policy_cls(
-        action_dim=env.action_space(env.agents[1]).n,
-        obs_dim=env.observation_space(env.agents[1]).shape[0],
-        pop_size=comedi_pop_size, # used to create onehot agent id
-        activation=job.generator.network.activation,
-    )
+    partner_policy = _conditional_critic_policy(job, env, comedi_pop_size)
 
     # Create partner population
     partner_population = AgentPopulation(
@@ -169,19 +201,7 @@ def get_brdiv_population(
     # partner_params has shape (num_seeds, brdiv_pop_size, ...)
     partner_params = out['final_params_conf']
 
-    # Same dispatch as get_fcp_population above, and the same construction
-    # BRDiv.py itself now uses -- see docs/tuning_record.md.
-    policy_cls = (
-        RNNActorWithConditionalCriticPolicy
-        if job.generator.actor_type == "rnn_actor_with_conditional_critic"
-        else ActorWithConditionalCriticPolicy
-    )
-    partner_policy = policy_cls(
-        action_dim=env.action_space(env.agents[1]).n,
-        obs_dim=env.observation_space(env.agents[1]).shape[0],
-        pop_size=brdiv_pop_size, # used to create onehot agent id
-        activation=job.generator.network.activation
-    )
+    partner_policy = _conditional_critic_policy(job, env, brdiv_pop_size)
 
     # Create partner population
     partner_population = AgentPopulation(
@@ -205,19 +225,7 @@ def get_lbrdiv_population(
     # partner_params has shape (num_seeds, pop_size, ...)
     partner_params = out['final_params_conf']
 
-    # Same dispatch as get_fcp_population/get_brdiv_population above, and the
-    # same construction LBRDiv.py itself now uses -- see docs/tuning_record.md.
-    policy_cls = (
-        RNNActorWithConditionalCriticPolicy
-        if job.generator.actor_type == "rnn_actor_with_conditional_critic"
-        else ActorWithConditionalCriticPolicy
-    )
-    partner_policy = policy_cls(
-        action_dim=env.action_space(env.agents[1]).n,
-        obs_dim=env.observation_space(env.agents[1]).shape[0],
-        pop_size=pop_size, # used to create onehot agent id
-        activation=job.generator.network.activation
-    )
+    partner_policy = _conditional_critic_policy(job, env, pop_size)
 
     # Create partner population
     partner_population = AgentPopulation(

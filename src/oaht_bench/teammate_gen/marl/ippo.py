@@ -16,9 +16,12 @@ from flax.training.train_state import TrainState
 
 from oaht_bench.models.initialize_agents import initialize_s5_agent, initialize_mlp_agent, \
     initialize_rnn_agent, initialize_pseudo_actor_with_double_critic, initialize_pseudo_actor_with_conditional_critic, \
-    initialize_pseudo_rnn_actor_with_conditional_critic
+    initialize_pseudo_rnn_actor_with_conditional_critic, initialize_cnn_rnn_agent, \
+    initialize_pseudo_cnn_rnn_actor_with_conditional_critic
+from oaht_bench.teammate_gen.marl.lr_schedule import make_lr_schedule
 from oaht_bench.common.plot_utils import get_stats, get_metric_names
 from oaht_bench.common.save_load_utils import save_train_run
+from oaht_bench.teammate_gen.marl.reward_shaping import add_shaped_reward
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper
 from oaht_bench.teammate_gen.marl.ppo_utils import Transition, batchify, unbatchify, _create_minibatches
@@ -31,6 +34,10 @@ def initialize_agent(actor_type, algorithm_config, env, init_rng):
         policy, init_params = initialize_mlp_agent(algorithm_config, env, init_rng)
     elif actor_type == "rnn":
         policy, init_params = initialize_rnn_agent(algorithm_config, env, init_rng)
+    elif actor_type == "cnn_rnn":
+        policy, init_params = initialize_cnn_rnn_agent(algorithm_config, env, init_rng)
+    elif actor_type == "pseudo_cnn_rnn_actor_with_conditional_critic":
+        policy, init_params = initialize_pseudo_cnn_rnn_actor_with_conditional_critic(algorithm_config, env, init_rng)
     elif actor_type == "pseudo_actor_with_double_critic":
         policy, init_params = initialize_pseudo_actor_with_double_critic(algorithm_config, env, init_rng)
     elif actor_type == "pseudo_actor_with_conditional_critic":
@@ -50,10 +57,6 @@ def make_train(runtime, env, logger, progress_callback=None):
     """
     config = runtime  # kept as a local alias to minimise the diff below
 
-    def linear_schedule(count):
-        frac = 1.0 - (count // (config.ppo.num_minibatches * config.ppo.update_epochs)) / config.num_updates
-        return config.ppo.learning_rate * frac
-
     def train(rng):
         # INIT NETWORK
         rng, init_rng = jax.random.split(rng)
@@ -61,15 +64,10 @@ def make_train(runtime, env, logger, progress_callback=None):
             config.actor_type, config.to_agent_dict(), env, init_rng
         )
 
-        if config.ppo.anneal_lr:
-            tx = optax.chain(
-                optax.clip_by_global_norm(config.ppo.max_grad_norm),
-                optax.adam(learning_rate=linear_schedule, eps=1e-5),
-            )
-        else:
-            tx = optax.chain(
-                optax.clip_by_global_norm(config.ppo.max_grad_norm), 
-                optax.adam(config.ppo.learning_rate, eps=1e-5))
+        tx = optax.chain(
+            optax.clip_by_global_norm(config.ppo.max_grad_norm),
+            optax.adam(learning_rate=make_lr_schedule(config.ppo, config.num_updates), eps=1e-5),
+        )
         train_state = TrainState.create(
             apply_fn=policy.network.apply,
             params=init_params,
@@ -123,7 +121,17 @@ def make_train(runtime, env, logger, progress_callback=None):
                 new_obs, new_env_state, reward, new_done, info = jax.vmap(env.step, in_axes=(0,0,0))(
                     rng_step, env_state, env_act
                 )
-                
+
+                # Overcooked-v2: add the (annealed) shaped reward to the base reward
+                # before it enters the trajectory. No-op when horizon==0 or the env
+                # surfaces no shaped_reward (LBF/Hanabi/v1). update_steps is constant
+                # within this rollout.
+                reward = add_shaped_reward(
+                    reward, info, env.agents,
+                    horizon=config.ppo.reward_shaping_horizon,
+                    global_env_step=update_steps * config.rollout_length * config.num_envs,
+                )
+
                 # note that num_actors = num_envs * num_agents
                 info = jax.tree.map(lambda x: x.reshape((config.num_actors)), info)
 

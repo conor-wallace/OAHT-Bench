@@ -59,6 +59,30 @@ def _family(preset_name: str) -> str:
 # --------------------------------------------------------------------------
 # PPO settings, per (generator, environment family), from jax-aht's configs.
 # --------------------------------------------------------------------------
+# Overcooked-v2 PPO backbone, shared by all four generators: the source paper's
+# Counter Circuit hyperparameters (Gessler et al., ICLR 2025, App. D.2.1, Table 4).
+# The paper trains a CNN+GRU self-play policy, not BRDiv, so the PPO backbone is
+# matched exactly and cross_play_weight / tolerance_factor stay our own diversity
+# knobs. reward_shaping_horizon (annealed dense reward) and lr_warmup (warmup+cosine
+# LR) are the two paper features wired this session. num_minibatches=64 over the
+# paper's num_envs=256 (all four; see SCALE) gives the paper's exact 4-envs-per-
+# minibatch on the H100 target.
+_OVERCOOKED_V2_PPO = dict(
+    learning_rate=5e-4,
+    update_epochs=4,
+    num_minibatches=64,
+    clip_eps=0.2,
+    entropy_coef=0.01,
+    value_coef=0.5,
+    max_grad_norm=0.25,
+    gamma=0.99,
+    gae_lambda=0.95,
+    anneal_lr=True,
+    lr_warmup=0.05,
+    reward_shaping_horizon=5e6,
+)
+
+
 PPO: dict[str, dict[str, dict[str, Any]]] = {
     "fcp": {
         # Tuned, not inherited — see docs/tuning_record.md. Upstream's 1e-4/0.01
@@ -77,26 +101,9 @@ PPO: dict[str, dict[str, dict[str, Any]]] = {
             clip_eps=0.1,
             entropy_coef=0.05,
         ),
-        # UNTUNED, and deliberately NOT copied from v1's "overcooked" entry
-        # above (unlike every other family here) -- v2 uses partial
-        # observability (agent_view_size=2 on the registered presets) and
-        # therefore an RNN policy (actor_type="rnn" in SCALE below), so v1's
-        # MLP/full-observability-tuned values aren't a meaningful prior.
-        # Starting from upstream's own reference instead: JaxMARL's only
-        # validated overcooked_v2 config, baselines/IPPO/config/
-        # ippo_rnn_overcooked_v2.yaml (LR, CLIP_EPS, ENT_COEF, ANNEAL_LR).
-        # gamma/gae_lambda/max_grad_norm below already match its 0.99/0.95;
-        # max_grad_norm differs (theirs is 0.25) and is left at this
-        # generator's own default rather than copied blind. See
-        # docs/tuning_record.md once a sweep exists.
-        "overcooked_v2": dict(
-            learning_rate=2.5e-4,
-            update_epochs=4,
-            num_minibatches=64,
-            clip_eps=0.2,
-            entropy_coef=0.01,
-            anneal_lr=True,
-        ),
+        # Source paper's Counter Circuit backbone (Table 4) -- see
+        # _OVERCOOKED_V2_PPO above.
+        "overcooked_v2": dict(**_OVERCOOKED_V2_PPO),
         "hanabi": dict(
             learning_rate=5e-4,
             update_epochs=4,
@@ -123,15 +130,9 @@ PPO: dict[str, dict[str, dict[str, Any]]] = {
             clip_eps=0.01,
             entropy_coef=0.05,
         ),
-        # UNTUNED. Copied from v1's "overcooked" entry above as a starting
-        # point, not a validated choice for v2 -- see the fcp entry's note.
-        "overcooked_v2": dict(
-            learning_rate=1e-3,
-            update_epochs=15,
-            num_minibatches=8,
-            clip_eps=0.01,
-            entropy_coef=0.05,
-        ),
+        # Source paper's Counter Circuit backbone (Table 4) -- see
+        # _OVERCOOKED_V2_PPO above.
+        "overcooked_v2": dict(**_OVERCOOKED_V2_PPO),
         "hanabi": dict(
             learning_rate=5e-4,
             update_epochs=4,
@@ -162,15 +163,9 @@ PPO: dict[str, dict[str, dict[str, Any]]] = {
             clip_eps=0.01,
             entropy_coef=0.05,
         ),
-        # UNTUNED. Copied from v1's "overcooked" entry above as a starting
-        # point, not a validated choice for v2 -- see the fcp entry's note.
-        "overcooked_v2": dict(
-            learning_rate=1e-3,
-            update_epochs=15,
-            num_minibatches=8,
-            clip_eps=0.01,
-            entropy_coef=0.05,
-        ),
+        # Source paper's Counter Circuit backbone (Table 4) -- see
+        # _OVERCOOKED_V2_PPO above.
+        "overcooked_v2": dict(**_OVERCOOKED_V2_PPO),
         "hanabi": dict(
             learning_rate=5e-4,
             update_epochs=4,
@@ -199,15 +194,9 @@ PPO: dict[str, dict[str, dict[str, Any]]] = {
             clip_eps=0.01,
             entropy_coef=0.05,
         ),
-        # UNTUNED. Copied from v1's "overcooked" entry above as a starting
-        # point, not a validated choice for v2 -- see the fcp entry's note.
-        "overcooked_v2": dict(
-            learning_rate=1e-3,
-            update_epochs=15,
-            num_minibatches=8,
-            clip_eps=0.01,
-            entropy_coef=0.05,
-        ),
+        # Source paper's Counter Circuit backbone (Table 4) -- see
+        # _OVERCOOKED_V2_PPO above.
+        "overcooked_v2": dict(**_OVERCOOKED_V2_PPO),
         "hanabi": dict(
             learning_rate=5e-4,
             update_epochs=4,
@@ -291,30 +280,20 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # docs/tuning_record.md.
         "lbf": dict(total_timesteps=24e6, num_envs=64, pop=POPULATION_SIZE),
         "overcooked": dict(total_timesteps=4e6, num_envs=8, pop=POPULATION_SIZE),
-        # UNTUNED. Copied from v1's "overcooked" budget as a starting point.
-        # Tuned against an external reference, not just an internal slope
-        # reading: the original Overcooked-v2 paper reports ~163 return on
-        # counter_circuit. num_envs=64 (not upstream's 256 -- OOMs on this
-        # device, confirmed by an actual run, not just check_device.py's
-        # estimate). total_timesteps=6e7 (2,343 updates) reaches SP=205.20,
-        # 126% of the paper's number, and the training curve had already
-        # decelerated hard by then (quarter 3->4: 187->191) -- a separate,
-        # since-lost 1e8 run (died before checkpointing when an SSH
-        # connection dropped, but its metrics.jsonl survived) landed at only
-        # 200->207 over the same quarters despite 67% more budget, so 6e7
-        # is judged close enough to where more budget stops paying for
-        # itself rather than fully flat. actor_type="rnn" +
-        # agent_view_size=2 (on the registered presets): partial
-        # observability is v2's headline feature and requires memory to be
-        # useful -- an MLP cannot make good use of a partial observation.
-        # CoMeDi/BRDiv/L-BRDiv do NOT have this option yet:
-        # initialize_agents.py's RNN path only covers the plain-actor case
-        # FCP uses, not the conditional/double-critic architectures those
-        # three need, so they stay on "mlp" pending that work -- meaning
-        # they'd currently see agent_view_size=2 with no mechanism to cope
-        # with it if run on this preset today. See docs/tuning_record.md.
+        # actor_type="cnn_rnn" (CNN+GRU, App. C.1.1) over the agent_view_size=2
+        # partial observation -- the source paper found a convolutional stem
+        # necessary to learn good policies on v2. num_envs=256 is the paper's
+        # value (H100; the earlier 64 was a 6GB-GPU OOM workaround), which at
+        # num_minibatches=64 gives the paper's exact 4-envs-per-minibatch.
+        # total_timesteps=2.4e8 scales the previous 6e7 by 256/64 to hold
+        # num_updates fixed across the batch-size change.
+        #
+        # The earlier 6e7-at-64 run reached SP=205.20 (126% of the paper's ~163),
+        # but that was on the pre-paper net (an RNN over flattened obs) with the
+        # old PPO settings -- a starting point, not a result for this backbone.
+        # Re-tune against the matched setup. See docs/tuning_record.md.
         "overcooked_v2": dict(
-            total_timesteps=6e7, num_envs=64, pop=POPULATION_SIZE, actor_type="rnn"
+            total_timesteps=2.4e8, num_envs=256, pop=POPULATION_SIZE, actor_type="cnn_rnn"
         ),
         # Tuned. num_envs 32 -> 64 (the LBF batch-size lesson), total_timesteps
         # 1e9 -> 2e9 to hold jax-aht's own reference update count (244,141)
@@ -337,23 +316,20 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # constraint; that's the open follow-up. See docs/tuning_record.md.
         "lbf": dict(total_timesteps_per_iteration=1.92e8, num_envs=64, pop=POPULATION_SIZE),
         "overcooked": dict(total_timesteps_per_iteration=1e7, num_envs=48, pop=POPULATION_SIZE),
-        # UNTUNED budget, but actor_type is no longer a guess: CoMeDi's RNN
-        # conditional critic (RNNActorWithConditionalCriticPolicy) landed this
-        # session, mirroring BRDiv/L-BRDiv's own RNN support -- see
-        # docs/tuning_record.md. CoMeDi never reassigns which population
-        # member plays a role mid-rollout, so unlike BRDiv/L-BRDiv it has no
-        # n^2-pairing memory constraint and needs no num_envs reduction;
-        # num_envs=64 matches both CoMeDi's own LBF value and FCP's tuned
-        # Overcooked-v2 value, keeping the ratio derivation below apples to
-        # apples. total_timesteps_per_iteration derived the same way as
-        # BRDiv/L-BRDiv's: on LBF, CoMeDi's total_timesteps_per_iteration
-        # (1.92e8) is 8x FCP's total_timesteps (24e6) at the same num_envs=64.
-        # Applying 8x to FCP's tuned Overcooked-v2 budget (6e7) gives 4.8e8.
+        # UNTUNED budget. CoMeDi uses the CNN+GRU conditional critic (App. C.1.1)
+        # like BRDiv/L-BRDiv. It never reassigns which member plays a role
+        # mid-rollout, so unlike them it has no n^2-pairing memory constraint and
+        # needs no num_envs reduction; num_envs=256 matches FCP's v2 value and the
+        # paper's, giving the paper's 4-envs-per-minibatch at num_minibatches=64.
+        # total_timesteps_per_iteration=1.92e9 scales the previous 4.8e8 by 256/64
+        # to hold num_updates across the batch-size change; the 4.8e8 base was
+        # itself FCP's v2 budget x8 (CoMeDi's LBF-to-FCP ratio). See
+        # docs/tuning_record.md.
         "overcooked_v2": dict(
-            total_timesteps_per_iteration=4.8e8,
-            num_envs=64,
+            total_timesteps_per_iteration=1.92e9,
+            num_envs=256,
             pop=POPULATION_SIZE,
-            actor_type="rnn_actor_with_conditional_critic",
+            actor_type="cnn_rnn_actor_with_conditional_critic",
         ),
         "hanabi": dict(total_timesteps_per_iteration=2e7, num_envs=48, pop=POPULATION_SIZE),
     },
@@ -366,31 +342,21 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # +0.001/1k, genuinely flat. See docs/tuning_record.md.
         "lbf": _paired_scale(64, 1.8e8),
         "overcooked": _paired_scale(128, 9e7),
-        # num_envs is NOT _paired_scale(64, ...)'s default. _paired_scale(64,
-        # ...) gives num_envs=192 (7.7 envs/pairing, matching LBF's
-        # established-safe reference) but check_device.py puts that at 99%
-        # of this 6GB GPU's memory -- confirmed OOM. 96 (3.84 envs/pairing,
-        # between the known-collapse point 2.6 and LBF's 7.7) fits and both
-        # BRDiv and L-BRDiv now train and checkpoint end-to-end at this size
-        # with the RNN conditional critic (hstate-threading bugs in
-        # _env_step's per-actor vmap fixed this session -- see
-        # docs/tuning_record.md). SP-vs-XP has not yet been checked at this
-        # budget scale (only a 2e6-timestep smoke test so far) -- still open.
-        #
-        # total_timesteps derived the same way FCP's overcooked_v2 budget was
-        # derived from its LBF one, not guessed: on LBF, BRDiv/L-BRDiv's base
-        # (pre-pairing-multiplier, num_envs=64) budget is total_timesteps=1.8e8
-        # vs FCP's 24e6 at the same num_envs -- a 7.5x ratio, independent of
-        # the pairing multiplier (which scales num_envs and total_timesteps
-        # together and cancels out of num_updates). Applying 7.5x to FCP's
-        # tuned overcooked_v2 budget (6e7 at num_envs=64) gives a base of
-        # 4.5e8, then x1.5 to move from the 64-env base to our actual 96
-        # (holding num_updates constant) gives 6.75e8.
+        # num_envs=256 -- the source paper's value, affordable on H100 (the
+        # earlier 96 was a 6GB-GPU OOM workaround). At n=5 that is 256/n^2 =
+        # 10.2 environments per (conf, br) pairing, comfortably above LBF's
+        # established-safe 7.7 and far above the ~2.6 collapse point, so the
+        # n^2-per-pairing invariant (CLAUDE.md #4) holds with margin. And at
+        # num_minibatches=64 it reproduces the paper's exact 4-envs-per-minibatch.
+        # total_timesteps=1.8e9 scales the previous 6.75e8 by 256/96 to hold
+        # num_updates fixed across the batch-size change (the same rule
+        # _paired_scale encodes). Un-GPU-validated: SP-vs-XP separation at the
+        # adopted cross_play_weight is the open check. See docs/tuning_record.md.
         "overcooked_v2": {
-            "num_envs": 96,
-            "total_timesteps": 6.75e8,
+            "num_envs": 256,
+            "total_timesteps": 1.8e9,
             "pop": POPULATION_SIZE,
-            "actor_type": "rnn_actor_with_conditional_critic",
+            "actor_type": "cnn_rnn_actor_with_conditional_critic",
         },
         "hanabi": _paired_scale(128, 5e8),
     },
@@ -401,31 +367,21 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # docs/tuning_record.md.
         "lbf": _paired_scale(64, 1.8e8),
         "overcooked": _paired_scale(128, 9e7),
-        # num_envs is NOT _paired_scale(64, ...)'s default. _paired_scale(64,
-        # ...) gives num_envs=192 (7.7 envs/pairing, matching LBF's
-        # established-safe reference) but check_device.py puts that at 99%
-        # of this 6GB GPU's memory -- confirmed OOM. 96 (3.84 envs/pairing,
-        # between the known-collapse point 2.6 and LBF's 7.7) fits and both
-        # BRDiv and L-BRDiv now train and checkpoint end-to-end at this size
-        # with the RNN conditional critic (hstate-threading bugs in
-        # _env_step's per-actor vmap fixed this session -- see
-        # docs/tuning_record.md). SP-vs-XP has not yet been checked at this
-        # budget scale (only a 2e6-timestep smoke test so far) -- still open.
-        #
-        # total_timesteps derived the same way FCP's overcooked_v2 budget was
-        # derived from its LBF one, not guessed: on LBF, BRDiv/L-BRDiv's base
-        # (pre-pairing-multiplier, num_envs=64) budget is total_timesteps=1.8e8
-        # vs FCP's 24e6 at the same num_envs -- a 7.5x ratio, independent of
-        # the pairing multiplier (which scales num_envs and total_timesteps
-        # together and cancels out of num_updates). Applying 7.5x to FCP's
-        # tuned overcooked_v2 budget (6e7 at num_envs=64) gives a base of
-        # 4.5e8, then x1.5 to move from the 64-env base to our actual 96
-        # (holding num_updates constant) gives 6.75e8.
+        # num_envs=256 -- the source paper's value, affordable on H100 (the
+        # earlier 96 was a 6GB-GPU OOM workaround). At n=5 that is 256/n^2 =
+        # 10.2 environments per (conf, br) pairing, comfortably above LBF's
+        # established-safe 7.7 and far above the ~2.6 collapse point, so the
+        # n^2-per-pairing invariant (CLAUDE.md #4) holds with margin. And at
+        # num_minibatches=64 it reproduces the paper's exact 4-envs-per-minibatch.
+        # total_timesteps=1.8e9 scales the previous 6.75e8 by 256/96 to hold
+        # num_updates fixed across the batch-size change (the same rule
+        # _paired_scale encodes). Un-GPU-validated: SP-vs-XP separation at the
+        # adopted cross_play_weight is the open check. See docs/tuning_record.md.
         "overcooked_v2": {
-            "num_envs": 96,
-            "total_timesteps": 6.75e8,
+            "num_envs": 256,
+            "total_timesteps": 1.8e9,
             "pop": POPULATION_SIZE,
-            "actor_type": "rnn_actor_with_conditional_critic",
+            "actor_type": "cnn_rnn_actor_with_conditional_critic",
         },
         "hanabi": _paired_scale(128, 5e8),
     },
@@ -444,10 +400,14 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
 #: BRDiv's LBF value tuned 0.05 -> 0.10: confirmed a local optimum, beating
 #: both a lower (0.07) and higher (0.20) retest at the tuned budget. See
 #: docs/tuning_record.md.
-#: overcooked_v2 entries below are UNTUNED, copied from v1's as starting
-#: points -- same caveat as the PPO/SCALE dicts above.
+#: overcooked_v2 entries are the starting point for a sweep, not a tuned value.
+#: BRDiv's is 0.5, not v1's 0.005: the paper doesn't train BRDiv, so with the
+#: PPO backbone now matched, cross_play_weight is the one knob still ours to
+#: sweep, and 0.5 is a mid-range diversity start (a homogeneous population --
+#: separation ~0 -- was the symptom that motivated this whole change). CoMeDi's
+#: stays at v1's 1.0 pending its own sweep. See docs/tuning_record.md.
 CROSS_PLAY_WEIGHT = {
-    "brdiv": {"lbf": 0.10, "overcooked": 0.005, "overcooked_v2": 0.005, "hanabi": 0.05},
+    "brdiv": {"lbf": 0.10, "overcooked": 0.005, "overcooked_v2": 0.5, "hanabi": 0.05},
     "comedi": {"lbf": 0.2, "overcooked": 1.0, "overcooked_v2": 1.0, "hanabi": 0.2},
 }
 MIXED_PLAY_WEIGHT = {"lbf": 0.4, "overcooked": 0.5, "overcooked_v2": 0.5, "hanabi": 0.5}
@@ -472,12 +432,21 @@ def build(generator: str, preset_name: str, num_checkpoints: int = 5):
     ppo = PpoHyperparams(**PPO[generator][fam])
     scale = SCALE[generator][fam]
     pop = scale["pop"]
+    # Overcooked-v2 uses the paper's CNN+GRU actor (App. C.1.1): FC_DIM=GRU=128
+    # and ReLU throughout. network carries FC_HIDDEN_DIM/ACTIVATION for the
+    # encoder; the GRU width is the CNN policy's own default (128). Every other
+    # family keeps the MLP default (hidden_dim=64, tanh).
+    network = (
+        MlpNetwork(hidden_dim=128, activation="relu")
+        if fam == "overcooked_v2"
+        else MlpNetwork()
+    )
     common = dict(
         population_size=pop,
         num_checkpoints=num_checkpoints,
         num_envs=scale["num_envs"],
         ppo=ppo,
-        network=MlpNetwork(),
+        network=network,
     )
     # Only overridden when SCALE explicitly names one (currently just FCP x
     # overcooked_v2, for its RNN policy -- see docs/tuning_record.md). Every

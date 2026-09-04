@@ -155,9 +155,21 @@ worth knowing before touching these further:
   downstream validation ever suggests it's underweighted, that's a change to
   the adoption rule, not a case for bending it after the fact case-by-case.
 
-Overcooked and Hanabi are untuned for all four generators (still on jax-aht's
-inherited hyperparameters) — Overcooked BRDiv/L-BRDiv additionally don't fit
+Overcooked-v1 and Hanabi are untuned for all four generators (still on jax-aht's
+inherited hyperparameters) — Overcooked-v1 BRDiv/L-BRDiv additionally don't fit
 any GPU yet at all (see Known-open).
+
+**Overcooked-v2 is now matched to its source paper** (Gessler et al., ICLR 2025)
+for all four generators: annealed dense-reward shaping (`reward_shaping_horizon`),
+a CNN+GRU actor (`cnn_rnn` / `cnn_rnn_actor_with_conditional_critic`, App. C.1.1),
+LR warmup+cosine (`lr_warmup`), the Table-4 PPO backbone, and `negative_rewards=True`.
+Wired across `models/cnn_rnn_actor_critic*.py`, `marl/{reward_shaping,lr_schedule}.py`,
+`initialize_agents.py`, `population/loading.py`, all four generators, and the
+generated v2 configs. **Verified end-to-end on CPU** (all four train, checkpoint
+*and* score) and by `tests/unit/teammate_gen/test_overcooked_v2_paper_matching.py`;
+**not yet GPU-validated** — the BRDiv Counter Circuit run sweeping `cross_play_weight`
+around 0.5 is the real check. `cross_play_weight` stays our knob (the paper doesn't
+train BRDiv). Full detail + what it can't yet conclude in `docs/tuning_record.md`.
 
 Next: the dataset schema (§4) and the DT backbone (§3.1) — LBF tuning was the
 gate for starting this, and it's now clear. Overcooked/Hanabi tuning can

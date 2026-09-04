@@ -47,6 +47,15 @@ ActorType = Literal[
     # -- the network-shape-only variant a plain self-play IPPO trainer can drive
     # before any real population exists to condition on.
     "pseudo_rnn_actor_with_conditional_critic",
+    # CNN+GRU variants for Overcooked-v2 (Gessler et al., ICLR 2025, App. C.1.1):
+    # a convolutional stem over the grid observation, which the paper found
+    # necessary to learn good policies there. "cnn_rnn" is FCP's shared-trunk
+    # actor-critic; "cnn_rnn_actor_with_conditional_critic" is the BRDiv/L-BRDiv/
+    # CoMeDi conditional-critic variant; the pseudo is CoMeDi's warmup shape.
+    # See models/cnn_rnn_actor_critic.py and docs/tuning_record.md.
+    "cnn_rnn",
+    "cnn_rnn_actor_with_conditional_critic",
+    "pseudo_cnn_rnn_actor_with_conditional_critic",
 ]
 
 
@@ -63,6 +72,25 @@ class PpoHyperparams(BaseConfig):
     value_coef: float = Field(default=0.5, ge=0)
     max_grad_norm: float = Field(default=1.0, gt=0)
     anneal_lr: bool = False
+    lr_warmup: float = Field(
+        default=0.0,
+        ge=0,
+        le=1,
+        description="Fraction of the total updates spent warming the learning rate "
+        "linearly from 0 to `learning_rate`, after which it cosine-decays to 0 "
+        "(OvercookedV2 App. D). 0 disables warmup -- the default -- leaving the "
+        "existing linear (`anneal_lr`) or constant schedule byte-for-byte unchanged, "
+        "so every previously tuned config is unaffected.",
+    )
+    reward_shaping_horizon: float = Field(
+        default=0.0,
+        ge=0,
+        description="Environment steps over which a linear 1->0 anneal is applied to "
+        "the environment's shaped reward before it is added to the base reward "
+        "(OvercookedV2 App. C/D). 0 disables shaping -- the default -- so sparse-reward "
+        "environments (LBF, Hanabi, Overcooked-v1) are unaffected. Only environments "
+        "that surface info['shaped_reward'] (the Overcooked-v2 wrapper) use it.",
+    )
 
 
 class GeneratorBase(BaseConfig):

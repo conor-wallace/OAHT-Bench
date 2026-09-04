@@ -970,6 +970,76 @@ not been run.
 uncertainty already noted for BRDiv/L-BRDiv's derivation** — propagated,
 not resolved, here either.
 
+## All four × Overcooked-v2 — matched to the source paper (supersedes the three sections above)
+
+The three Overcooked-v2 adoptions above (FCP's `actor_type="rnn"`, BRDiv/L-BRDiv
+and CoMeDi's RNN conditional critic, all over *flattened* observations with
+PPO hyperparameters inherited from v1 or JaxMARL's IPPO reference) were built
+before we went back to the environment's own paper. A BRDiv Counter Circuit run
+on that setup came back **SP 28.0 ≈ XP 26.55, separation ~1.4** — a competent-
+looking number hiding a homogeneous population — and a fresh run stalled at
+return ~1.0. That sent us to *OvercookedV2: Rethinking Overcooked for Zero-Shot
+Coordination* (Gessler et al., ICLR 2025), the implementation this env is
+absorbed from, which diverges from our setup on three things that gate learning.
+All three are now matched; the earlier adoptions are **superseded**, not amended.
+
+**1. Annealed dense-reward shaping (the gate).** The v2 wrapper computes
+`info['shaped_reward']` but returns only the sparse delivery reward
+(`overcooked_v2_wrapper.py`). Sparse Overcooked is a long-horizon exploration
+problem; the paper adds the shaped reward with a linear 1→0 anneal over
+`REW_SHAPING_HORIZON=5e6` env steps. Wired as `reward_shaping_horizon` on
+`PpoHyperparams`, folded right after `env.step` in every generator's rollout
+(`marl/reward_shaping.py`; `0` disables it, so LBF/Hanabi/v1 are untouched).
+
+**2. CNN+GRU network (App. C.1.1).** The paper reports that architectures
+without a convolutional stem "did not learn good policies" here. Our RNN ran a
+GRU over the flattened grid with no CNN. New `models/cnn_rnn_actor_critic.py`
+(three 1×1 convs `[128,128,8]` → three 3×3 convs `[16,32,32]`, ReLU, zero-pad →
+flatten → Dense 128 → LayerNorm → GRU 128 → heads), in a shared-trunk variant
+(`cnn_rnn`, FCP) and a teammate-id conditional-critic variant
+(`cnn_rnn_actor_with_conditional_critic`, CoMeDi/BRDiv/L-BRDiv) plus the pseudo
+shape CoMeDi's warmup needs.
+
+**3. Table-4 PPO backbone + LR warmup (App. D.2.1).** The authoritative Counter
+Circuit table is Table 4, not D.1.1 (which is the fully-observable "Limitations"
+feed-forward setting). `_OVERCOOKED_V2_PPO` in `gen_teammate_configs.py`: `LR=5e-4`,
+`CLIP_EPS=0.2`, `ENT_COEF=0.01`, `VF_COEF=0.5`, `MAX_GRAD_NORM=0.25`,
+`NUM_MINIBATCHES=64`, `UPDATE_EPOCHS=4`, `GAMMA=0.99`, `GAE=0.95`, `ANNEAL_LR`,
+`LR_WARMUP=0.05` (linear warmup then cosine decay, `marl/lr_schedule.py`),
+`REW_SHAPING_HORIZON=5e6`. Network `FC_DIM=GRU=128`, ReLU. Env `negative_rewards=True`.
+
+The paper does **not** train BRDiv, so `cross_play_weight` stays *our* knob, not
+the paper's; started at `0.5` for BRDiv (a mid-range diversity value, since a
+collapsed population was the symptom). L-BRDiv's `tolerance_factor` is still the
+v1-inherited `10.0`, unswept.
+
+### What this establishes, and what it cannot
+
+- **Verified (CPU):** all four generators train, checkpoint, *and score* end-to-end
+  on `overcooked_v2_counter_circuit` with the CNN actor types — the full path
+  including the eval-time policy reconstruction in `population/loading.py`, which
+  had to learn the CNN variants (an early smoke caught FCP silently falling back to
+  an MLP-shaped policy at scoring time). Pinned by
+  `tests/unit/teammate_gen/test_overcooked_v2_paper_matching.py` (shaping anneal,
+  schedule shape, CNN forward pass from `env.obs_shape`, generated-config values,
+  LBF non-regression).
+- **Not GPU-validated.** No claim yet that this reaches the paper's ~150–205 return
+  or that separation becomes non-trivial. That BRDiv Counter Circuit run — matched
+  setup, sweeping `cross_play_weight` around `0.5` — is the real check, and the
+  reason Part 1 (shaping on the old net) was landed first as the fast de-risk.
+- **`num_envs=256` for all four** — the paper's value, on the H100 training target
+  (the earlier 64/96 were 6GB-GPU limits). At `NUM_MINIBATCHES=64` that is the paper's
+  exact 4-envs-per-minibatch; for BRDiv/L-BRDiv at n=5 it is 256/n²=10.2 envs/pairing,
+  above LBF's established-safe 7.7 (invariant #4 holds with margin). `total_timesteps`
+  was scaled with `num_envs` to hold `num_updates` fixed (FCP 6e7→2.4e8, CoMeDi
+  4.8e8→1.92e9, BRDiv/L-BRDiv 6.75e8→1.8e9); bumping envs without this would have
+  quartered the gradient-step count and undertrained the population — the failure the
+  FCP/Hanabi budget chases and `_paired_scale` both guard against.
+- **Budgets carried over from the pre-paper sections are unre-derived** against the
+  new backbone; treat them as starting points. `rollout_length` is still the preset's
+  400, not the paper's `NUM_STEPS=256` — a remaining, deliberate difference (episode
+  length is an env-preset decision), noted here rather than changed.
+
 ## Not yet tuned
 
 All four on Overcooked-v1 and Hanabi still run at hyperparameters ported
