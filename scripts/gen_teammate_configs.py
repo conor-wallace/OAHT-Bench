@@ -331,7 +331,11 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
             pop=POPULATION_SIZE,
             actor_type="cnn_rnn_actor_with_conditional_critic",
         ),
-        "hanabi": dict(total_timesteps_per_iteration=2e7, num_envs=48, pop=POPULATION_SIZE),
+        # num_envs 48 -> 256 for the H100 run; total_timesteps_per_iteration
+        # 2e7 -> 1.0667e8 scales with it to hold num_updates (~3,255) fixed.
+        # num_minibatches=8 stays <= num_envs. Untuned depth, inherited PPO --
+        # measure and extend if still climbing. See docs/tuning_record.md.
+        "hanabi": dict(total_timesteps_per_iteration=1.0667e8, num_envs=256, pop=POPULATION_SIZE),
     },
     "brdiv": {
         # LBF budget quadrupled (4.5e7 -> 1.8e8 base, still x3 for n=5 pairing
@@ -358,7 +362,12 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
             "pop": POPULATION_SIZE,
             "actor_type": "cnn_rnn_actor_with_conditional_critic",
         },
-        "hanabi": _paired_scale(128, 5e8),
+        # num_envs=256 for the H100 run (was _paired_scale(128, 5e8) -> 384). At
+        # n=5 that is 256/n^2 = 10.2 envs/pairing, above LBF's established-safe 7.7,
+        # so invariant #4 holds with margin. total_timesteps=1.0e9 holds num_updates
+        # (~30,518) fixed vs the 384-env value. Untuned depth, inherited PPO --
+        # measure and extend if still climbing. See docs/tuning_record.md.
+        "hanabi": {"num_envs": 256, "total_timesteps": 1.0e9, "pop": POPULATION_SIZE},
     },
     "lbrdiv": {
         # LBF budget matched to BRDiv's tuned value directly (4.5e7 -> 1.8e8
@@ -383,7 +392,12 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
             "pop": POPULATION_SIZE,
             "actor_type": "cnn_rnn_actor_with_conditional_critic",
         },
-        "hanabi": _paired_scale(128, 5e8),
+        # num_envs=256 for the H100 run (was _paired_scale(128, 5e8) -> 384). At
+        # n=5 that is 256/n^2 = 10.2 envs/pairing, above LBF's established-safe 7.7,
+        # so invariant #4 holds with margin. total_timesteps=1.0e9 holds num_updates
+        # (~30,518) fixed vs the 384-env value. Untuned depth, inherited PPO --
+        # measure and extend if still climbing. See docs/tuning_record.md.
+        "hanabi": {"num_envs": 256, "total_timesteps": 1.0e9, "pop": POPULATION_SIZE},
     },
     "rpg": {
         # UNTUNED. RPG is the most expensive generator here: each outer update
