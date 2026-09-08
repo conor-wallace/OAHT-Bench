@@ -27,12 +27,18 @@ import numpy as np
 
 @dataclass(frozen=True)
 class EvalScores:
-    """Returns from evaluating one policy against a set of teammates."""
+    """Returns from evaluating one policy against a set of teammates.
 
-    #: teammate member index -> mean episode return for the ego agent
-    per_teammate: dict[int, float]
-    #: teammate member index -> standard error over episodes
-    per_teammate_stderr: dict[int, float]
+    Teammate keys are member indices in the legacy single-population path and
+    ``generator:member:role`` labels in the held-out path (test teammates span
+    generators, so an int index no longer identifies one) -- so the key type is
+    left open.
+    """
+
+    #: teammate label -> mean episode return for the ego agent
+    per_teammate: dict
+    #: teammate label -> standard error over episodes
+    per_teammate_stderr: dict
     episodes_per_teammate: int
     target_return: float
 
@@ -56,8 +62,8 @@ class EvalScores:
 
     def describe(self) -> str:
         rows = "\n".join(
-            f"    teammate {t:3d}   {v:7.4f} ± {self.per_teammate_stderr[t]:.4f}"
-            for t, v in sorted(self.per_teammate.items())
+            f"    teammate {str(t):>14}   {v:7.4f} ± {self.per_teammate_stderr[t]:.4f}"
+            for t, v in sorted(self.per_teammate.items(), key=lambda kv: str(kv[0]))
         )
         return (
             f"target return {self.target_return:.4f}, "
@@ -103,14 +109,52 @@ def evaluate_agent(
     agent. The ego takes seat ``agent_0``; the return is the ego seat of
     LogWrapper's per-agent episode return.
     """
+    from oaht_bench.population.members import get_member_params
+
+    teammates = [
+        (int(m), get_member_params(loaded.params, int(m)), loaded.policy_cls)
+        for m in members
+    ]
+    return evaluate_agent_against(
+        agent,
+        params,
+        env,
+        teammates,
+        rng=rng,
+        target_return=target_return,
+        max_episode_steps=max_episode_steps,
+        num_episodes=num_episodes,
+        ego_index=ego_index,
+    )
+
+
+def evaluate_agent_against(
+    agent,
+    params,
+    env,
+    teammates,
+    *,
+    rng,
+    target_return: float,
+    max_episode_steps: int,
+    num_episodes: int = 20,
+    ego_index: int = 0,
+) -> EvalScores:
+    """Roll the ego against an explicit list of teammate policies.
+
+    ``teammates`` is ``[(label, mate_params, policy_cls)]`` -- a label, the
+    teammate's parameters, and its policy class. Unlike :func:`evaluate_agent`,
+    which draws members from a single loaded population, this accepts teammates
+    from *different* populations (each with its own ``policy_cls``), which is what
+    a held-out set spanning generators requires (§8). The ego takes seat
+    ``agent_0``; each teammate plays ``num_episodes`` episodes in the other seat.
+    """
     import jax
 
     from oaht_bench.common.run_episodes import run_episodes
-    from oaht_bench.population.members import get_member_params
 
     per_teammate, stderr = {}, {}
-    for m in members:
-        mate_params = get_member_params(loaded.params, int(m))
+    for label, mate_params, policy_cls in teammates:
         rng, ep_rng = jax.random.split(rng)
         out = run_episodes(
             ep_rng,
@@ -118,13 +162,13 @@ def evaluate_agent(
             agent_0_param=params,
             agent_0_policy=agent,
             agent_1_param=mate_params,
-            agent_1_policy=loaded.policy_cls,
+            agent_1_policy=policy_cls,
             max_episode_steps=max_episode_steps,
             num_eps=num_episodes,
         )
         returns = np.asarray(out["returned_episode_returns"])[:, ego_index]
-        per_teammate[int(m)] = float(returns.mean())
-        stderr[int(m)] = (
+        per_teammate[label] = float(returns.mean())
+        stderr[label] = (
             float(returns.std(ddof=1) / np.sqrt(len(returns))) if len(returns) > 1 else 0.0
         )
 

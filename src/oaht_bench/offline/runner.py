@@ -128,12 +128,14 @@ def run(job: TrainingJob) -> Path:
         # opposed to predicting dataset actions. Non-fatal because parameters are
         # already on disk -- a failure here costs a metric, not the run.
         eval_scores, eval_skipped = None, None
-        if "population_run" not in dataset.meta:
-            # Distinguish "no population to play against" from "evaluation
-            # crashed": both leave eval null, and only one is a bug.
+        if "held_out" not in dataset.meta and "population_run" not in dataset.meta:
+            # Distinguish "no teammates to play against" from "evaluation crashed":
+            # both leave eval null, and only one is a bug. A split dataset carries
+            # 'held_out' (the test teammates); a legacy single-population one carries
+            # 'population_run'; this fixture-style dataset has neither.
             eval_skipped = (
-                "dataset metadata has no population_run, so there is no teammate "
-                "population to roll out against"
+                "dataset metadata has neither a train/test split ('held_out') nor a "
+                "'population_run', so there is no teammate population to roll out against"
             )
             log.warning("skipping evaluation: %s", eval_skipped)
         else:
@@ -177,18 +179,57 @@ def run(job: TrainingJob) -> Path:
     return run_dir
 
 
-def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, action_dim, logger):
-    """Roll the trained policy against the population its dataset came from.
+def _teammate_policies(batch, env) -> list:
+    """The teammate policies evaluation rolls the trained ego against.
 
-    Held-out teammates would be the stronger test (§8) and are not available
-    yet, so this measures in-distribution coordination: the population the data
-    was collected against. Recorded as such rather than presented as
-    generalisation.
+    With a train/test split (§8), this is the **held-out** set -- the test
+    teammates collection never trained on, drawn from every listed population --
+    which is the generalisation measurement the benchmark is about. Without a split
+    (legacy single-population datasets, no ``held_out`` in meta) it falls back to
+    that one population's released members, an in-distribution measurement recorded
+    as such. Only ``self``/``conf`` policies are seated as teammates; a ``br`` is a
+    designed ego, never a partner -- the same restriction collection uses.
+
+    Returns ``[(label, mate_params, policy_cls)]``.
     """
-    import jax
+    from oaht_bench.population.pooled_crossplay import build_roster
+
+    meta = batch.meta
+    if "held_out" in meta:
+        held = {g: {int(m) for m in ms} for g, ms in meta["held_out"].items()}
+        pop_paths = meta.get("populations") or [meta["population_run"]]
+        roster = build_roster([Path(p) for p in pop_paths], env)
+        return [
+            (f"{e.generator}:{int(e.member)}:{e.role}", e.params, e.policy_cls)
+            for e in roster
+            if int(e.member) in held.get(e.generator, set()) and e.role in ("self", "conf")
+        ]
 
     from oaht_bench.common.save_load_utils import load_train_run
     from oaht_bench.configs import load_job
+    from oaht_bench.population import artifact_dir, population_from_run, released_members
+    from oaht_bench.population.members import get_member_params
+
+    pop_run = Path(meta["population_run"])
+    run_dir = pop_run.parent.parent if pop_run.name == "saved_train_run" else pop_run
+    gen_job = load_job(run_dir / "job.json")
+    loaded = population_from_run(gen_job, load_train_run(str(artifact_dir(run_dir))), env)
+    return [
+        (int(m), get_member_params(loaded.params, int(m)), loaded.policy_cls)
+        for m in released_members(gen_job, loaded.pop_size)
+    ]
+
+
+def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, action_dim, logger):
+    """Roll the trained policy against its teammates and report per-teammate return.
+
+    Against the **held-out** test teammates when the dataset carries a train/test
+    split (§8) -- the generalisation test the benchmark exists for -- or, for legacy
+    split-less datasets, the collection population (in-distribution). See
+    :func:`_teammate_policies`.
+    """
+    import jax
+
     from oaht_bench.envs import make_env
     from oaht_bench.envs.log_wrapper import LogWrapper
     from oaht_bench.models.bc_agent import BcAgent
@@ -196,16 +237,16 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
     from oaht_bench.models.meliba_agent import MelibaAgent
     from oaht_bench.models.omis_agent import OmisAgent
     from oaht_bench.models.tao_agent import TaoAgent
-    from oaht_bench.offline.evaluate import dataset_target_return, evaluate_agent
-    from oaht_bench.population import artifact_dir, population_from_run, released_members
+    from oaht_bench.offline.evaluate import dataset_target_return, evaluate_agent_against
 
     cfg = job.offline
-    pop_run = Path(batch.meta["population_run"])
-    run_dir = pop_run.parent.parent if pop_run.name == "saved_train_run" else pop_run
-    gen_job = load_job(run_dir / "job.json")
     env = LogWrapper(make_env(job.env.env_name, job.env.env_kwargs()))
-    loaded = population_from_run(gen_job, load_train_run(str(artifact_dir(run_dir))), env)
-    members = released_members(gen_job, loaded.pop_size)
+    teammates = _teammate_policies(batch, env)
+    if not teammates:
+        raise ValueError(
+            "no teammate policies resolved for evaluation -- the held-out set is "
+            "empty. Check the dataset's 'held_out' meta and its populations."
+        )
 
     resolved = _resolve_dims(cfg, windows.obs_dim, action_dim)
     params = {"stage1": stage1_params, "stage2": stage2_params}
@@ -230,19 +271,18 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
         normalization=windows.norm,
     )
     agent.build_model()
-    scores = evaluate_agent(
+    scores = evaluate_agent_against(
         agent,
         params,
         env,
-        loaded,
-        members,
+        teammates,
         rng=jax.random.PRNGKey(job.seed + 1),
         target_return=cond_target,
         max_episode_steps=job.env.rollout_length,
         num_episodes=job.offline.eval_episodes,
     )
-    for m, v in scores.per_teammate.items():
-        logger.log_item(f"Eval/Return_teammate_{m}", v)
+    for label, v in scores.per_teammate.items():
+        logger.log_item(f"Eval/Return_teammate_{label}", v)
     logger.log_item("Eval/MeanReturn", scores.mean_return)
     logger.log_item("Eval/WorstTeammateReturn", scores.worst_teammate_return)
     logger.commit()

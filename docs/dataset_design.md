@@ -150,3 +150,57 @@ collectors (per the runner comment). New pieces, in dependency order:
 - **Filtering (§4.4)** — return-quantile filtering stays relevant (it is what the
   merged `%BC` baseline already does); the *learning-curve* filtering rationale is
   gone with ICRL.
+
+## 5. Train/test teammate split and held-out evaluation (§8)
+
+The benchmark's objective is generalisation to *unseen* teammates: the offline
+learner trains on rollouts against **train** teammates and is evaluated online
+against **test** teammates it never saw during collection. Without this, a falling
+BC loss and even a rollout return only measure in-distribution coordination — the
+one thing ad-hoc teamwork is *not* about. The split makes the held-out test real and
+mechanical rather than a documented aspiration.
+
+### The split (`dataset.construction.split`)
+
+- **Unit: a released member `(generator, member)`.** `holdout_per_generator` members
+  of each generator (default **2**) go to test; the rest are train. Because
+  `released_members` already collapses FCP to one converged checkpoint per run, the
+  roster has `population_size` distinct members per generator and there is **no
+  checkpoint-sibling leakage** to reason about. A paired generator's `conf` and `br`
+  share a `member`, so holding out a member removes **both roles** — *whole member,
+  both seats*: a test policy never appears as ego or teammate in training.
+- **Canonical and deterministic.** The split is a pure function of `(roster,
+  split_seed, holdout_per_generator)`, so every variant (`expert` / `mixed` /
+  `br_vs_worst`) collected with the same parameters shares **one** held-out set — by
+  construction, not a shared file. It is derived *inside* collection, not by a
+  separate script; the manifest it writes (`teammate_split.json` in the collection
+  run dir, plus `split_manifest_hash` / `held_out` / `test_teammates` in the dataset
+  meta) is for provenance and carries a **roster fingerprint** so a re-released
+  population that would silently change the held-out set is caught.
+- **Enforcement.** In pooled mode the ε sampler is restricted to the train
+  sub-roster (`plan_seatings(..., allowed=train_indices)`, indices kept in
+  full-roster space); single mode restricts its eligible members. The invariant
+  `train ∩ test = ∅`, in either seat, is pinned by
+  `tests/unit/dataset/test_teammate_split.py` and checked against the actually
+  collected episodes.
+
+### Held-out evaluation (`offline.runner._evaluate`)
+
+After training, the ego is rolled online against the **test** teammates — the
+`held_out` members in their *teammate* role (`self`/`conf`; a `br` is a designed
+ego, never a partner), across all pooled generators, each with its own policy class
+(`evaluate.evaluate_agent_against`). Reported per teammate plus **mean** and
+**worst-teammate** return (an average hides the failure mode: fine with training-like
+partners, bad with the rest). Datasets collected before the split (no `held_out` in
+meta) fall back to in-distribution rollouts against the collection population, or skip
+if there is nothing to play against — recorded as a skip with a reason, not a null.
+
+Config: `holdout_per_generator` (default 2) and `split_seed` on
+`DatasetCollectionJob`. Setting `holdout_per_generator=0` disables the split (train on
+all members) — an ablation, not the AHT protocol.
+
+### Now implemented, was deferred
+
+The self-pairing decision (§4) is exposed as the `allow_self_pairing` knob; held-out
+evaluation, previously the aspirational "§8", is the protocol above. Still open: the
+τ competence ladder and its snapshotting, and the storage-budget/regeneration policy.
