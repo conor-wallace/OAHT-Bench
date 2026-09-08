@@ -29,6 +29,7 @@ deterministic in the same population order) and seats index ``ego`` against inde
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -173,6 +174,7 @@ def plan_seatings(
     rng: np.random.Generator,
     teammate_roles: tuple[str, ...] = DEFAULT_TEAMMATE_ROLES,
     allow_self_pairing: bool = True,
+    allowed: Sequence[int] | None = None,
 ) -> list[Seating]:
     """Realise a target ε distribution as ``num_episodes`` concrete seatings.
 
@@ -189,12 +191,29 @@ def plan_seatings(
     self-pairing decision left open in ``docs/dataset_design.md`` §4, exposed as a
     knob rather than hard-coded.
 
+    ``allowed`` restricts *both* seats to a subset of roster indices -- the train
+    partition of a :class:`~oaht_bench.dataset.construction.split.TeammateSplit`.
+    Held-out (test) teammates are then never drawn as teammate *or* ego, which is the
+    ad-hoc-teamwork invariant the split exists to enforce. Indices stay in the full
+    roster space, so a caller still seats ``roster[seating.ego]`` unchanged. ``None``
+    (the default) allows every roster entry.
+
     Returns the seatings interleaved, so slicing the dataset by index does not
     hand back a single band.
     """
+    allowed_set = None if allowed is None else set(int(i) for i in allowed)
+
     teammates = pooled.teammate_pool(teammate_roles)
+    if allowed_set is not None:
+        teammates = [j for j in teammates if j in allowed_set]
     if not teammates:
-        raise ValueError(f"no roster policy has a teammate role in {teammate_roles}.")
+        raise ValueError(
+            f"no roster policy has a teammate role in {teammate_roles}"
+            f"{' within the train split' if allowed_set is not None else ''}."
+        )
+    ego_pool = np.array(
+        sorted(allowed_set) if allowed_set is not None else range(pooled.size)
+    )
 
     plan: list[Seating] = []
     for level, count in _band_counts(targets, num_episodes):
@@ -203,7 +222,7 @@ def plan_seatings(
             # Egos eligible to respond to this teammate. Only the exact same
             # roster entry is ever excluded as "self"; a paired generator's
             # conf_j and br_j are distinct entries, so br_j stays available.
-            egos = np.arange(pooled.size)
+            egos = ego_pool
             if not allow_self_pairing:
                 egos = egos[egos != j]
             ego = int(egos[np.argmin(np.abs(col[egos] - level))])

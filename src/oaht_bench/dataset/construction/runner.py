@@ -21,6 +21,7 @@ from oaht_bench.configs import load_job, save_job
 from oaht_bench.configs.job import DatasetCollectionJob
 from oaht_bench.dataset.construction.collect import collect_episode
 from oaht_bench.dataset.construction.epsilon_sampler import EPSILON_TARGETS, load_pooled, plan_for_variant
+from oaht_bench.dataset.construction.split import derive_split
 from oaht_bench.dataset.schema import Episode
 from oaht_bench.dataset.vault import write_vault
 from oaht_bench.envs import make_env
@@ -172,11 +173,32 @@ def _collect_single(job: DatasetCollectionJob, env) -> tuple[list[Episode], np.n
             f"the competence ladder (§4.3), not yet saved."
         )
 
+    # Hold out `holdout_per_generator` members as test teammates (§8) and seat only
+    # the train members, exactly as pooled mode does -- here the single generator is
+    # the whole roster. Deterministic in (members, split_seed, holdout_per_generator).
+    gen_name = gen_job.generator.generator
+    identities = [(gen_name, int(m), "member") for m in eligible]
+    split = derive_split(
+        identities,
+        env=job.env.name,
+        split_seed=job.split_seed,
+        holdout_per_generator=job.holdout_per_generator,
+    )
+    manifest_path = Path(job.run_dir()) / "teammate_split.json"
+    manifest_path.write_text(json.dumps(split.to_dict(), indent=2) + "\n")
+    train_members = [int(eligible[i]) for i in split.train_indices]
+    if len(train_members) < 2 and job.mismatch_fraction:
+        raise ValueError(
+            f"after holding out {job.holdout_per_generator} of {len(eligible)} "
+            f"members, only {len(train_members)} train members remain, too few for "
+            f"mismatch_fraction={job.mismatch_fraction}. Lower holdout_per_generator."
+        )
+
     rng = jax.random.PRNGKey(job.seed)
     # The seating plan is decided up front so the matched/mismatched split is
     # exact rather than sampled, and so every teammate gets equal coverage.
     plan = _seat_plan(
-        [int(m) for m in eligible], job.num_episodes, job.mismatch_fraction,
+        train_members, job.num_episodes, job.mismatch_fraction,
         np.random.default_rng(job.seed),
     )
     episodes, member_ids = [], []
@@ -216,7 +238,16 @@ def _collect_single(job: DatasetCollectionJob, env) -> tuple[list[Episode], np.n
         "mismatch_fraction": job.mismatch_fraction,
         "population_run": str(job.population_path),
         "population_config_hash": gen_job.content_hash(),
-        "eligible_members": [int(m) for m in eligible],
+        # Train members only: the held-out (test) ones are excluded from collection.
+        "eligible_members": train_members,
+        "split_seed": job.split_seed,
+        "holdout_per_generator": job.holdout_per_generator,
+        "split_manifest_hash": split.manifest_hash,
+        "held_out": {g: sorted(ms) for g, ms in split.held_out.items()},
+        "test_teammates": [
+            {"generator": gen_name, "member": int(eligible[i]), "role": "member"}
+            for i in split.test_indices
+        ],
     }
     return episodes, np.stack(member_ids), meta
 
@@ -270,12 +301,28 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[list[Episode], np.n
     # reordered roster -- otherwise a stale matrix silently seats the wrong pair.
     pooled.check_roster(roster)
 
+    # Ad-hoc-teamwork train/test split (§8): hold out `holdout_per_generator`
+    # members of each generator as *test* teammates and restrict this collection
+    # to the train partition, so test teammates never enter the training data in
+    # either seat. Deterministic in (roster, split_seed, holdout_per_generator),
+    # so every variant collected with the same values shares one held-out set.
+    identities = [(e.generator, int(e.member), e.role) for e in roster]
+    split = derive_split(
+        identities,
+        env=job.env.name,
+        split_seed=job.split_seed,
+        holdout_per_generator=job.holdout_per_generator,
+    )
+    manifest_path = Path(job.run_dir()) / "teammate_split.json"
+    manifest_path.write_text(json.dumps(split.to_dict(), indent=2) + "\n")
+
     plan = plan_for_variant(
         pooled,
         job.variant,
         job.num_episodes,
         rng=np.random.default_rng(job.seed),
         allow_self_pairing=job.allow_self_pairing,
+        allowed=split.train_indices,
     )
     num_seats = len(env.agents)
 
@@ -312,6 +359,16 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[list[Episode], np.n
         "pooled_matrix_path": str(job.pooled_matrix_path),
         "pooled_matrix_hash": _pooled_matrix_hash(job.pooled_matrix_path),
         "allow_self_pairing": job.allow_self_pairing,
+        # Train/test teammate split (§8). test_teammates are the held-out policies
+        # online evaluation rolls the trained ego against; they never appear below.
+        "split_seed": job.split_seed,
+        "holdout_per_generator": job.holdout_per_generator,
+        "split_manifest_hash": split.manifest_hash,
+        "held_out": {g: sorted(ms) for g, ms in split.held_out.items()},
+        "test_teammates": [
+            {"generator": roster[i].generator, "member": int(roster[i].member), "role": roster[i].role}
+            for i in split.test_indices
+        ],
         # member_ids are indices into this roster manifest.
         "roster": [
             {"generator": e.generator, "member": int(e.member), "role": e.role}

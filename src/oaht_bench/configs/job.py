@@ -191,6 +191,22 @@ class DatasetCollectionJob(JobBase):
         description="TAGET-style trajectory mirroring (§4.5). Only valid when the "
         "environment has symmetric roles; validated against env.symmetric_roles.",
     )
+    holdout_per_generator: int = Field(
+        default=2,
+        ge=0,
+        description="Ad-hoc-teamwork train/test split (§8): members held out per "
+        "generator as *test* teammates, never seated in this collection. The offline "
+        "learner trains on the remaining (train) members and is evaluated online "
+        "against the held-out ones. The split is a deterministic function of "
+        "(roster, split_seed, holdout_per_generator), so every variant collected with "
+        "the same values shares one canonical held-out set. 0 disables the split "
+        "(collect against all members) — only for ablations, not the AHT protocol.",
+    )
+    split_seed: int = Field(
+        default=0,
+        description="Seed for the train/test teammate split, kept separate from "
+        "`seed` so the held-out set is stable when the collection seed changes.",
+    )
 
 
 class PooledCrossplayJob(JobBase):
