@@ -1040,6 +1040,38 @@ v1-inherited `10.0`, unswept.
   400, not the paper's `NUM_STEPS=256` — a remaining, deliberate difference (episode
   length is an env-preset decision), noted here rather than changed.
 
+### First GPU run: BRDiv Counter Circuit, `320e6` — not converged, keep training
+
+First real (H100) training on the matched backbone. A **short, deliberately
+under-budget probe** to see whether the setup learns at all before committing to
+the full `1.8e9`. Config as committed except **`total_timesteps=320e6`** (3,125
+updates at `num_envs=256`, `rollout_length=400`) and **`reward_shaping_horizon=160e6`**
+(≈half the run — 32× the paper's fixed `5e6`, so dense shaping stayed on for the
+first ~1,562 updates). `cross_play_weight=0.5`. Read from `metrics.jsonl`
+(`Train/base_return`, the sparse delivery return).
+
+**Verdict: it learns, and it has not levelled off — undertrained, not converged.**
+
+- Binned `base_return` climbs **monotonically to the last bin**: ~48 (post-warmup)
+  → ~56 (shaping fading) → **58 → 60 → 64 → 70 → 74** across the sparse-only second
+  half. End state ≈ **72 mean / 95 peak**, well under the paper's ~163 self-play
+  reference on this layout — large headroom.
+- Late slope is decelerating but still clearly positive: ~+10.6 return / 1k updates
+  over the last quarter, ~+3.7 / 1k over the last 10% (≈+5%/1k relative). Per-update
+  reads are noisy (last-200 swings 55–92); the binned means are the signal.
+- **Healthy exploration signal:** `base_return` kept *rising* after dense shaping
+  annealed to zero at update ~1,562 (54 → 74 across the sparse-only half), so the
+  policy learned the true sparse task rather than a shaping artifact — the whole
+  reason shaping was added. Separation (SP−XP) at `cross_play_weight=0.5` was not
+  read from this file and is still the open adoption gate.
+
+**Action:** train ~5× longer. The committed `total_timesteps=1.8e9` (17,578 updates,
+≈5.6×) is the right target; the mild deceleration means it may plateau somewhat
+before the full 5×, but `320e6` is nowhere near converged. Extending to `1.8e9`
+also drops the `160e6` shaping horizon to ~9% of the run (closer to the paper's
+proportion), so most of training is the pure sparse task the curve already improves
+on. Re-read separation at the higher budget before adopting.
+
 ## Not yet tuned
 
 All four on Overcooked-v1 and Hanabi still run at hyperparameters ported
