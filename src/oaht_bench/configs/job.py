@@ -379,7 +379,16 @@ class TrainingJob(JobBase):
         description="Shared sequence-model backbone (§3.1). 'iql' is the "
         "backbone-sensitivity ablation.",
     )
-    num_seeds: int = Field(default=3, gt=0)
+    num_seeds: int = Field(
+        default=3,
+        gt=0,
+        description="Independently-initialised seeds trained together, vmapped over "
+        "a leading seed axis on one device (params.pkl then carries that axis, and "
+        "held-out eval is reported as the across-seed mean +/- std). Seeds are what "
+        "make a baseline ordering trustworthy -- teammate-to-teammate variance "
+        "already swamps the small gaps between methods. Memory scales with this; on "
+        "a large model per device, run one seed per GPU instead. 1 = single seed.",
+    )
     offline: OfflineTrainingConfig = Field(default_factory=OfflineTrainingConfig)
 
 

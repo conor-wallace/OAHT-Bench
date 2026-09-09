@@ -62,6 +62,7 @@ def _job(tmp_path: Path, baseline: str, **overrides) -> TrainingJob:
         baseline=baseline,
         offline=offline,
         output_dir=str(tmp_path / "out"),
+        num_seeds=overrides.pop("num_seeds", 1),
         **overrides,
     )
 

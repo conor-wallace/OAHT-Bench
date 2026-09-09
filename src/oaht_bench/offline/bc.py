@@ -110,8 +110,8 @@ class BcTrainer(BaseAhtTrainer):
         self.agent = BcAgent(self.config)
         self.agent.build_model()
 
-    def prepare(self, dataset, logger, *, rng, np_rng) -> None:
-        super().prepare(dataset, logger, rng=rng, np_rng=np_rng)
+    def prepare(self, dataset, logger, *, rng, np_rng, num_seeds: int = 1) -> None:
+        super().prepare(dataset, logger, rng=rng, np_rng=np_rng, num_seeds=num_seeds)
         self._filtered_idx = _filter_by_return(
             self.dataset.windows, self.config.network.top_return_quantile
         )
@@ -140,16 +140,20 @@ class BcTrainer(BaseAhtTrainer):
         del stage1_params  # unused: nothing from stage 1 to condition on.
         init_batch = self._sample_batch(0)
         self.rng, k = jax.random.split(self.rng)
-        params = self.agent.network.init(
-            k,
-            init_batch["ego_rtg"],
-            init_batch["ego_obs"],
-            init_batch["ego_actions"],
-            timesteps=init_batch["timesteps"],
-            mask=init_batch["mask"],
-        )
 
-        def loss(p, b, rngs):
+        def init_one(key):
+            return self.agent.network.init(
+                key,
+                init_batch["ego_rtg"],
+                init_batch["ego_obs"],
+                init_batch["ego_actions"],
+                timesteps=init_batch["timesteps"],
+                mask=init_batch["mask"],
+            )
+
+        params = self._init_params(init_one, k)
+
+        def loss(p, b, rngs, frozen):
             return bc_loss(p, self.agent.network, b, rngs=rngs)
 
         return self._run_stage(

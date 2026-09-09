@@ -188,27 +188,32 @@ class OmisTrainer(BaseAhtTrainer):
 
     def train_stage_1(self):
         init_batch = self._sample_batch(0)
-        self.rng, k1, k2 = jax.random.split(self.rng, 3)
-        encoder_params = self.agent.encoder.init(
-            k1,
-            init_batch["ego_rtg"],
-            init_batch["ego_obs"],
-            init_batch["ego_actions"],
-            timesteps=init_batch["timesteps"],
-            mask=init_batch["mask"],
-        )
-        init_z = self.agent.encoder.apply(
-            encoder_params,
-            init_batch["ego_rtg"],
-            init_batch["ego_obs"],
-            init_batch["ego_actions"],
-            timesteps=init_batch["timesteps"],
-            mask=init_batch["mask"],
-        )
-        model_params = self.agent.model.init(k2, init_z)
-        params = {"encoder": encoder_params, "model": model_params}
+        self.rng, k = jax.random.split(self.rng)
 
-        def loss(p, b, rngs):
+        def init_one(key):
+            k1, k2 = jax.random.split(key)
+            encoder_params = self.agent.encoder.init(
+                k1,
+                init_batch["ego_rtg"],
+                init_batch["ego_obs"],
+                init_batch["ego_actions"],
+                timesteps=init_batch["timesteps"],
+                mask=init_batch["mask"],
+            )
+            init_z = self.agent.encoder.apply(
+                encoder_params,
+                init_batch["ego_rtg"],
+                init_batch["ego_obs"],
+                init_batch["ego_actions"],
+                timesteps=init_batch["timesteps"],
+                mask=init_batch["mask"],
+            )
+            model_params = self.agent.model.init(k2, init_z)
+            return {"encoder": encoder_params, "model": model_params}
+
+        params = self._init_params(init_one, k)
+
+        def loss(p, b, rngs, frozen):
             return omis_representation_loss(
                 p,
                 self.agent.encoder,
@@ -230,27 +235,36 @@ class OmisTrainer(BaseAhtTrainer):
     def train_stage_2(self, stage1_params):
         init_batch = self._sample_batch(0)
         self.rng, k = jax.random.split(self.rng)
-        init_z = self.agent.encoder.apply(
-            stage1_params["encoder"],
-            init_batch["ego_rtg"],
-            init_batch["ego_obs"],
-            init_batch["ego_actions"],
-            timesteps=init_batch["timesteps"],
-            mask=init_batch["mask"],
+        enc_for_shape = (
+            jax.tree.map(lambda x: x[0], stage1_params["encoder"])
+            if self.num_seeds > 1
+            else stage1_params["encoder"]
         )
-        actor_params = self.agent.actor.init(
-            k,
+        init_z = self.agent.encoder.apply(
+            enc_for_shape,
             init_batch["ego_rtg"],
             init_batch["ego_obs"],
             init_batch["ego_actions"],
             timesteps=init_batch["timesteps"],
-            embedding=init_z,
             mask=init_batch["mask"],
         )
 
-        def loss(p, b, rngs):
+        def init_one(key):
+            return self.agent.actor.init(
+                key,
+                init_batch["ego_rtg"],
+                init_batch["ego_obs"],
+                init_batch["ego_actions"],
+                timesteps=init_batch["timesteps"],
+                embedding=init_z,
+                mask=init_batch["mask"],
+            )
+
+        actor_params = self._init_params(init_one, k)
+
+        def loss(p, b, rngs, frozen):
             return omis_actor_loss(
-                p, self.agent.actor, self.agent.encoder, stage1_params["encoder"], b, rngs=rngs
+                p, self.agent.actor, self.agent.encoder, frozen["encoder"], b, rngs=rngs
             )
 
         return self._run_stage(
@@ -260,4 +274,5 @@ class OmisTrainer(BaseAhtTrainer):
             learning_rate=self.config.stage2_learning_rate,
             steps=self.config.stage2_steps,
             prefix="Stage2",
+            frozen=stage1_params,
         )

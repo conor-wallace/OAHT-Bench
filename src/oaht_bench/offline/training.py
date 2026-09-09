@@ -38,27 +38,79 @@ def get_optimizer(cfg, learning_rate: float, total_steps: int):
     )
 
 
-def train(loss_fn, params, batches, *, optimizer, steps, rng, logger, prefix, log_every):
+def train(
+    loss_fn,
+    params,
+    batches,
+    *,
+    optimizer,
+    steps,
+    rng,
+    logger,
+    prefix,
+    log_every,
+    num_seeds: int = 1,
+    frozen=None,
+):
     """Run one stage, returning the trained parameters.
 
+    ``loss_fn(params, batch, rngs, frozen)`` -- ``frozen`` is a per-seed pytree the
+    loss reads but does not update (a frozen stage-1 representation for the methods
+    that keep it out of ``params``), or ``None``.
+
     ``batches`` is a callable taking a step index and returning a batch, so the
-    sampler is re-invoked every step -- TAO's batches are structured (positives
-    per anchor, a GetOffD context per window) and cannot be precomputed once.
+    sampler is re-invoked every step -- TAO's batches are structured (positives per
+    anchor, a GetOffD context per window) and cannot be precomputed once.
+
+    With ``num_seeds > 1`` the update is vmapped over a leading seed axis: ``params``,
+    ``opt_state``, the per-step batch and ``frozen`` all carry ``(num_seeds, ...)``,
+    so N independently-initialised seeds train in parallel on one device and each aux
+    metric is logged as its mean and std over seeds. ``num_seeds == 1`` is the
+    original single-seed loop, byte-for-byte (no seed axis on the returned params).
     """
 
-    opt_state = optimizer.init(params)
+    if num_seeds == 1:
+        opt_state = optimizer.init(params)
+
+        @jax.jit
+        def step(params, opt_state, batch, key):
+            (_, aux), grads = jax.value_and_grad(loss_fn, has_aux=True)(
+                params, batch, {"dropout": key}, frozen
+            )
+            updates, opt_state = optimizer.update(grads, opt_state, params)
+            return optax.apply_updates(params, updates), opt_state, aux
+
+        for i in range(steps):
+            rng, key = jax.random.split(rng)
+            params, opt_state, aux = step(params, opt_state, batches(i), key)
+            if i % log_every == 0 or i == steps - 1:
+                for name, value in aux.items():
+                    logger.log_item(f"{prefix}/{name}", float(value), train_step=i)
+                logger.commit()
+        return params
+
+    opt_state = jax.vmap(optimizer.init)(params)
+    frozen_axis = None if frozen is None else 0
 
     @jax.jit
-    def step(params, opt_state, batch, key):
-        (_, aux), grads = jax.value_and_grad(loss_fn, has_aux=True)(params, batch, {"dropout": key})
-        updates, opt_state = optimizer.update(grads, opt_state, params)
-        return optax.apply_updates(params, updates), opt_state, aux
+    def step(params, opt_state, batch, keys):
+        def one(p, o, b, k, f):
+            (_, aux), grads = jax.value_and_grad(loss_fn, has_aux=True)(p, b, {"dropout": k}, f)
+            updates, o = optimizer.update(grads, o, p)
+            return optax.apply_updates(p, updates), o, aux
+
+        return jax.vmap(one, in_axes=(0, 0, 0, 0, frozen_axis))(
+            params, opt_state, batch, keys, frozen
+        )
 
     for i in range(steps):
-        rng, key = jax.random.split(rng)
-        params, opt_state, aux = step(params, opt_state, batches(i), key)
+        rng, sub = jax.random.split(rng)
+        keys = jax.random.split(sub, num_seeds)
+        params, opt_state, aux = step(params, opt_state, batches(i), keys)
         if i % log_every == 0 or i == steps - 1:
             for name, value in aux.items():
-                logger.log_item(f"{prefix}/{name}", float(value), train_step=i)
+                v = jnp.asarray(value)  # (num_seeds,)
+                logger.log_item(f"{prefix}/{name}", float(v.mean()), train_step=i)
+                logger.log_item(f"{prefix}/{name}_std", float(v.std()), train_step=i)
             logger.commit()
     return params

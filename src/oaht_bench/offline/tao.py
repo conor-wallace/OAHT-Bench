@@ -282,29 +282,34 @@ class TaoTrainer(BaseAhtTrainer):
 
     def train_stage_1(self):
         init_batch = self._stage1_batch(0)
-        self.rng, k1, k2 = jax.random.split(self.rng, 3)
-        encoder_params = self.agent.encoder.init(
-            k1,
-            init_batch["mate_next_obs"],
-            init_batch["mate_actions"],
-            init_batch["mate_rewards"],
-            mask=init_batch["mask"],
-            timesteps=init_batch["timesteps"],
-        )
-        init_tokens = self.agent.encoder.apply(
-            encoder_params,
-            init_batch["mate_next_obs"],
-            init_batch["mate_actions"],
-            init_batch["mate_rewards"],
-            mask=init_batch["mask"],
-            timesteps=init_batch["timesteps"],
-        )
-        decoder_params = self.agent.decoder.init(
-            k2, init_batch["cross_mate_obs"], OpponentPolicyEncoder.pool(init_tokens)
-        )
-        params = {"encoder": encoder_params, "decoder": decoder_params}
+        self.rng, k = jax.random.split(self.rng)
 
-        def loss(p, b, rngs):
+        def init_one(key):
+            k1, k2 = jax.random.split(key)
+            encoder_params = self.agent.encoder.init(
+                k1,
+                init_batch["mate_next_obs"],
+                init_batch["mate_actions"],
+                init_batch["mate_rewards"],
+                mask=init_batch["mask"],
+                timesteps=init_batch["timesteps"],
+            )
+            init_tokens = self.agent.encoder.apply(
+                encoder_params,
+                init_batch["mate_next_obs"],
+                init_batch["mate_actions"],
+                init_batch["mate_rewards"],
+                mask=init_batch["mask"],
+                timesteps=init_batch["timesteps"],
+            )
+            decoder_params = self.agent.decoder.init(
+                k2, init_batch["cross_mate_obs"], OpponentPolicyEncoder.pool(init_tokens)
+            )
+            return {"encoder": encoder_params, "decoder": decoder_params}
+
+        params = self._init_params(init_one, k)
+
+        def loss(p, b, rngs, frozen):
             return embedding_loss(
                 p,
                 self.agent.encoder,
@@ -327,29 +332,39 @@ class TaoTrainer(BaseAhtTrainer):
     def train_stage_2(self, stage1_params):
         init_batch = self._stage2_batch(0)
         self.rng, k = jax.random.split(self.rng)
+        enc_for_shape = (
+            jax.tree.map(lambda x: x[0], stage1_params["encoder"])
+            if self.num_seeds > 1
+            else stage1_params["encoder"]
+        )
         init_context = self.agent.encoder.apply(
-            stage1_params["encoder"],
+            enc_for_shape,
             init_batch["context_mate_next_obs"],
             init_batch["context_mate_actions"],
             init_batch["context_mate_rewards"],
             mask=init_batch["context_mask"],
             timesteps=init_batch["context_timesteps"],
         )
-        policy_params = self.agent.network.init(
-            k,
-            init_batch["ego_rtg"],
-            init_batch["ego_obs"],
-            init_batch["ego_actions"],
-            timesteps=init_batch["timesteps"],
-            context=init_context,
-            mask=init_batch["mask"],
-            context_mask=init_batch["context_mask"],
-        )
+
+        def init_one(key):
+            return self.agent.network.init(
+                key,
+                init_batch["ego_rtg"],
+                init_batch["ego_obs"],
+                init_batch["ego_actions"],
+                timesteps=init_batch["timesteps"],
+                context=init_context,
+                mask=init_batch["mask"],
+                context_mask=init_batch["context_mask"],
+            )
+
+        policy_params = self._init_params(init_one, k)
         # The encoder rides in the parameter tree so freeze_encoder can stop the
-        # gradient at its output without removing it (see tao_policy_loss).
+        # gradient at its output without removing it (see tao_policy_loss). It keeps
+        # the stage-1 seed axis, so under multi-seed each seed carries its own encoder.
         params = {"policy": policy_params, "encoder": stage1_params["encoder"]}
 
-        def loss(p, b, rngs):
+        def loss(p, b, rngs, frozen):
             return tao_policy_loss(
                 p,
                 self.agent.network,
@@ -374,6 +389,15 @@ class TaoTrainer(BaseAhtTrainer):
         return {**trained, "context": context, "context_mask": context_mask}
 
     def _deployment_context(self, encoder_params):
+        """Deployment context, seed-aware: with a stage-1 seed axis on
+        ``encoder_params`` this vmaps to a per-seed context (and tiles the mask to
+        the same axis), so the whole parameter tree stays uniformly seed-indexed and
+        evaluation can slice one seed at a time."""
+        if getattr(self, "num_seeds", 1) > 1:
+            return jax.vmap(self._deployment_context_one)(encoder_params)
+        return self._deployment_context_one(encoder_params)
+
+    def _deployment_context_one(self, encoder_params):
         """The C-trajectory Opponent Context Window, encoded from the dataset."""
         c = self.config.context_trajectories
         hidden = self.config.network.hidden_dim

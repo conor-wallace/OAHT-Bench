@@ -210,31 +210,36 @@ class MelibaTrainer(BaseAhtTrainer):
 
     def train_stage_1(self):
         init_batch = self._sample_batch(0)
-        self.rng, k1, k2 = jax.random.split(self.rng, 3)
-        encoder_params = self.agent.encoder.init(
-            k1,
-            init_batch["ego_rtg"],
-            init_batch["ego_obs"],
-            init_batch["ego_actions"],
-            timesteps=init_batch["timesteps"],
-            mask=init_batch["mask"],
-        )
-        char_mean, _, mental_mean, _ = self.agent.encoder.apply(
-            encoder_params,
-            init_batch["ego_rtg"],
-            init_batch["ego_obs"],
-            init_batch["ego_actions"],
-            timesteps=init_batch["timesteps"],
-            mask=init_batch["mask"],
-        )
-        # The decoder reads the two latent samples concatenated; means stand in
-        # for a sample at init, where only shapes matter.
-        decoder_params = self.agent.decoder.init(
-            k2, jnp.concatenate([char_mean, mental_mean], axis=-1)
-        )
-        params = {"encoder": encoder_params, "decoder": decoder_params}
+        self.rng, k = jax.random.split(self.rng)
 
-        def loss(p, b, rngs):
+        def init_one(key):
+            k1, k2 = jax.random.split(key)
+            encoder_params = self.agent.encoder.init(
+                k1,
+                init_batch["ego_rtg"],
+                init_batch["ego_obs"],
+                init_batch["ego_actions"],
+                timesteps=init_batch["timesteps"],
+                mask=init_batch["mask"],
+            )
+            char_mean, _, mental_mean, _ = self.agent.encoder.apply(
+                encoder_params,
+                init_batch["ego_rtg"],
+                init_batch["ego_obs"],
+                init_batch["ego_actions"],
+                timesteps=init_batch["timesteps"],
+                mask=init_batch["mask"],
+            )
+            # The decoder reads the two latent samples concatenated; means stand in
+            # for a sample at init, where only shapes matter.
+            decoder_params = self.agent.decoder.init(
+                k2, jnp.concatenate([char_mean, mental_mean], axis=-1)
+            )
+            return {"encoder": encoder_params, "decoder": decoder_params}
+
+        params = self._init_params(init_one, k)
+
+        def loss(p, b, rngs, frozen):
             return meliba_reconstruction_loss(
                 p,
                 self.agent.encoder,
@@ -256,20 +261,29 @@ class MelibaTrainer(BaseAhtTrainer):
     def train_stage_2(self, stage1_params):
         init_batch = self._sample_batch(0)
         self.rng, k = jax.random.split(self.rng)
-        belief = meliba_belief(self.agent.encoder, stage1_params["encoder"], init_batch)
-        policy_params = self.agent.network.init(
-            k,
-            init_batch["ego_rtg"],
-            init_batch["ego_obs"],
-            init_batch["ego_actions"],
-            timesteps=init_batch["timesteps"],
-            belief=belief,
-            mask=init_batch["mask"],
+        enc_for_shape = (
+            jax.tree.map(lambda x: x[0], stage1_params["encoder"])
+            if self.num_seeds > 1
+            else stage1_params["encoder"]
         )
+        belief = meliba_belief(self.agent.encoder, enc_for_shape, init_batch)
 
-        def loss(p, b, rngs):
+        def init_one(key):
+            return self.agent.network.init(
+                key,
+                init_batch["ego_rtg"],
+                init_batch["ego_obs"],
+                init_batch["ego_actions"],
+                timesteps=init_batch["timesteps"],
+                belief=belief,
+                mask=init_batch["mask"],
+            )
+
+        policy_params = self._init_params(init_one, k)
+
+        def loss(p, b, rngs, frozen):
             return meliba_policy_loss(
-                p, self.agent.network, self.agent.encoder, stage1_params["encoder"], b, rngs=rngs
+                p, self.agent.network, self.agent.encoder, frozen["encoder"], b, rngs=rngs
             )
 
         return self._run_stage(
@@ -279,4 +293,5 @@ class MelibaTrainer(BaseAhtTrainer):
             learning_rate=self.config.stage2_learning_rate,
             steps=self.config.stage2_steps,
             prefix="Stage2",
+            frozen=stage1_params,
         )

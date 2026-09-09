@@ -105,7 +105,7 @@ def run(job: TrainingJob) -> Path:
         resolved = _resolve_dims(cfg, dataset.obs_dim, action_dim)
         trainer = get_trainer(resolved)(resolved)
         trainer.build_model()
-        trainer.prepare(dataset, logger, rng=rng, np_rng=np_rng)
+        trainer.prepare(dataset, logger, rng=rng, np_rng=np_rng, num_seeds=job.num_seeds)
 
         log.info("stage 1: %d steps", cfg.stage1_steps)
         stage1_params = trainer.train_stage_1()
@@ -162,14 +162,7 @@ def run(job: TrainingJob) -> Path:
                         "stage1_steps": cfg.stage1_steps,
                         "stage2_steps": cfg.stage2_steps,
                         "eval_skipped": eval_skipped,
-                        "eval": None
-                        if eval_scores is None
-                        else {
-                            "mean_return": eval_scores.mean_return,
-                            "worst_teammate_return": eval_scores.worst_teammate_return,
-                            "per_teammate": eval_scores.per_teammate,
-                            "target_return": eval_scores.target_return,
-                        },
+                        "eval": eval_scores,
                     },
                     indent=2,
                 )
@@ -249,7 +242,7 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
         )
 
     resolved = _resolve_dims(cfg, windows.obs_dim, action_dim)
-    params = {"stage1": stage1_params, "stage2": stage2_params}
+    all_params = {"stage1": stage1_params, "stage2": stage2_params}
     target = dataset_target_return(batch)
     cond_target = target if windows.norm is None else windows.norm.apply_rtg(target)
 
@@ -271,20 +264,56 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
         normalization=windows.norm,
     )
     agent.build_model()
-    scores = evaluate_agent_against(
-        agent,
-        params,
-        env,
-        teammates,
-        rng=jax.random.PRNGKey(job.seed + 1),
-        target_return=cond_target,
-        max_episode_steps=job.env.rollout_length,
-        num_episodes=job.offline.eval_episodes,
-    )
-    for label, v in scores.per_teammate.items():
+
+    # One EvalScores per trained seed. With num_seeds > 1 the parameter trees carry
+    # a leading seed axis, so each seed is a slice; the held-out returns are then
+    # reported as the across-seed mean (and std), which is the significance a single
+    # seed cannot give -- teammate-to-teammate variance already swamps the ~0.03
+    # gaps between baselines, so seeds are what make an ordering trustworthy.
+    ns = int(job.num_seeds)
+    per_seed = []
+    for s in range(ns):
+        params = all_params if ns == 1 else jax.tree.map(lambda x: x[s], all_params)  # noqa: B023
+        per_seed.append(
+            evaluate_agent_against(
+                agent,
+                params,
+                env,
+                teammates,
+                rng=jax.random.PRNGKey(job.seed + 1 + s),
+                target_return=cond_target,
+                max_episode_steps=job.env.rollout_length,
+                num_episodes=job.offline.eval_episodes,
+            )
+        )
+
+    import numpy as np
+
+    labels = list(per_seed[0].per_teammate)
+    per_teammate = {t: float(np.mean([sc.per_teammate[t] for sc in per_seed])) for t in labels}
+    seed_means = [sc.mean_return for sc in per_seed]
+    result = {
+        "num_seeds": ns,
+        "target_return": float(cond_target),
+        "mean_return": float(np.mean(seed_means)),
+        "mean_return_std": float(np.std(seed_means)) if ns > 1 else 0.0,
+        "worst_teammate_return": float(min(per_teammate.values())),
+        "per_teammate": per_teammate,
+    }
+    if ns > 1:
+        result["per_seed_mean_return"] = [float(m) for m in seed_means]
+
+    for label, v in per_teammate.items():
         logger.log_item(f"Eval/Return_teammate_{label}", v)
-    logger.log_item("Eval/MeanReturn", scores.mean_return)
-    logger.log_item("Eval/WorstTeammateReturn", scores.worst_teammate_return)
+    logger.log_item("Eval/MeanReturn", result["mean_return"])
+    if ns > 1:
+        logger.log_item("Eval/MeanReturnStd", result["mean_return_std"])
+    logger.log_item("Eval/WorstTeammateReturn", result["worst_teammate_return"])
     logger.commit()
-    log.info("Evaluation:\n%s", scores.describe())
-    return scores
+    log.info(
+        "Evaluation (%d seed%s): mean %.4f%s, worst-teammate %.4f",
+        ns, "" if ns == 1 else "s", result["mean_return"],
+        "" if ns == 1 else f" ± {result['mean_return_std']:.4f}",
+        result["worst_teammate_return"],
+    )
+    return result
