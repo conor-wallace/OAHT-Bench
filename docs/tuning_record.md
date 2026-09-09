@@ -1072,6 +1072,66 @@ also drops the `160e6` shaping horizon to ~9% of the run (closer to the paper's
 proportion), so most of training is the pure sparse task the curve already improves
 on. Re-read separation at the higher budget before adopting.
 
+### Full-budget run: BRDiv Counter Circuit, `1.8e9` — converged, competent *and* diverse
+
+The full committed budget (`total_timesteps=1.8e9`, `num_envs=256`, 17,578 updates,
+`cross_play_weight=0.5`), H100, ~3 days. **This is the run the probe above pointed to,
+and it lands the paper-matching.**
+
+**Converged.** `base_return` (sparse task) climbs monotonically and flattens: by
+decile ~36 → 56 → 65 → 76 → 89 → 97 → 96 → **99**, peak 130; last-quarter slope
+−0.04/1k (flat). Mostly converged by ~70% of the budget, so a shorter run would have
+sufficed — but it is genuinely plateaued.
+
+**Both failure modes of the pre-paper run are gone.** The final scored population:
+
+| metric | this run (`1.8e9`, matched) | pre-paper-match (`§ above`) |
+|---|---:|---:|
+| SelfPlay | **87.0** | 28.0 |
+| CrossPlay | **0.05** | 26.55 |
+| Separation (SP−XP) | **86.95** | 1.45 |
+
+The old run was *both* incompetent (SP 28) *and* homogeneous (XP≈SP → separation ~1.4,
+no real diversity). This one is competent (SP 87) *and* genuinely diverse (members
+coordinate with themselves but essentially not with each other, XP 0.05). BRDiv's
+best-response-diversity objective is now actually satisfied — which validates the
+CNN+GRU + annealed shaping + Table-4 backbone as the fix.
+
+**What this still cannot conclude:**
+
+- **SP 87 is well below the paper's ~163 single-policy self-play**, and the run peaked
+  at 130 before settling to 99 — the signature of the diversity/competence tradeoff:
+  `cross_play_weight=0.5` pushes members apart and pulls individual self-play down.
+- **XP ≈ 0 may be *too* diverse.** Separation is still the unvalidated proxy (Known-open):
+  the real objective is downstream ego generalization, unmeasurable until `ppo_br` is
+  absorbed. A maximally-incompatible population (XP~0) maximises separation but could be
+  a *worse* ego-training set than a moderately-diverse one (the ego never sees mutually
+  coordinatable partners). **Do not treat `cross_play_weight=0.5` as adopted** — sweep it
+  lower (0.1, 0.3) to see whether a little separation buys back a lot of SP, and validate
+  against downstream ego return, not separation, before adopting.
+
+### Correction: the SP-87 run trained on *inverted* shaping (a bug, since fixed)
+
+A later BRDiv run at the reference budget (`3e7`, ~229 updates, matching ICRL4AHT's
+`train_brdiv_overcooked_v2.py`) collapsed to a do-nothing policy — `base_return` stuck at
+the random floor, `Train/shaped_reward` a flat 0. The cause was a real bug: `brdiv.py`
+folded the annealed shaped reward into the reward **before** the conf/br diversity
+transform (`_compute_rewards`), so in the ~80% of pairings that are cross-play the
+`lambda x: -x` **negated the shaping** — the sub-tasks it exists to teach (pot placement,
+dish pickup) were *punished*, driving the policy to never act. A random policy triggers
+shaping (~6 reward over 600 steps in a standalone check); the trained policy triggered
+none. Fixed by adding shaping **after** the transform, as an always-positive skill bonus
+(only the sparse task return carries the diversity `+/-`). BRDiv-only: L-BRDiv/CoMeDi
+apply diversity via loss weighting, not a reward-sign flip, so they don't share it (though
+whether their loss weighting has an analogous effect on shaped advantages is unverified).
+
+**This reframes the SP-87 result above.** That run reached SP 87 *despite* the inverted
+shaping — it used stronger, longer shaping (`horizon=160e6`), higher LR (`5e-4`), and 60×
+the budget, enough to grind through the adverse gradient. So SP 87 is not a clean
+paper-matched result; it is what brute force bought around a bug. **Re-run at the reference
+budget with the fix before trusting any Overcooked-v2 BRDiv number** — competence should
+now come from the shaping doing its job, not from budget.
+
 ## Not yet tuned
 
 All four on Overcooked-v1 and Hanabi still run at hyperparameters ported

@@ -34,7 +34,7 @@ from oaht_bench.common.plot_utils import get_metric_names
 from oaht_bench.common.run_episodes import run_episodes
 from oaht_bench.common.save_load_utils import save_train_run
 from oaht_bench.common.logging import RunLogger, log_update_metrics, nonfatal
-from oaht_bench.teammate_gen.marl.reward_shaping import add_shaped_reward
+from oaht_bench.teammate_gen.marl.reward_shaping import shaping_coef
 from oaht_bench.configs.job import TeammateGenerationJob
 from oaht_bench.population.loading import TrainOutput, get_brdiv_population
 from oaht_bench.envs.protocols import TrainingEnv
@@ -303,15 +303,6 @@ def train_brdiv_partners(
                 obs_next, env_state_next, reward, done, info = jax.vmap(env.step, in_axes=(0,0,0))(
                     step_rngs, env_state, env_act
                 )
-                # Overcooked-v2: fold the annealed shaped reward into the base reward
-                # BEFORE BRDiv's conf/br reward transformation below. No-op when
-                # horizon==0 or the env surfaces no shaped_reward. update_steps is
-                # constant within the rollout.
-                reward = add_shaped_reward(
-                    reward, info, env.agents,
-                    horizon=config.ppo.reward_shaping_horizon,
-                    global_env_step=update_steps * config.rollout_length * config.num_envs,
-                )
                 # note that num_actors = num_envs * num_agents
                 info_0 = jax.tree.map(lambda x: x[:, 0], info)
                 info_1 = jax.tree.map(lambda x: x[:, 1], info)
@@ -327,6 +318,23 @@ def train_brdiv_partners(
 
                 agent_0_rews = jax.vmap(_compute_rewards)(updated_conf_onehot_ids, updated_br_onehot_ids, reward["agent_1"])
                 agent_1_rews = jax.vmap(_compute_rewards)(updated_conf_onehot_ids, updated_br_onehot_ids, reward["agent_0"])
+                # Overcooked-v2: add the annealed shaped reward AFTER the conf/br
+                # diversity transform, as an always-positive skill bonus. Folding it
+                # BEFORE (as this once did) meant `_compute_rewards` negated it in the
+                # ~80% of pairings that are cross-play, so the sub-tasks shaping exists
+                # to teach (pot placement, dish pickup) were *punished* and the policy
+                # collapsed to inaction. Only the sparse task return should carry the
+                # +/- that drives diversity; shaping aids skill acquisition regardless
+                # of partner. shaped[:, i] follows the same conf/br crossing as the
+                # rewards above. No-op when horizon==0 or the env surfaces no shaping.
+                if config.ppo.reward_shaping_horizon > 0 and "shaped_reward" in info:
+                    coef = shaping_coef(
+                        config.ppo.reward_shaping_horizon,
+                        update_steps * config.rollout_length * config.num_envs,
+                    )
+                    shaped = info["shaped_reward"]  # (num_envs, num_agents)
+                    agent_0_rews = agent_0_rews + coef * shaped[:, 1]
+                    agent_1_rews = agent_1_rews + coef * shaped[:, 0]
 
                 # Store agent_0 data in transition
                 transition_0 = XPTransition(
