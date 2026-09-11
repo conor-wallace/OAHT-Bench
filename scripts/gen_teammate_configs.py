@@ -301,7 +301,12 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # across a num_envs change. SP flat past 1e9; converged by 2e9 (slope
         # +0.004/1k); 5e9 bought no more competence and its separation edge is
         # unconfirmed at one seed. See docs/tuning_record.md.
-        "hanabi": dict(total_timesteps=2e9, num_envs=64, pop=POPULATION_SIZE),
+        # actor_type="rnn": Hanabi hides the agent's own hand, so a memoryless
+        # actor caps at ~3.5/25 at any budget; a recurrent actor reaches ~11.5
+        # (converges ~15-17k updates). FCP uses the plain (non-conditional-critic)
+        # recurrent actor. Budget/num_envs still the inherited values -- re-derive
+        # against the recurrent actor. See docs/tuning_record.md.
+        "hanabi": dict(total_timesteps=2e9, num_envs=64, pop=POPULATION_SIZE, actor_type="rnn"),
     },
     "comedi": {
         # Converged: 2.4e7 -> 1.92e8 at 64 envs (43,041 sequential updates --
@@ -334,8 +339,15 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # num_envs 48 -> 256 for the H100 run; total_timesteps_per_iteration
         # 2e7 -> 1.0667e8 scales with it to hold num_updates (~3,255) fixed.
         # num_minibatches=8 stays <= num_envs. Untuned depth, inherited PPO --
-        # measure and extend if still climbing. See docs/tuning_record.md.
-        "hanabi": dict(total_timesteps_per_iteration=1.0667e8, num_envs=256, pop=POPULATION_SIZE),
+        # measure and extend if still climbing. actor_type: Hanabi's hidden own
+        # hand makes a memoryless actor cap at ~3.5/25 at any budget; the recurrent
+        # conditional-critic actor reaches ~11.5. See docs/tuning_record.md.
+        "hanabi": dict(
+            total_timesteps_per_iteration=1.0667e8,
+            num_envs=256,
+            pop=POPULATION_SIZE,
+            actor_type="rnn_actor_with_conditional_critic",
+        ),
     },
     "brdiv": {
         # LBF budget quadrupled (4.5e7 -> 1.8e8 base, still x3 for n=5 pairing
@@ -366,8 +378,16 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # n=5 that is 256/n^2 = 10.2 envs/pairing, above LBF's established-safe 7.7,
         # so invariant #4 holds with margin. total_timesteps=1.0e9 holds num_updates
         # (~30,518) fixed vs the 384-env value. Untuned depth, inherited PPO --
-        # measure and extend if still climbing. See docs/tuning_record.md.
-        "hanabi": {"num_envs": 256, "total_timesteps": 1.0e9, "pop": POPULATION_SIZE},
+        # measure and extend if still climbing. actor_type: Hanabi's hidden own
+        # hand makes a memoryless actor cap at ~3.5/25 at any budget; the recurrent
+        # conditional-critic actor reaches ~11.5 (converges ~15-17k updates).
+        # See docs/tuning_record.md.
+        "hanabi": {
+            "num_envs": 256,
+            "total_timesteps": 1.0e9,
+            "pop": POPULATION_SIZE,
+            "actor_type": "rnn_actor_with_conditional_critic",
+        },
     },
     "lbrdiv": {
         # LBF budget matched to BRDiv's tuned value directly (4.5e7 -> 1.8e8
@@ -396,8 +416,16 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # n=5 that is 256/n^2 = 10.2 envs/pairing, above LBF's established-safe 7.7,
         # so invariant #4 holds with margin. total_timesteps=1.0e9 holds num_updates
         # (~30,518) fixed vs the 384-env value. Untuned depth, inherited PPO --
-        # measure and extend if still climbing. See docs/tuning_record.md.
-        "hanabi": {"num_envs": 256, "total_timesteps": 1.0e9, "pop": POPULATION_SIZE},
+        # measure and extend if still climbing. actor_type: Hanabi's hidden own
+        # hand makes a memoryless actor cap at ~3.5/25 at any budget; the recurrent
+        # conditional-critic actor reaches ~11.5 (converges ~15-17k updates).
+        # See docs/tuning_record.md.
+        "hanabi": {
+            "num_envs": 256,
+            "total_timesteps": 1.0e9,
+            "pop": POPULATION_SIZE,
+            "actor_type": "rnn_actor_with_conditional_critic",
+        },
     },
     "rpg": {
         # UNTUNED. RPG is the most expensive generator here: each outer update
@@ -451,9 +479,7 @@ def build(generator: str, preset_name: str, num_checkpoints: int = 5):
     # encoder; the GRU width is the CNN policy's own default (128). Every other
     # family keeps the MLP default (hidden_dim=64, tanh).
     network = (
-        MlpNetwork(hidden_dim=128, activation="relu")
-        if fam == "overcooked_v2"
-        else MlpNetwork()
+        MlpNetwork(hidden_dim=128, activation="relu") if fam == "overcooked_v2" else MlpNetwork()
     )
     common = dict(
         population_size=pop,
@@ -462,9 +488,9 @@ def build(generator: str, preset_name: str, num_checkpoints: int = 5):
         ppo=ppo,
         network=network,
     )
-    # Only overridden when SCALE explicitly names one (currently just FCP x
-    # overcooked_v2, for its RNN policy -- see docs/tuning_record.md). Every
-    # other (generator, family) keeps that generator's own default
+    # Only overridden when SCALE explicitly names one (the overcooked_v2 and
+    # hanabi entries, for their recurrent policies -- see docs/tuning_record.md).
+    # Every other (generator, family) keeps that generator's own default
     # (CoMeDi/BRDiv/L-BRDiv default to their conditional/double-critic actor
     # types, not "mlp"), so this must not apply a blanket default here.
     if "actor_type" in scale:

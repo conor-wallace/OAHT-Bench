@@ -20,6 +20,7 @@
       "tier": "tier1"
     },
     "generator": {
+      "actor_type": "rnn_actor_with_conditional_critic",
       "cross_play_weight": 0.05,
       "generator": "brdiv",
       "num_envs": 256,

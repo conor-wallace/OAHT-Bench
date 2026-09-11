@@ -1132,6 +1132,76 @@ paper-matched result; it is what brute force bought around a bug. **Re-run at th
 budget with the fix before trusting any Overcooked-v2 BRDiv number** — competence should
 now come from the shaping doing its job, not from budget.
 
+## BRDiv × Hanabi — the recurrent actor is the gate; the separation is (probably) the ZSC floor
+
+First converged Hanabi run for any paired generator. Hand-written config (not yet in
+`gen_teammate_configs.py`); Hanabi is otherwise untuned (see "Not yet tuned").
+
+### The memoryless plateau, and the fix
+
+On the inherited default actor (`actor_with_conditional_critic`, non-recurrent), BRDiv
+Hanabi flatlines at **~3.5 / 25** and stays there for 6× the budget — a hard capability
+ceiling, not under-training. Hanabi hides your own hand and carries coordination in the
+history of hints/plays/discards, so a memoryless policy plays a few safe cards and no more.
+Switching to **`actor_type="rnn_actor_with_conditional_critic"`** (the flat-obs GRU sibling
+of the v2 CNN+GRU actor) lifts it to **~11.5** — the single biggest change, and the Hanabi
+analogue of the v2 "wrong network" finding: partially-observable coordination needs memory.
+
+### `cross_play_weight` is not the SP lever (and is entangled with it)
+
+Dropping `cross_play_weight` 0.5 → 0.05 did **not** raise self-play — it came out slightly
+*lower* (~10 vs ~11) and slower. Two reasons: (1) the ~11 ceiling is a capability/tuning
+limit of the actor + inherited PPO, not diversity pressure, so relaxing diversity can't lift
+it; (2) `sp_weight = (1 + 2·cross_play_weight)·(n/2)` (`brdiv.py:462`), so lowering cw also
+**down-weights the self-play gradient** (`n → 0.55n` from 0.5 → 0.05). The knob sets both
+the diversity pressure and how hard the matched pair trains; it is not a clean SP dial.
+Higher SP is a PPO/architecture tuning problem, not a cw or budget one.
+
+### Budget: converges by ~15–17k updates
+
+`base_return` and the eval-SP curve both plateau by update **~15–17k**; at
+`rollout_length=128 × num_envs=1024 = 131,072` steps/update that is **~2–2.6e9 timesteps**.
+The `1e10` runs were ~4× past convergence and bought nothing (the last ~40k updates flat).
+**Adopted `total_timesteps=3e9`** (~22.9k updates) — converged with margin. Express the
+target as **~20k updates**, not raw timesteps: the schedules (LR cosine, eval cadence) key
+off `num_updates`, so changing `num_envs`/`rollout_length` re-derives the timestep count.
+
+### The converged run (`cw=0.5`, `rnn` actor, `3e9`)
+
+`rnn_actor_with_conditional_critic`, `cross_play_weight=0.5`, `num_envs=1024`,
+`rollout_length=128`, `lr=5e-4`, `num_minibatches=4`, `update_epochs=4`, `total_timesteps=3e9`:
+
+| SP | XP | separation |
+|---:|---:|---:|
+| 11.55 | 0.003 | 11.55 |
+
+Eval SP peaked 11.84 (update ~17k), settled 11.43. Competent-ish, maximally separated.
+
+### What this cannot conclude — and the check that would
+
+The separation (11.55, XP≈0) looks spectacular but **is not yet evidence BRDiv's diversity
+mechanism did anything**: in Hanabi, independently-trained self-play agents generically
+cross-play ~0 (the zero-shot-coordination problem — the reason Other-Play/OBL exist). So
+XP≈0 may be free, not earned, inflating separation relative to what the same number means on
+LBF/Overcooked. This is the sharpest instance of the "separation is an unvalidated proxy"
+known-open.
+
+**The control**: `configs/hanabi/teammate_gen/brdiv_selfplay_control.json` — the identical
+config with **`cross_play_weight=0.0`** (diversity objective off, everything else fixed).
+Train it and read `Population/CrossPlay`:
+
+- **XP_control ≈ 0** (≈ the cw=0.5 XP): removing diversity pressure didn't change cross-play,
+  so XP≈0 is the generic Hanabi ZSC floor and the 11.55 separation is mostly free. Report
+  BRDiv Hanabi as "competent-ish teammates; separation is the ZSC gap, not a BRDiv effect."
+- **XP_control ≫ 0**: without diversity pressure the independent self-play policies coordinate,
+  so `cw=0.5` genuinely drove XP to 0 → the separation is real and attributable to BRDiv.
+
+Prior from the ZSC literature is that XP_control ≈ 0 (generic), but it is untested here; the
+control settles it with one single-variable comparison. A corroborating control is an FCP
+Hanabi run (independent self-play by construction) with `actor_type="rnn"` — note the plain
+`rnn`, **not** the conditional-critic variant, which FCP cannot build (no population index to
+condition on). Competence (SP ~11.5) is the separate open lever (PPO/architecture tuning).
+
 ## Not yet tuned
 
 All four on Overcooked-v1 and Hanabi still run at hyperparameters ported
