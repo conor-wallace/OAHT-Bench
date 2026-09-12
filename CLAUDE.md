@@ -155,9 +155,21 @@ worth knowing before touching these further:
   downstream validation ever suggests it's underweighted, that's a change to
   the adoption rule, not a case for bending it after the fact case-by-case.
 
-Overcooked-v1 and Hanabi are untuned for all four generators (still on jax-aht's
-inherited hyperparameters) — Overcooked-v1 BRDiv/L-BRDiv additionally don't fit
-any GPU yet at all (see Known-open).
+Overcooked-v1 is untuned for all four generators (still on jax-aht's inherited
+hyperparameters) — Overcooked-v1 BRDiv/L-BRDiv additionally don't fit any GPU yet
+at all (see Known-open).
+
+**Hanabi now shares the recurrent-actor backbone across all four generators.**
+The four configs inherit `num_envs=1024`, budget `3e9` (~22.9k updates at
+`rollout_length=128`; per-iteration for CoMeDi), `max_grad_norm=0.5` and
+`num_minibatches=4` from BRDiv's validated converged run (SP 11.55) — so the
+budget/`num_envs` no longer "owe re-derivation against the recurrent actor," that
+is resolved for the shared backbone. Diversity knobs stay per-generator: BRDiv
+`cross_play_weight=0.5` (the validated value; was latently 0.05), CoMeDi `0.2`,
+L-BRDiv `tolerance_factor=0.1`, FCP none. Only BRDiv is convergence-validated;
+CoMeDi/L-BRDiv/FCP on Hanabi are wired but not yet run to convergence, and the
+`cross_play_weight=0` control that would tell whether the separation is a BRDiv
+effect or the generic ZSC floor is still unrun (see `docs/tuning_record.md`).
 
 **Overcooked-v2 is now matched to its source paper** (Gessler et al., ICLR 2025)
 for all four generators: annealed dense-reward shaping (`reward_shaping_horizon`),

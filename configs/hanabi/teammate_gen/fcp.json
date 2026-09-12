@@ -22,14 +22,16 @@
     "generator": {
       "actor_type": "rnn",
       "generator": "fcp",
+      "num_envs": 1024,
       "ppo": {
         "anneal_lr": true,
         "clip_eps": 0.2,
         "gamma": 0.999,
         "learning_rate": 0.0005,
+        "max_grad_norm": 0.5,
         "update_epochs": 4
       },
-      "total_timesteps": 2000000000.0
+      "total_timesteps": 3000000000.0
     },
     "job_type": "teammate_generation",
     "label": "fcp_hanabi"

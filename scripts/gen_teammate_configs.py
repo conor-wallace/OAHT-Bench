@@ -113,6 +113,7 @@ PPO: dict[str, dict[str, dict[str, Any]]] = {
             anneal_lr=True,
             gamma=0.999,
             gae_lambda=0.95,
+            max_grad_norm=0.5,
         ),
     },
     "comedi": {
@@ -136,7 +137,7 @@ PPO: dict[str, dict[str, dict[str, Any]]] = {
         "hanabi": dict(
             learning_rate=5e-4,
             update_epochs=4,
-            num_minibatches=8,
+            num_minibatches=4,
             clip_eps=0.2,
             entropy_coef=0.01,
             anneal_lr=True,
@@ -175,6 +176,7 @@ PPO: dict[str, dict[str, dict[str, Any]]] = {
             anneal_lr=True,
             gamma=0.999,
             gae_lambda=0.95,
+            max_grad_norm=0.5,
         ),
     },
     "lbrdiv": {
@@ -206,6 +208,7 @@ PPO: dict[str, dict[str, dict[str, Any]]] = {
             anneal_lr=True,
             gamma=0.999,
             gae_lambda=0.95,
+            max_grad_norm=0.5,
         ),
     },
     "rpg": {
@@ -304,9 +307,11 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # actor_type="rnn": Hanabi hides the agent's own hand, so a memoryless
         # actor caps at ~3.5/25 at any budget; a recurrent actor reaches ~11.5
         # (converges ~15-17k updates). FCP uses the plain (non-conditional-critic)
-        # recurrent actor. Budget/num_envs still the inherited values -- re-derive
-        # against the recurrent actor. See docs/tuning_record.md.
-        "hanabi": dict(total_timesteps=2e9, num_envs=64, pop=POPULATION_SIZE, actor_type="rnn"),
+        # recurrent actor. num_envs=1024, total_timesteps=3e9 (~22.9k updates at
+        # rollout_length=128) inherited from the validated BRDiv converged run so
+        # all four share the same recurrent-actor backbone/budget. See
+        # docs/tuning_record.md.
+        "hanabi": dict(total_timesteps=3e9, num_envs=1024, pop=POPULATION_SIZE, actor_type="rnn"),
     },
     "comedi": {
         # Converged: 2.4e7 -> 1.92e8 at 64 envs (43,041 sequential updates --
@@ -336,15 +341,16 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
             pop=POPULATION_SIZE,
             actor_type="cnn_rnn_actor_with_conditional_critic",
         ),
-        # num_envs 48 -> 256 for the H100 run; total_timesteps_per_iteration
-        # 2e7 -> 1.0667e8 scales with it to hold num_updates (~3,255) fixed.
-        # num_minibatches=8 stays <= num_envs. Untuned depth, inherited PPO --
-        # measure and extend if still climbing. actor_type: Hanabi's hidden own
-        # hand makes a memoryless actor cap at ~3.5/25 at any budget; the recurrent
-        # conditional-critic actor reaches ~11.5. See docs/tuning_record.md.
+        # num_envs=1024 and total_timesteps_per_iteration=3e9 (~22.9k updates per
+        # member at rollout_length=128) inherited from the validated BRDiv
+        # converged run so all four share the recurrent-actor backbone/budget;
+        # CoMeDi trains members sequentially, so this budget is per member.
+        # actor_type: Hanabi's hidden own hand makes a memoryless actor cap at
+        # ~3.5/25 at any budget; the recurrent conditional-critic actor reaches
+        # ~11.5. See docs/tuning_record.md.
         "hanabi": dict(
-            total_timesteps_per_iteration=1.0667e8,
-            num_envs=256,
+            total_timesteps_per_iteration=3e9,
+            num_envs=1024,
             pop=POPULATION_SIZE,
             actor_type="rnn_actor_with_conditional_critic",
         ),
@@ -374,17 +380,16 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
             "pop": POPULATION_SIZE,
             "actor_type": "cnn_rnn_actor_with_conditional_critic",
         },
-        # num_envs=256 for the H100 run (was _paired_scale(128, 5e8) -> 384). At
-        # n=5 that is 256/n^2 = 10.2 envs/pairing, above LBF's established-safe 7.7,
-        # so invariant #4 holds with margin. total_timesteps=1.0e9 holds num_updates
-        # (~30,518) fixed vs the 384-env value. Untuned depth, inherited PPO --
-        # measure and extend if still climbing. actor_type: Hanabi's hidden own
-        # hand makes a memoryless actor cap at ~3.5/25 at any budget; the recurrent
-        # conditional-critic actor reaches ~11.5 (converges ~15-17k updates).
-        # See docs/tuning_record.md.
+        # num_envs=1024, total_timesteps=3e9 (~22.9k updates at rollout_length=128)
+        # inherited from the validated BRDiv converged run (SP 11.55) so all four
+        # share the recurrent-actor backbone/budget. At n=5 that is 1024/n^2 = 41
+        # envs/pairing, far above LBF's established-safe 7.7, so invariant #4 holds
+        # with wide margin. actor_type: Hanabi's hidden own hand makes a memoryless
+        # actor cap at ~3.5/25 at any budget; the recurrent conditional-critic
+        # actor reaches ~11.5 (converges ~15-17k updates). See docs/tuning_record.md.
         "hanabi": {
-            "num_envs": 256,
-            "total_timesteps": 1.0e9,
+            "num_envs": 1024,
+            "total_timesteps": 3e9,
             "pop": POPULATION_SIZE,
             "actor_type": "rnn_actor_with_conditional_critic",
         },
@@ -412,17 +417,16 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
             "pop": POPULATION_SIZE,
             "actor_type": "cnn_rnn_actor_with_conditional_critic",
         },
-        # num_envs=256 for the H100 run (was _paired_scale(128, 5e8) -> 384). At
-        # n=5 that is 256/n^2 = 10.2 envs/pairing, above LBF's established-safe 7.7,
-        # so invariant #4 holds with margin. total_timesteps=1.0e9 holds num_updates
-        # (~30,518) fixed vs the 384-env value. Untuned depth, inherited PPO --
-        # measure and extend if still climbing. actor_type: Hanabi's hidden own
-        # hand makes a memoryless actor cap at ~3.5/25 at any budget; the recurrent
-        # conditional-critic actor reaches ~11.5 (converges ~15-17k updates).
-        # See docs/tuning_record.md.
+        # num_envs=1024, total_timesteps=3e9 (~22.9k updates at rollout_length=128)
+        # inherited from the validated BRDiv converged run so all four share the
+        # recurrent-actor backbone/budget. At n=5 that is 1024/n^2 = 41 envs/pairing,
+        # far above LBF's established-safe 7.7, so invariant #4 holds with wide
+        # margin. actor_type: Hanabi's hidden own hand makes a memoryless actor cap
+        # at ~3.5/25 at any budget; the recurrent conditional-critic actor reaches
+        # ~11.5 (converges ~15-17k updates). See docs/tuning_record.md.
         "hanabi": {
-            "num_envs": 256,
-            "total_timesteps": 1.0e9,
+            "num_envs": 1024,
+            "total_timesteps": 3e9,
             "pop": POPULATION_SIZE,
             "actor_type": "rnn_actor_with_conditional_critic",
         },
@@ -448,8 +452,12 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
 #: sweep, and 0.5 is a mid-range diversity start (a homogeneous population --
 #: separation ~0 -- was the symptom that motivated this whole change). CoMeDi's
 #: stays at v1's 1.0 pending its own sweep. See docs/tuning_record.md.
+#: BRDiv's hanabi is 0.5, not the earlier 0.05: it is the value of the first
+#: converged Hanabi run (SP 11.55), which the recurrent-actor backbone/budget is
+#: now inherited from. CoMeDi's hanabi stays at 0.2 (its own knob, different
+#: semantics; own sweep pending). See docs/tuning_record.md.
 CROSS_PLAY_WEIGHT = {
-    "brdiv": {"lbf": 0.10, "overcooked": 0.005, "overcooked_v2": 0.5, "hanabi": 0.05},
+    "brdiv": {"lbf": 0.10, "overcooked": 0.005, "overcooked_v2": 0.5, "hanabi": 0.5},
     "comedi": {"lbf": 0.2, "overcooked": 1.0, "overcooked_v2": 1.0, "hanabi": 0.2},
 }
 MIXED_PLAY_WEIGHT = {"lbf": 0.4, "overcooked": 0.5, "overcooked_v2": 0.5, "hanabi": 0.5}

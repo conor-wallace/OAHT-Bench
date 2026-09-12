@@ -21,17 +21,18 @@
     },
     "generator": {
       "actor_type": "rnn_actor_with_conditional_critic",
-      "cross_play_weight": 0.05,
+      "cross_play_weight": 0.5,
       "generator": "brdiv",
-      "num_envs": 256,
+      "num_envs": 1024,
       "ppo": {
         "anneal_lr": true,
         "clip_eps": 0.2,
         "gamma": 0.999,
         "learning_rate": 0.0005,
+        "max_grad_norm": 0.5,
         "update_epochs": 4
       },
-      "total_timesteps": 1000000000.0
+      "total_timesteps": 3000000000.0
     },
     "job_type": "teammate_generation",
     "label": "brdiv_hanabi"
