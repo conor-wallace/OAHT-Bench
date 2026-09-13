@@ -24,7 +24,7 @@
     "evaluation_episodes": 20,
     "evaluation_greedy": false,
     "generator": {
-      "actor_type": "mlp",
+      "actor_type": "rnn",
       "generator": "fcp",
       "network": {
         "activation": "tanh",
@@ -33,7 +33,7 @@
         "policy_input_dim": null
       },
       "num_checkpoints": 5,
-      "num_envs": 64,
+      "num_envs": 1024,
       "num_eval_episodes": 20,
       "num_seeds": 1,
       "population_size": 5,
@@ -44,16 +44,18 @@
         "gae_lambda": 0.95,
         "gamma": 0.999,
         "learning_rate": 0.0005,
-        "max_grad_norm": 1.0,
+        "lr_warmup": 0.0,
+        "max_grad_norm": 0.5,
         "num_minibatches": 4,
+        "reward_shaping_horizon": 0.0,
         "update_epochs": 4,
         "value_coef": 0.5
       },
-      "total_timesteps": 2000000000.0,
+      "total_timesteps": 3000000000.0,
       "train_seed": 20374
     },
     "job_type": "teammate_generation",
-    "label": "fcp_hanabi_budget_ref__num_envs=64_total_timesteps=2000000000.0",
+    "label": "fcp_hanabi",
     "logging": {
       "use_wandb": false,
       "verbose": false,
