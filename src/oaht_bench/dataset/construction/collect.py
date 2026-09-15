@@ -28,7 +28,7 @@ def collect_episode(
     seats: Sequence[tuple[Any, Any]],
     *,
     max_episode_steps: int,
-    greedy: bool = False,
+    greedy: bool | Sequence[bool] = False,
     epsilon: float = 0.0,
     noisy_seats: Sequence[int] | None = None,
 ) -> Episode:
@@ -55,6 +55,10 @@ def collect_episode(
         raise ValueError(f"{len(seats)} occupants for {n} seats ({agents}). Every seat needs one.")
     seat_params = [p for p, _ in seats]
     seat_policies = [pol for _, pol in seats]
+    # ``greedy`` may be one bool for all seats or one per seat, so an argmax ego
+    # can be paired with a sampled teammate (the benchmark's eval regime) without
+    # a separate code path.
+    greedy_seats = list(greedy) if isinstance(greedy, (list, tuple)) else [greedy] * n
 
     rng, reset_rng = jax.random.split(rng)
     obs, state = env.reset(reset_rng)
@@ -82,7 +86,7 @@ def collect_episode(
                 # critic is unused, and crossplay already relies on None here.
                 aux_obs=None,
                 env_state=state,
-                test_mode=greedy,
+                test_mode=greedy_seats[i],
             )
             act_i = int(np.asarray(act).reshape(-1)[0])
             if epsilon > 0.0 and (noisy_seats is None or i in noisy_seats):

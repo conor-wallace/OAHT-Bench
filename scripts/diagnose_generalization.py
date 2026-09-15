@@ -154,14 +154,24 @@ def main() -> int:
     indist_acc, _ = tf_accuracy(indist_eps)
     heldout_acc, heldout_by_t = tf_accuracy(heldout_eps)
 
-    # Closed-loop: BC ego on the same deals (in-dist) vs held-out deals; argmax.
-    def mean_return(eps):
-        return float(np.mean([e.returns()[0] for e in eps]))
+    # Closed-loop return, BC ego (argmax) on the same deals (in-dist) vs held-out.
+    # Two teammate modes: argmax teammate is the deterministic replication check;
+    # sampled teammate (ego argmax, mate greedy=False) is the benchmark's eval regime.
+    def mean_return(seed, seats, greedy):
+        return float(np.mean([e.returns()[0] for e in collect_set(seed, seats, greedy)]))
 
-    bc_indist = collect_set(args.seed, bc_seats, greedy=True)
-    bc_heldout = collect_set(args.eval_seed, bc_seats, greedy=True)
-    ceil_indist = mean_return(collect_set(args.seed, tm_seats, greedy=True))
-    ceil_heldout = mean_return(collect_set(args.eval_seed, tm_seats, greedy=True))
+    cl = {
+        ("in", "argmax"): mean_return(args.seed, bc_seats, [True, True]),
+        ("held", "argmax"): mean_return(args.eval_seed, bc_seats, [True, True]),
+        ("in", "sampled"): mean_return(args.seed, bc_seats, [True, False]),
+        ("held", "sampled"): mean_return(args.eval_seed, bc_seats, [True, False]),
+    }
+    ceil = {
+        ("in", "argmax"): mean_return(args.seed, tm_seats, True),
+        ("held", "argmax"): mean_return(args.eval_seed, tm_seats, True),
+        ("in", "sampled"): mean_return(args.seed, tm_seats, False),
+        ("held", "sampled"): mean_return(args.eval_seed, tm_seats, False),
+    }
 
     print(
         "\n===== GENERALIZATION GAP (train seed vs eval seed, saved normalization) =====",
@@ -177,15 +187,16 @@ def main() -> int:
     print("    held-out accuracy by timestep:", flush=True)
     for (lo, hi), a in heldout_by_t.items():
         print(f"      {lo:>2}-{hi:<3}: {a:.4f}", flush=True)
-    print("\n  closed-loop BC-ego return (argmax):", flush=True)
-    print(
-        f"    IN-DIST deals:   BC {mean_return(bc_indist):.2f}   (ceiling {ceil_indist:.2f})",
-        flush=True,
-    )
-    print(
-        f"    HELD-OUT deals:  BC {mean_return(bc_heldout):.2f}   (ceiling {ceil_heldout:.2f})",
-        flush=True,
-    )
+    print("\n  closed-loop BC-ego return (argmax ego):", flush=True)
+    for mate in ("argmax", "sampled"):
+        note = " (benchmark regime)" if mate == "sampled" else " (deterministic replication)"
+        print(f"    {mate}-teammate{note}:", flush=True)
+        for where, label in (("in", "IN-DIST "), ("held", "HELD-OUT")):
+            r, c = cl[(where, mate)], ceil[(where, mate)]
+            print(
+                f"      {label} deals:  BC {r:5.2f}  ({100 * r / c:.0f}% of ceiling {c:.2f})",
+                flush=True,
+            )
     return 0
 
 
