@@ -122,6 +122,13 @@ def main() -> int:
         help="Where to write the collected vault (default: a temp dir, removed after).",
     )
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--target-quantile",
+        type=float,
+        default=1.0,
+        help="Quantile of dataset ego return to condition on at deploy (1.0=max, the "
+        "default; the model may be sunk by conditioning on the extreme tail -- try 0.5/0.9).",
+    )
     args = ap.parse_args()
 
     import jax
@@ -223,7 +230,7 @@ def main() -> int:
     s2 = trainer.train_stage_2(s1)
 
     # 3. Evaluate the trained ego against the same teammate.
-    target = dataset_target_return(ds.batch)
+    target = dataset_target_return(ds.batch, quantile=args.target_quantile)
     cond = target if ds.windows.norm is None else ds.windows.norm.apply_rtg(target)
     agent = agents[job.baseline](
         resolved,
@@ -261,6 +268,7 @@ def main() -> int:
     print(f"  baseline:               {job.baseline}", flush=True)
     print(f"  pairing:                {args.pairing}", flush=True)
     print(f"  ceiling (dataset mean): {ego_mean:.2f}", flush=True)
+    print(f"  cond. target (q={args.target_quantile}):  {target:.2f} (raw)", flush=True)
     print(f"  action accuracy:        {acc:.3f}", flush=True)
     print(
         f"  return (sampled ego):   {sampled:.2f}  ({100 * sampled / ego_mean:.0f}% of ceiling)",
