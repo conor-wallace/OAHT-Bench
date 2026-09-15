@@ -80,6 +80,7 @@ def run(job: TrainingJob) -> Path:
         context_length=cfg.context_length,
         stride=cfg.stride,
         normalize=cfg.normalize_observations,
+        streaming=cfg.stream_windows,
     )
     action_dim = dataset.action_dim
     log.info(

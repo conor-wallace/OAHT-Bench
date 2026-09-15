@@ -185,14 +185,24 @@ class Dataset:
         teammate_index: int | None = None,
         normalize: bool = True,
         variant: str | None = None,
+        streaming: bool = False,
     ):
         """Read the Flashbax Vault at ``vault_dir``, window it, and transform.
 
         ``variant`` selects the sub-directory; if omitted and the vault holds
         exactly one, that one is used (see :func:`~oaht_bench.dataset.vault.read_vault`).
+
+        ``streaming`` swaps the eagerly-materialized :class:`Windows` for
+        :class:`LazyWindows`, which builds each window on demand from the compact
+        ragged episodes. Every window's ``(T, obs_dim)`` slice is ``context_length``
+        copies of the raw data, so the eager path reaches tens of GiB on a real
+        Hanabi dataset; the lazy path is O(dataset) and only builds the fields a
+        baseline reads (BC never touches the teammate streams). Default off, so the
+        existing path -- and its numerics -- are unchanged.
         """
         self.batch = read_vault(vault_dir, variant=variant)
-        self.windows = _build_windows(
+        builder = LazyWindows if streaming else _build_windows
+        self.windows = builder(
             self.batch,
             context_length=context_length,
             stride=stride,
@@ -374,3 +384,221 @@ def _build_windows(
         episode_return=np.asarray(ep_rets, dtype=np.float32),
         teammate_id=np.asarray(ids, dtype=np.int32),
     )
+
+
+class _LazyField:
+    """A window field materialized only for the indices asked for.
+
+    Mirrors ``ndarray[idx]`` fancy-indexing (0-D, 1-D, and the 2-D context indices
+    stage 2 uses) but calls ``build`` to construct just those windows.
+    """
+
+    __slots__ = ("_build",)
+
+    def __init__(self, build):
+        self._build = build  # build(flat_idx: 1-D int array) -> (M, T, ...) ndarray
+
+    def __getitem__(self, idx):
+        idx = np.asarray(idx)
+        out = self._build(idx.reshape(-1))
+        return out.reshape(*idx.shape, *out.shape[1:])
+
+
+class LazyWindows:
+    """A :class:`Windows` work-alike that builds each window on demand.
+
+    :func:`_build_windows` stacks every window's ``(T, obs_dim)`` slice up front --
+    ``context_length`` copies of the raw data -- which reaches tens of GiB on a real
+    Hanabi dataset (25k episodes x 80 x 658 floats, thrice, is ~16 GiB of
+    observations alone). This keeps the compact ragged episodes and constructs only
+    the windows a minibatch indexes, so host memory is O(dataset) rather than
+    O(dataset x context). Fields a baseline never reads are never built -- BC touches
+    only the ego streams, so the teammate windows cost nothing.
+
+    The field API matches :class:`Windows`: per-window metadata (``episode_id``,
+    ``teammate_id``, ``episode_return``) are plain arrays the samplers index
+    element-wise; per-position fields (``ego_obs`` ...) are :class:`_LazyField`
+    proxies supporting the same ``[idx]`` indexing.
+
+    Normalization is computed streaming over the raw ego transitions. That equals
+    :func:`_build_windows`'s per-window-position statistics *exactly* when every
+    transition belongs to a single window -- episodes no longer than the context,
+    which is the regime this path exists for (long context on a partially-observable
+    task). With overlapping windows the two differ only by the overlap weighting.
+    """
+
+    def __init__(self, batch, *, context_length, stride=1, teammate_index=None, normalize=True):
+        ego = batch.ego_index
+        if teammate_index is None:
+            others = [i for i in range(batch.num_agents) if i != ego]
+            if len(others) != 1:
+                raise ValueError(
+                    f"{batch.num_agents} agents, so 'the teammate' is ambiguous; pass "
+                    f"teammate_index explicitly."
+                )
+            teammate_index = others[0]
+        self._ego, self._mate = ego, teammate_index
+        self._T = int(context_length)
+        self._episodes = batch.episodes
+
+        # Return-to-go per episode, computed once (the one derived per-step stream).
+        self._rtg = []
+        for e in self._episodes:
+            length = e.obs[ego].shape[0]
+            self._rtg.append(
+                return_to_go(e.rewards[ego][None], np.ones((1, length), dtype=bool))[0]
+                if length
+                else np.zeros((0,), np.float32)
+            )
+
+        # Enumerate windows exactly as _build_windows does.
+        win_ep, win_start, win_n, ids, team, ep_ret = [], [], [], [], [], []
+        episode_returns = batch.episode_returns()[:, ego]
+        T = self._T
+        for ep, e in enumerate(self._episodes):
+            length = e.obs[ego].shape[0]
+            if length == 0:
+                continue
+            for start in range(0, max(1, length - T + 1), stride):
+                n = min(T, length - start)
+                if n <= 0:
+                    continue
+                win_ep.append(ep)
+                win_start.append(start)
+                win_n.append(n)
+                ids.append(ep)
+                team.append(int(batch.member_ids[ep, teammate_index]))
+                ep_ret.append(episode_returns[ep])
+        self._win_ep = np.asarray(win_ep, np.int32)
+        self._win_start = np.asarray(win_start, np.int32)
+        self._win_n = np.asarray(win_n, np.int32)
+        self.episode_id = np.asarray(ids, np.int32)
+        self.teammate_id = np.asarray(team, np.int32)
+        self.episode_return = np.asarray(ep_ret, np.float32)
+        self._obs_dim = int(self._episodes[0].obs[ego].shape[-1]) if len(self._episodes) else 0
+
+        self.norm = self._streaming_norm() if normalize else None
+
+    def _streaming_norm(self):
+        ego = self._ego
+        d = self._obs_dim
+        s = np.zeros(d, np.float64)
+        ss = np.zeros(d, np.float64)
+        count = 0
+        rtgs = []
+        for ep, e in enumerate(self._episodes):
+            o = np.asarray(e.obs[ego], np.float64)
+            if o.shape[0] == 0:
+                continue
+            s += o.sum(0)
+            ss += (o * o).sum(0)
+            count += o.shape[0]
+            rtgs.append(self._rtg[ep])
+        count = max(count, 1)
+        mean = s / count
+        std = np.maximum(np.sqrt(np.maximum(ss / count - mean * mean, 0.0)), 1e-6)
+        rtg_all = np.concatenate(rtgs) if rtgs else np.zeros((1,), np.float32)
+        return Normalization(
+            obs_mean=mean.astype(np.float32),
+            obs_std=std.astype(np.float32),
+            rtg_scale=float(max(rtg_all.std(), 1e-6)),
+        )
+
+    def __len__(self):
+        return int(self._win_ep.shape[0])
+
+    @property
+    def obs_dim(self):
+        return self._obs_dim
+
+    @property
+    def context_length(self):
+        return self._T
+
+    def _pad(self, arr, fill):
+        n = arr.shape[0]
+        if n == self._T:
+            return arr
+        head = np.full((self._T - n, *arr.shape[1:]), fill, dtype=arr.dtype)
+        return np.concatenate([head, arr], axis=0)
+
+    def _gather(self, flat_idx, one):
+        return np.stack(
+            [
+                one(int(self._win_ep[w]), int(self._win_start[w]), int(self._win_n[w]))
+                for w in flat_idx
+            ],
+            axis=0,
+        )
+
+    def _obs_field(self, seat, *, next_obs=False):
+        def one(ep, s, n):
+            o = np.asarray(self._episodes[ep].obs[seat], np.float32)
+            if next_obs:
+                o = np.concatenate([o[1:], o[-1:]], axis=0)
+            p = self._pad(o[s : s + n], 0.0)
+            return (p - self.norm.obs_mean) / self.norm.obs_std if self.norm else p
+
+        return _LazyField(lambda fi: self._gather(fi, one))
+
+    def _int_field(self, stream_of, fill):
+        def one(ep, s, n):
+            return self._pad(np.asarray(stream_of(ep))[s : s + n], fill)
+
+        return _LazyField(lambda fi: self._gather(fi, one))
+
+    @property
+    def ego_obs(self):
+        return self._obs_field(self._ego)
+
+    @property
+    def mate_obs(self):
+        return self._obs_field(self._mate)
+
+    @property
+    def mate_next_obs(self):
+        return self._obs_field(self._mate, next_obs=True)
+
+    @property
+    def ego_rtg(self):
+        def one(ep, s, n):
+            p = self._pad(self._rtg[ep][s : s + n], 0.0)
+            return p / self.norm.rtg_scale if self.norm else p
+
+        return _LazyField(lambda fi: self._gather(fi, one))
+
+    @property
+    def ego_actions(self):
+        return self._int_field(lambda ep: self._episodes[ep].actions[self._ego], -10)
+
+    @property
+    def mate_actions(self):
+        return self._int_field(lambda ep: self._episodes[ep].actions[self._mate], -10)
+
+    @property
+    def ego_avail(self):
+        return self._int_field(lambda ep: self._episodes[ep].avail_actions[self._ego], 1)
+
+    @property
+    def mate_avail(self):
+        return self._int_field(lambda ep: self._episodes[ep].avail_actions[self._mate], 1)
+
+    @property
+    def mate_rewards(self):
+        return self._int_field(lambda ep: self._episodes[ep].rewards[self._mate], 0)
+
+    @property
+    def timesteps(self):
+        def one(ep, s, n):
+            return self._pad(np.arange(s + 1, s + n + 1, dtype=np.int32), 0)
+
+        return _LazyField(lambda fi: self._gather(fi, one))
+
+    @property
+    def mask(self):
+        def one(ep, s, n):
+            m = np.zeros(self._T, dtype=bool)
+            m[self._T - n :] = True
+            return m
+
+        return _LazyField(lambda fi: self._gather(fi, one))

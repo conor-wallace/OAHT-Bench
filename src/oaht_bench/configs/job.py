@@ -263,6 +263,14 @@ class OfflineTrainingConfig(BaseConfig):
     # architecture is serialised either way, so it stays in the run's hash.
     network: OfflineNetworkConfig = Field(default_factory=LiamNetworkConfig)
     context_length: int = Field(default=20, gt=0, description="Timesteps per window; TAO's K.")
+    stream_windows: bool = Field(
+        default=False,
+        description="Build windows lazily (LazyWindows) instead of materializing them all. "
+        "O(dataset) host RAM instead of O(dataset x context_length), which is what lets a "
+        "long-context Hanabi dataset fit at all. Results are identical to the eager path "
+        "when episodes fit in one window (episodes <= context); the two differ only by "
+        "overlap weighting in the normalization otherwise.",
+    )
     stride: int = Field(
         default=5,
         gt=0,
@@ -277,7 +285,13 @@ class OfflineTrainingConfig(BaseConfig):
         "NUM_ITER x NUM_UPDATE_PER_ITER = 200x10 (MS) or 500x10 (PA).",
     )
     stage2_steps: int = Field(
-        default=20000, gt=0, description="Gradient steps for the policy stage; TAO's 2000x10."
+        default=30000,
+        gt=0,
+        description="Gradient steps for the policy stage; TAO's 2000x10. Raised from "
+        "20000: at 20000 BC/TAO were flat but LIAM/MELIBA/OMIS still had a small "
+        "residual downward loss slope (~-0.013/1k), so the extra steps let those "
+        "three finish converging. Stage 1 stays at 2000 (already ~2x past its "
+        "representation plateau ~step 1000). See docs/tuning_record.md.",
     )
     stage1_learning_rate: float = Field(default=1e-2, gt=0)
     stage2_learning_rate: float = Field(default=1e-4, gt=0)

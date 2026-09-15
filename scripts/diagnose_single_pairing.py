@@ -143,6 +143,12 @@ def main() -> int:
         help="Pickle the trained policy (+ norm, dims, cond target) here, for the "
         "action-agreement diagnostic to load without retraining.",
     )
+    ap.add_argument(
+        "--streaming",
+        action="store_true",
+        help="Build windows lazily (O(dataset) host RAM instead of O(dataset x context)) "
+        "so far more episodes fit; results are identical to the eager path.",
+    )
     args = ap.parse_args()
 
     import jax
@@ -222,6 +228,7 @@ def main() -> int:
         context_length=cfg.context_length,
         stride=cfg.stride,
         normalize=cfg.normalize_observations,
+        streaming=args.streaming,
     )
     print(
         f"windows={len(ds.windows)} obs_dim={ds.obs_dim} ego_mean(ceiling)={ego_mean:.2f}",
