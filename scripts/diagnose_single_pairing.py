@@ -229,21 +229,19 @@ def main() -> int:
     s1 = trainer.train_stage_1()
     s2 = trainer.train_stage_2(s1)
 
-    # 3. Evaluate the trained ego against the same teammate.
-    target = dataset_target_return(ds.batch, quantile=args.target_quantile)
-    cond = target if ds.windows.norm is None else ds.windows.norm.apply_rtg(target)
-    agent = agents[job.baseline](
-        resolved,
-        context_length=cfg.context_length,
-        target_return=cond,
-        normalization=ds.windows.norm,
-    )
-    agent.build_model()
-
-    # Eval the same trained policy both ways: sampled is the benchmark metric;
-    # greedy (argmax ego, teammate still samples) isolates whether sampling noise
-    # -- not a train/deploy mismatch -- is sinking a high-accuracy policy.
-    def score(greedy: bool) -> float:
+    # 3. The conditioning target is an eval-time knob, so train once and sweep it.
+    #    If deploy return rises sharply at a lower target, out-of-distribution RTG
+    #    conditioning (on the dataset max) is the bottleneck, not the trainer.
+    def eval_at(quantile: float, greedy: bool) -> tuple[float, float]:
+        target = dataset_target_return(ds.batch, quantile=quantile)
+        cond = target if ds.windows.norm is None else ds.windows.norm.apply_rtg(target)
+        agent = agents[job.baseline](
+            resolved,
+            context_length=cfg.context_length,
+            target_return=cond,
+            normalization=ds.windows.norm,
+        )
+        agent.build_model()
         sc = evaluate_agent_against(
             agent,
             {"stage1": s1, "stage2": s2},
@@ -255,29 +253,33 @@ def main() -> int:
             num_episodes=args.eval_episodes,
             greedy=greedy,
         )
-        return float(next(iter(sc.per_teammate.values())))
+        return target, float(next(iter(sc.per_teammate.values())))
 
-    sampled = score(greedy=False)
-    greedy = score(greedy=True)
+    quantiles = sorted({0.5, 0.9, 1.0, args.target_quantile})
+    rows = []
+    for q in quantiles:
+        target, sampled = eval_at(q, greedy=False)
+        _, greedy = eval_at(q, greedy=True)
+        rows.append((q, target, sampled, greedy))
 
     if not args.vault:
         shutil.rmtree(vault_dir.parent, ignore_errors=True)
 
     acc = logger.last_acc if logger.last_acc is not None else float("nan")
     print("\n===== SINGLE-PAIRING DIAGNOSTIC =====", flush=True)
-    print(f"  baseline:               {job.baseline}", flush=True)
-    print(f"  pairing:                {args.pairing}", flush=True)
-    print(f"  ceiling (dataset mean): {ego_mean:.2f}", flush=True)
-    print(f"  cond. target (q={args.target_quantile}):  {target:.2f} (raw)", flush=True)
-    print(f"  action accuracy:        {acc:.3f}", flush=True)
     print(
-        f"  return (sampled ego):   {sampled:.2f}  ({100 * sampled / ego_mean:.0f}% of ceiling)",
+        f"  baseline={job.baseline}  pairing={args.pairing}  "
+        f"ceiling(dataset mean)={ego_mean:.2f}  action_acc={acc:.3f}",
         flush=True,
     )
-    print(
-        f"  return (argmax ego):    {greedy:.2f}  ({100 * greedy / ego_mean:.0f}% of ceiling)",
-        flush=True,
-    )
+    print(f"  {'target_q':>8} {'raw_tgt':>8} {'sampled ego':>16} {'argmax ego':>16}", flush=True)
+    for q, target, sampled, greedy in rows:
+        print(
+            f"  {q:>8.2f} {target:>8.2f} "
+            f"{sampled:>7.2f} ({100 * sampled / ego_mean:>3.0f}%) "
+            f"{greedy:>7.2f} ({100 * greedy / ego_mean:>3.0f}%)",
+            flush=True,
+        )
     return 0
 
 
