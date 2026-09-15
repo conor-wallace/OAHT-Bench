@@ -112,8 +112,7 @@ def evaluate_agent(
     from oaht_bench.population.members import get_member_params
 
     teammates = [
-        (int(m), get_member_params(loaded.params, int(m)), loaded.policy_cls)
-        for m in members
+        (int(m), get_member_params(loaded.params, int(m)), loaded.policy_cls) for m in members
     ]
     return evaluate_agent_against(
         agent,
@@ -139,6 +138,7 @@ def evaluate_agent_against(
     max_episode_steps: int,
     num_episodes: int = 20,
     ego_index: int = 0,
+    greedy: bool = False,
 ) -> EvalScores:
     """Roll the ego against an explicit list of teammate policies.
 
@@ -148,6 +148,12 @@ def evaluate_agent_against(
     from *different* populations (each with its own ``policy_cls``), which is what
     a held-out set spanning generators requires (§8). The ego takes seat
     ``agent_0``; each teammate plays ``num_episodes`` episodes in the other seat.
+
+    ``greedy`` makes only the *ego* act by argmax (the teammate keeps sampling),
+    which does not risk the symmetric-argmax deadlock invariant #2 guards against
+    and is a diagnostic for whether a high-accuracy policy is being sunk by
+    sampling noise rather than a train/deploy mismatch. Defaults False (sampled),
+    so the benchmark metric is unchanged.
     """
     import jax
 
@@ -165,6 +171,7 @@ def evaluate_agent_against(
             agent_1_policy=policy_cls,
             max_episode_steps=max_episode_steps,
             num_eps=num_episodes,
+            agent_0_test_mode=greedy,
         )
         returns = np.asarray(out["returned_episode_returns"])[:, ego_index]
         per_teammate[label] = float(returns.mean())

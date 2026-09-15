@@ -122,6 +122,12 @@ def main() -> int:
         help="Where to write the collected vault (default: a temp dir, removed after).",
     )
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--greedy",
+        action="store_true",
+        help="Eval the ego by argmax (teammate still samples). Diagnostic for whether "
+        "a high-accuracy policy is sunk by sampling noise vs a train/deploy mismatch.",
+    )
     args = ap.parse_args()
 
     import jax
@@ -241,6 +247,7 @@ def main() -> int:
         target_return=cond,
         max_episode_steps=job.env.rollout_length,
         num_episodes=args.eval_episodes,
+        greedy=args.greedy,
     )
     ret = float(next(iter(sc.per_teammate.values())))
 
@@ -250,6 +257,10 @@ def main() -> int:
     print("\n===== SINGLE-PAIRING DIAGNOSTIC =====", flush=True)
     print(f"  baseline:               {job.baseline}", flush=True)
     print(f"  pairing:                {args.pairing}", flush=True)
+    print(
+        f"  eval mode:              {'argmax (greedy ego)' if args.greedy else 'sampled'}",
+        flush=True,
+    )
     print(f"  ceiling (dataset mean): {ego_mean:.2f}", flush=True)
     print(
         f"  action accuracy:        {logger.last_acc if logger.last_acc is not None else float('nan'):.3f}",
