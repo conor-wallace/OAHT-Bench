@@ -12,7 +12,8 @@ environment has exactly two seats. That costs nothing here and keeps the
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import jax
 import jax.numpy as jnp
@@ -28,6 +29,8 @@ def collect_episode(
     *,
     max_episode_steps: int,
     greedy: bool = False,
+    epsilon: float = 0.0,
+    noisy_seats: Sequence[int] | None = None,
 ) -> Episode:
     """Run one episode with ``seats[i]`` controlling ``env.agents[i]``.
 
@@ -36,6 +39,12 @@ def collect_episode(
     confederate and its best response. It also leaves room for a heuristic
     teammate opposite a learned one without changing this signature again.
 
+    ``epsilon`` injects ε-greedy noise: with probability ``epsilon`` a seat in
+    ``noisy_seats`` (default: all seats) takes a uniform *legal* action instead of
+    its policy's. The taken action is what gets recorded, so pointing noise at the
+    *teammate* seat broadens the state distribution (recovery coverage for a BC
+    ego) while leaving the ego seat's recorded actions expert.
+
     Returns an :class:`~oaht_bench.dataset.schema.Episode` with a leading agent
     axis for per-agent quantities. The loop breaks on termination, so every
     recorded step is real -- there is no padding to mark.
@@ -43,21 +52,16 @@ def collect_episode(
     agents = list(env.agents)
     n = len(agents)
     if len(seats) != n:
-        raise ValueError(
-            f"{len(seats)} occupants for {n} seats ({agents}). Every seat needs one."
-        )
+        raise ValueError(f"{len(seats)} occupants for {n} seats ({agents}). Every seat needs one.")
     seat_params = [p for p, _ in seats]
     seat_policies = [pol for _, pol in seats]
 
     rng, reset_rng = jax.random.split(rng)
     obs, state = env.reset(reset_rng)
-    hstates = [
-        seat_policies[i].init_hstate(1, aux_info={"agent_id": i}) for i in range(n)
-    ]
+    hstates = [seat_policies[i].init_hstate(1, aux_info={"agent_id": i}) for i in range(n)]
     done_flags = {k: jnp.zeros((1,), dtype=bool) for k in agents + ["__all__"]}
 
-    rec: dict[str, list] = {k: [] for k in
-                            ("obs", "actions", "rewards", "avail", "dones")}
+    rec: dict[str, list] = {k: [] for k in ("obs", "actions", "rewards", "avail", "dones")}
 
     for _ in range(max_episode_steps):
         avail = jax.lax.stop_gradient(env.get_avail_actions(state))
@@ -80,8 +84,16 @@ def collect_episode(
                 env_state=state,
                 test_mode=greedy,
             )
+            act_i = int(np.asarray(act).reshape(-1)[0])
+            if epsilon > 0.0 and (noisy_seats is None or i in noisy_seats):
+                rng, coin_rng = jax.random.split(rng)
+                if float(jax.random.uniform(coin_rng)) < epsilon:
+                    legal = np.flatnonzero(np.asarray(a_i).reshape(-1) > 0)
+                    if len(legal) > 0:
+                        rng, pick_rng = jax.random.split(rng)
+                        act_i = int(legal[int(jax.random.randint(pick_rng, (), 0, len(legal)))])
             step_obs.append(np.asarray(o_i).reshape(-1))
-            step_act.append(int(np.asarray(act).reshape(-1)[0]))
+            step_act.append(act_i)
             step_avail.append(np.asarray(a_i).reshape(-1))
 
         rng, step_rng = jax.random.split(rng)

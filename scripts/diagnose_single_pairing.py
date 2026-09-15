@@ -129,6 +129,20 @@ def main() -> int:
         help="Quantile of dataset ego return to condition on at deploy (1.0=max, the "
         "default; the model may be sunk by conditioning on the extreme tail -- try 0.5/0.9).",
     )
+    ap.add_argument(
+        "--collect-noise",
+        type=float,
+        default=0.0,
+        help="epsilon-greedy noise on the TEAMMATE seat during collection. Broadens the "
+        "state distribution (recovery coverage for a BC ego) while keeping the ego's "
+        "recorded actions expert. Tests whether covariate shift is the bottleneck.",
+    )
+    ap.add_argument(
+        "--save-params",
+        default=None,
+        help="Pickle the trained policy (+ norm, dims, cond target) here, for the "
+        "action-agreement diagnostic to load without retraining.",
+    )
     args = ap.parse_args()
 
     import jax
@@ -190,6 +204,8 @@ def main() -> int:
                 [(ego.params, ego.policy_cls), (mate.params, mate.policy_cls)],
                 max_episode_steps=job.env.rollout_length,
                 greedy=False,
+                epsilon=args.collect_noise,
+                noisy_seats=[1],  # teammate seat; ego (seat 0) targets stay expert
             )
         )
         member_ids.append([int(mate.member), int(mate.member)])
@@ -229,6 +245,29 @@ def main() -> int:
     s1 = trainer.train_stage_1()
     s2 = trainer.train_stage_2(s1)
 
+    if args.save_params:
+        import pickle
+
+        cond_max = dataset_target_return(ds.batch, quantile=1.0)
+        cond_max = cond_max if ds.windows.norm is None else ds.windows.norm.apply_rtg(cond_max)
+        with open(args.save_params, "wb") as fh:
+            pickle.dump(
+                jax.device_get(
+                    {
+                        "stage1": s1,
+                        "stage2": s2,
+                        "normalization": ds.windows.norm,
+                        "obs_dim": ds.obs_dim,
+                        "action_dim": ds.action_dim,
+                        "context_length": cfg.context_length,
+                        "cond_target": float(cond_max),
+                        "baseline": job.baseline,
+                    }
+                ),
+                fh,
+            )
+        print(f"saved trained policy -> {args.save_params}", flush=True)
+
     # 3. The conditioning target is an eval-time knob, so train once and sweep it.
     #    If deploy return rises sharply at a lower target, out-of-distribution RTG
     #    conditioning (on the dataset max) is the bottleneck, not the trainer.
@@ -262,6 +301,33 @@ def main() -> int:
         _, greedy = eval_at(q, greedy=True)
         rows.append((q, target, sampled, greedy))
 
+    # Clone-vs-clone: does the policy coordinate with a copy of itself? High here
+    # but low vs the original teammate => the recurrent partner diverges onto states
+    # the clone never saw. Low here too => the clone is a poor closed-loop player.
+    # Caveat: the clone learned ego_index=0 obs; Hanabi obs are agent-centric, so
+    # seating it in seat 1 is indicative, not exact.
+    cc_target = dataset_target_return(ds.batch, quantile=1.0)
+    cc_cond = cc_target if ds.windows.norm is None else ds.windows.norm.apply_rtg(cc_target)
+    cc_agent = agents[job.baseline](
+        resolved,
+        context_length=cfg.context_length,
+        target_return=cc_cond,
+        normalization=ds.windows.norm,
+    )
+    cc_agent.build_model()
+    cc = evaluate_agent_against(
+        cc_agent,
+        {"stage1": s1, "stage2": s2},
+        env,
+        [("clone", {"stage1": s1, "stage2": s2}, cc_agent)],
+        rng=jax.random.PRNGKey(args.seed + 321),
+        target_return=cc_cond,
+        max_episode_steps=job.env.rollout_length,
+        num_episodes=args.eval_episodes,
+        greedy=True,
+    )
+    clone_vs_clone = float(next(iter(cc.per_teammate.values())))
+
     if not args.vault:
         shutil.rmtree(vault_dir.parent, ignore_errors=True)
 
@@ -280,6 +346,12 @@ def main() -> int:
             f"{greedy:>7.2f} ({100 * greedy / ego_mean:>3.0f}%)",
             flush=True,
         )
+    print(
+        f"  clone-vs-clone (argmax): {clone_vs_clone:.2f} ({100 * clone_vs_clone / ego_mean:.0f}% of ceiling)",
+        flush=True,
+    )
+    if args.collect_noise:
+        print(f"  (collected with teammate epsilon={args.collect_noise})", flush=True)
     return 0
 
 
