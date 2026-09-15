@@ -186,6 +186,8 @@ class Dataset:
         normalize: bool = True,
         variant: str | None = None,
         streaming: bool = False,
+        on_disk: bool = False,
+        cache_episodes: int = 1024,
     ):
         """Read the Flashbax Vault at ``vault_dir``, window it, and transform.
 
@@ -199,9 +201,23 @@ class Dataset:
         Hanabi dataset; the lazy path is O(dataset) and only builds the fields a
         baseline reads (BC never touches the teammate streams). Default off, so the
         existing path -- and its numerics -- are unchanged.
+
+        ``on_disk`` goes one step further: the episodes themselves are streamed from
+        the vault via :class:`~oaht_bench.dataset.vault.DiskEpisodeSource` rather than
+        loaded into RAM, so host memory is bounded by ``cache_episodes`` (a per-episode
+        LRU) instead of the dataset size. This is what lets hundred-thousand-episode
+        vaults train at all. It implies lazy windows.
         """
-        self.batch = read_vault(vault_dir, variant=variant)
-        builder = LazyWindows if streaming else _build_windows
+        if on_disk:
+            from oaht_bench.dataset.vault import DiskEpisodeSource
+
+            self.batch = DiskEpisodeSource(
+                vault_dir, variant=variant, cache_episodes=cache_episodes
+            )
+            builder = LazyWindows
+        else:
+            self.batch = read_vault(vault_dir, variant=variant)
+            builder = LazyWindows if streaming else _build_windows
         self.windows = builder(
             self.batch,
             context_length=context_length,
@@ -444,7 +460,7 @@ class LazyWindows:
         # Return-to-go per episode, computed once (the one derived per-step stream).
         self._rtg = []
         for e in self._episodes:
-            length = e.obs[ego].shape[0]
+            length = e.length  # cheap; avoids forcing a disk read just to size the episode
             self._rtg.append(
                 return_to_go(e.rewards[ego][None], np.ones((1, length), dtype=bool))[0]
                 if length
@@ -456,7 +472,7 @@ class LazyWindows:
         episode_returns = batch.episode_returns()[:, ego]
         T = self._T
         for ep, e in enumerate(self._episodes):
-            length = e.obs[ego].shape[0]
+            length = e.length
             if length == 0:
                 continue
             for start in range(0, max(1, length - T + 1), stride):

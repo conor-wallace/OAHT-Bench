@@ -205,30 +205,40 @@ def read_vault(vault_dir: str | Path, *, variant: str | None = None) -> EpisodeB
     batch_meta = dict(meta["episode_batch_meta"])
 
     epid = exp["episode_id"]
-    episodes = [int(e) for e in np.unique(epid)]
 
     # Regroup the flat transitions per episode. The store is transition-major with
     # the agent axis kept, ``(N, agent, …)``; transpose back to each Episode's
     # ``(agent, T_ep, …)`` layout.
+    #
+    # Group with a single stable sort rather than a boolean ``epid == ep`` scan per
+    # episode: the mask-per-episode form is O(episodes × transitions) and on a large
+    # pooled dataset (e.g. 25k episodes over 1.8M transitions) that is tens of minutes
+    # of pure Python. The stable sort clusters each episode's transitions while
+    # preserving their original (temporal) order, so ``np.split`` at the group
+    # boundaries yields the same per-episode index blocks the mask did -- O(N log N).
+    # ``np.unique`` returns sorted ids, so episodes come out in ascending id order,
+    # matching the previous behaviour.
+    order = np.argsort(epid, kind="stable")
+    _, starts = np.unique(epid[order], return_index=True)
+    groups = np.split(order, starts[1:])
+
     out_episodes, member_ids = [], []
-    for ep in episodes:
-        m = epid == ep
+    for g in groups:
         out_episodes.append(
             Episode(
-                obs=exp["observations"][m].transpose(1, 0, 2).astype(np.float32),
-                actions=exp["actions"][m].transpose(1, 0).astype(np.int64),
-                rewards=exp["rewards"][m].transpose(1, 0).astype(np.float32),
-                avail_actions=exp["avail_actions"][m].transpose(1, 0, 2).astype(np.float32),
-                dones=exp["terminals"][m].astype(bool),
+                obs=exp["observations"][g].transpose(1, 0, 2).astype(np.float32),
+                actions=exp["actions"][g].transpose(1, 0).astype(np.int64),
+                rewards=exp["rewards"][g].transpose(1, 0).astype(np.float32),
+                avail_actions=exp["avail_actions"][g].transpose(1, 0, 2).astype(np.float32),
+                dones=exp["terminals"][g].astype(bool),
             )
         )
         # member_ids is per-episode: take it off any (the first) transition.
-        member_ids.append(exp["member_ids"][m][0])
+        member_ids.append(exp["member_ids"][g[0]])
 
     if "ego_response_quality" in exp:
-        batch_meta["ego_response_quality"] = [
-            float(exp["ego_response_quality"][epid == ep][0]) for ep in episodes
-        ]
+        q = exp["ego_response_quality"]
+        batch_meta["ego_response_quality"] = [float(q[g[0]]) for g in groups]
 
     return EpisodeBatch(
         episodes=out_episodes,
@@ -236,3 +246,183 @@ def read_vault(vault_dir: str | Path, *, variant: str | None = None) -> EpisodeB
         ego_index=ego_index,
         meta=batch_meta,
     )
+
+
+class _DiskEpisode:
+    """One episode read from the vault on access -- an :class:`Episode` work-alike.
+
+    Holds only ``(source, ep)``; the arrays come from the source's slice-read cache,
+    so a list of these is cheap to keep even for hundreds of thousands of episodes.
+    """
+
+    __slots__ = ("_src", "_ep")
+
+    def __init__(self, src, ep):
+        self._src, self._ep = src, ep
+
+    @property
+    def length(self):
+        return int(self._src._lengths[self._ep])
+
+    @property
+    def num_agents(self):
+        return self._src.num_agents
+
+    @property
+    def obs(self):
+        return self._src._read(self._ep)["obs"]
+
+    @property
+    def actions(self):
+        return self._src._read(self._ep)["actions"]
+
+    @property
+    def rewards(self):
+        return self._src._read(self._ep)["rewards"]
+
+    @property
+    def avail_actions(self):
+        return self._src._read(self._ep)["avail_actions"]
+
+    @property
+    def dones(self):
+        return self._src._read(self._ep)["dones"]
+
+    def returns(self):
+        return self.rewards.sum(axis=1)
+
+
+class _DiskEpisodeList:
+    def __init__(self, src):
+        self._src = src
+
+    def __len__(self):
+        return self._src.num_episodes
+
+    def __getitem__(self, i):
+        i = int(i)
+        if i < 0:
+            i += self._src.num_episodes
+        if not 0 <= i < self._src.num_episodes:
+            raise IndexError(i)
+        return _DiskEpisode(self._src, i)
+
+    def __iter__(self):
+        for i in range(self._src.num_episodes):
+            yield _DiskEpisode(self._src, i)
+
+
+class DiskEpisodeSource:
+    """An :class:`~oaht_bench.dataset.schema.EpisodeBatch` work-alike that streams
+    transitions from the vault on disk instead of loading them into RAM.
+
+    ``read_vault`` pulls the entire flat experience into memory (tens of GiB for a
+    hundred-thousand-episode Hanabi dataset). The vault's fields are tensorstore
+    arrays that support lazy slice reads, and episodes are stored contiguously, so
+    this reads only per-episode metadata up front (``episode_id`` boundaries,
+    ``member_ids``, ``rewards`` for returns -- all small) and fetches each episode's
+    observations/actions on demand, behind a bounded LRU. Host memory is then set by
+    the cache, not the dataset size, so windowing (via :class:`LazyWindows`) scales
+    to arbitrarily large vaults.
+
+    Quacks like ``EpisodeBatch`` for the fields :class:`~oaht_bench.dataset.dataset.Dataset`
+    and :class:`LazyWindows` read: ``ego_index``, ``num_agents``, ``num_episodes``,
+    ``episodes`` (a lazy list), ``member_ids``, ``episode_returns()`` and ``meta``.
+    """
+
+    def __init__(self, vault_dir, *, variant=None, cache_episodes: int = 1024):
+        from collections import OrderedDict
+
+        from flashbax.vault import Vault
+
+        vault_dir = Path(vault_dir)
+        if variant is None:
+            subs = sorted(p.name for p in vault_dir.iterdir() if p.is_dir())
+            if len(subs) == 1:
+                variant = subs[0]
+            elif not subs:
+                raise FileNotFoundError(f"no variant sub-directory under {vault_dir}")
+            else:
+                raise ValueError(f"{vault_dir} holds variants {subs}; pass variant= to pick one.")
+
+        rel_dir, name, uid = _split_dir(vault_dir, variant)
+        vault = Vault(vault_name=name, rel_dir=rel_dir, vault_uid=uid)
+        n = int(vault.vault_index)
+        self._ds = vault._all_datastores
+        meta = dict(vault._metadata)
+        self.ego_index = int(meta["ego_index"])
+        self.meta = dict(meta["episode_batch_meta"])
+
+        # Small metadata read fully; observations/actions/avail stay on disk.
+        epid = np.asarray(self._ds["episode_id"][0, 0:n].read().result()).reshape(-1)
+        if np.any(np.diff(epid) < 0):
+            raise ValueError(
+                "vault transitions are not episode-contiguous; DiskEpisodeSource assumes "
+                "each episode's transitions form one contiguous block (to_flat writes them "
+                "that way). Fall back to read_vault for this vault."
+            )
+        uniq, counts = np.unique(epid, return_counts=True)
+        self.num_episodes = int(len(uniq))
+        self._lengths = counts.astype(np.int64)
+        self._offsets = np.concatenate([[0], np.cumsum(self._lengths)[:-1]]).astype(np.int64)
+
+        member_ids_full = np.asarray(self._ds["member_ids"][0, 0:n].read().result())
+        self.member_ids = member_ids_full[self._offsets]
+        self.num_agents = int(self.member_ids.shape[1])
+        rewards_full = np.asarray(self._ds["rewards"][0, 0:n].read().result()).astype(np.float32)
+        self._returns = np.stack(
+            [
+                rewards_full[o : o + ln].sum(0)
+                for o, ln in zip(self._offsets, self._lengths, strict=True)
+            ]
+        )
+
+        q = None
+        if "ego_response_quality" in self._ds:
+            qf = np.asarray(self._ds["ego_response_quality"][0, 0:n].read().result()).reshape(-1)
+            q = [float(qf[o]) for o in self._offsets]
+        if q is not None:
+            self.meta["ego_response_quality"] = q
+
+        self.episodes = _DiskEpisodeList(self)
+        self._cache: OrderedDict = OrderedDict()
+        self._cache_max = int(cache_episodes)
+
+    def _read(self, ep):
+        hit = self._cache.get(ep)
+        if hit is not None:
+            self._cache.move_to_end(ep)
+            return hit
+        o, ln = int(self._offsets[ep]), int(self._lengths[ep])
+        s = slice(o, o + ln)
+        rec = {
+            "obs": np.asarray(self._ds["observations"][0, s].read().result())
+            .transpose(1, 0, 2)
+            .astype(np.float32),
+            "actions": np.asarray(self._ds["actions"][0, s].read().result())
+            .transpose(1, 0)
+            .astype(np.int64),
+            "rewards": np.asarray(self._ds["rewards"][0, s].read().result())
+            .transpose(1, 0)
+            .astype(np.float32),
+            "avail_actions": np.asarray(self._ds["avail_actions"][0, s].read().result())
+            .transpose(1, 0, 2)
+            .astype(np.float32),
+            "dones": np.asarray(self._ds["terminals"][0, s].read().result())
+            .reshape(-1)
+            .astype(bool),
+        }
+        self._cache[ep] = rec
+        if len(self._cache) > self._cache_max:
+            self._cache.popitem(last=False)
+        return rec
+
+    @property
+    def num_episodes_(self):  # pragma: no cover - convenience mirror
+        return self.num_episodes
+
+    def episode_returns(self):
+        return self._returns
+
+    def episode_lengths(self):
+        return self._lengths

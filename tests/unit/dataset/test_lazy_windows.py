@@ -77,6 +77,25 @@ def test_normalized_fields_and_norm_identical_when_one_window_per_episode():
     _assert_fields_match(eager, lazy, np.array([0, 3, 5, 1]), normalized=True)
 
 
+def test_disk_streaming_matches_in_ram(tmp_path):
+    """DiskEpisodeSource (streamed from the vault) must window identically to the
+    in-RAM path, so hundred-thousand-episode vaults train without loading."""
+    from oaht_bench.dataset.dataset import Dataset
+    from oaht_bench.dataset.vault import write_vault
+
+    batch = _batch([6, 7, 5, 8, 6, 7, 6, 5])  # <= context 8: one window per episode
+    vault = tmp_path / "v.vlt"
+    write_vault(batch.episodes, batch.member_ids, vault, ego_index=0, meta={"variant": "single"})
+    kw = dict(context_length=8, stride=4, normalize=True)
+    ram = Dataset(str(vault), streaming=True, **kw).windows
+    disk = Dataset(str(vault), on_disk=True, **kw).windows
+
+    assert len(ram) == len(disk)
+    assert np.allclose(ram.norm.obs_mean, disk.norm.obs_mean, atol=1e-5)
+    assert ram.norm.rtg_scale == pytest.approx(disk.norm.rtg_scale, rel=1e-5)
+    _assert_fields_match(ram, disk, np.array([0, 3, 5, 1, 7]), normalized=True)
+
+
 def test_two_dimensional_index_matches():
     """Stage 2 indexes with a (batch, C) context array; the lazy proxy must
     reshape the same way."""

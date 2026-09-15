@@ -271,6 +271,13 @@ class OfflineTrainingConfig(BaseConfig):
         "when episodes fit in one window (episodes <= context); the two differ only by "
         "overlap weighting in the normalization otherwise.",
     )
+    stream_from_disk: bool = Field(
+        default=False,
+        description="Stream episodes from the vault on disk (DiskEpisodeSource) rather than "
+        "loading them into RAM, so host memory is bounded by a per-episode LRU rather than "
+        "the dataset size -- what lets hundred-thousand-episode vaults train at all. Implies "
+        "lazy windows; windows are identical to the in-RAM path.",
+    )
     stride: int = Field(
         default=5,
         gt=0,

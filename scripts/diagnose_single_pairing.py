@@ -149,6 +149,12 @@ def main() -> int:
         help="Build windows lazily (O(dataset) host RAM instead of O(dataset x context)) "
         "so far more episodes fit; results are identical to the eager path.",
     )
+    ap.add_argument(
+        "--on-disk",
+        action="store_true",
+        help="Stream episodes from the vault on disk (bounded RAM regardless of dataset "
+        "size). For very large --episodes. Note: collection still holds episodes in RAM.",
+    )
     args = ap.parse_args()
 
     import jax
@@ -229,6 +235,7 @@ def main() -> int:
         stride=cfg.stride,
         normalize=cfg.normalize_observations,
         streaming=args.streaming,
+        on_disk=args.on_disk,
     )
     print(
         f"windows={len(ds.windows)} obs_dim={ds.obs_dim} ego_mean(ceiling)={ego_mean:.2f}",
