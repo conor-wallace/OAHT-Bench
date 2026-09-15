@@ -96,6 +96,33 @@ def test_disk_streaming_matches_in_ram(tmp_path):
     _assert_fields_match(ram, disk, np.array([0, 3, 5, 1, 7]), normalized=True)
 
 
+def test_vault_writer_chunked_matches_one_shot(tmp_path):
+    """VaultWriter appends episodes in chunks (bounded RAM at collection time); the
+    resulting vault must read back identically to a single write_vault call."""
+    from oaht_bench.dataset.vault import VaultWriter, read_vault, write_vault
+
+    batch = _batch([6, 7, 5, 8, 6, 7, 4, 9])
+    eps, mids = batch.episodes, batch.member_ids
+
+    one = tmp_path / "one.vlt"
+    write_vault(eps, mids, one, ego_index=0, meta={"variant": "single"})
+
+    chunked = tmp_path / "chunked.vlt"
+    w = VaultWriter(chunked, ego_index=0, meta={"variant": "single"})
+    w.write(eps[:3], mids[:3])
+    w.write(eps[3:7], mids[3:7])
+    w.write(eps[7:], mids[7:])
+
+    a, b = read_vault(one), read_vault(chunked)
+    assert a.num_episodes == b.num_episodes == len(eps)
+    assert np.array_equal(a.episode_lengths(), b.episode_lengths())
+    assert np.array_equal(a.member_ids, b.member_ids)
+    assert np.allclose(a.episode_returns(), b.episode_returns())
+    for i in range(len(eps)):
+        assert np.allclose(a.episodes[i].obs, b.episodes[i].obs)
+        assert np.array_equal(a.episodes[i].actions, b.episodes[i].actions)
+
+
 def test_two_dimensional_index_matches():
     """Stage 2 indexes with a (batch, C) context array; the lazy proxy must
     reshape the same way."""

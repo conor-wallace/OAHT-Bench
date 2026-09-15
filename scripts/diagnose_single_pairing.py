@@ -162,7 +162,7 @@ def main() -> int:
     from oaht_bench.configs import load_job
     from oaht_bench.dataset.construction.collect import collect_episode
     from oaht_bench.dataset.dataset import Dataset
-    from oaht_bench.dataset.vault import write_vault
+    from oaht_bench.dataset.vault import VaultWriter
     from oaht_bench.envs import make_env
     from oaht_bench.envs.log_wrapper import LogWrapper
     from oaht_bench.models.bc_agent import BcAgent
@@ -204,29 +204,35 @@ def main() -> int:
         else Path(tempfile.mkdtemp(prefix="single_pairing_")) / "pairing.vlt"
     )
 
-    # 1. Collect the single pairing (sequential, like the real collector).
-    rng = jax.random.PRNGKey(args.seed)
-    episodes, member_ids = [], []
-    for i in range(args.episodes):
-        rng, ep_rng = jax.random.split(rng)
-        episodes.append(
-            collect_episode(
-                ep_rng,
-                base_env,
-                [(ego.params, ego.policy_cls), (mate.params, mate.policy_cls)],
-                max_episode_steps=job.env.rollout_length,
-                greedy=False,
-                epsilon=args.collect_noise,
-                noisy_seats=[1],  # teammate seat; ego (seat 0) targets stay expert
-            )
-        )
-        member_ids.append([int(mate.member), int(mate.member)])
-        if (i + 1) % 1000 == 0:
-            print(f"  collected {i + 1}/{args.episodes}", flush=True)
-    ego_mean = float(np.mean([e.returns()[0] for e in episodes]))
+    # 1. Collect the single pairing, streamed to the vault in chunks so collection
+    #    stays RAM-bounded (like the real collector) -- lets --episodes go large.
     if vault_dir.exists():
         shutil.rmtree(vault_dir)
-    write_vault(episodes, np.array(member_ids), vault_dir, ego_index=0, meta={"variant": "single"})
+    writer = VaultWriter(vault_dir, ego_index=0, meta={"variant": "single"})
+    rng = jax.random.PRNGKey(args.seed)
+    chunk_eps, chunk_mids, ret_sum = [], [], 0.0
+    for i in range(args.episodes):
+        rng, ep_rng = jax.random.split(rng)
+        ep = collect_episode(
+            ep_rng,
+            base_env,
+            [(ego.params, ego.policy_cls), (mate.params, mate.policy_cls)],
+            max_episode_steps=job.env.rollout_length,
+            greedy=False,
+            epsilon=args.collect_noise,
+            noisy_seats=[1],  # teammate seat; ego (seat 0) targets stay expert
+        )
+        chunk_eps.append(ep)
+        chunk_mids.append([int(mate.member), int(mate.member)])
+        ret_sum += float(ep.returns()[0])
+        if len(chunk_eps) >= 2000:
+            writer.write(chunk_eps, np.array(chunk_mids))
+            chunk_eps, chunk_mids = [], []
+        if (i + 1) % 1000 == 0:
+            print(f"  collected {i + 1}/{args.episodes}", flush=True)
+    if chunk_eps:
+        writer.write(chunk_eps, np.array(chunk_mids))
+    ego_mean = ret_sum / args.episodes
 
     # 2. Train the baseline through the real pipeline (single seed).
     ds = Dataset(

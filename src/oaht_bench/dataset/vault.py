@@ -426,3 +426,66 @@ class DiskEpisodeSource:
 
     def episode_lengths(self):
         return self._lengths
+
+
+class VaultWriter:
+    """Append episodes to a vault in chunks, so collection never holds them all in RAM.
+
+    ``read_vault``'s inverse for large collections: each :meth:`write` flat-packs a
+    chunk and appends it (flashbax vaults grow on write), continuing episode ids
+    across chunks so the store stays **episode-contiguous** -- which
+    :class:`DiskEpisodeSource` relies on. The vault-level metadata is fixed at the
+    first chunk, so the batch-level ``meta`` must be constant across chunks;
+    per-episode labels that vary (``ego_response_quality``) are passed per chunk and
+    written as flat fields (never into the fixed metadata).
+
+    Collecting straight through this keeps host memory bounded by the chunk size
+    rather than the dataset, so hundred-thousand-episode vaults can be *produced*,
+    not just read.
+    """
+
+    def __init__(self, vault_dir, *, ego_index: int, meta: dict):
+        self._dir = Path(vault_dir)
+        self._ego_index = int(ego_index)
+        self._meta = dict(meta)
+        self._vault = None
+        self._ep_offset = 0
+        self._n = 0
+
+    def write(self, episodes, member_ids, *, ego_response_quality=None) -> None:
+        if len(episodes) == 0:
+            return
+        from flashbax.buffers.trajectory_buffer import TrajectoryBufferState
+        from flashbax.vault import Vault
+
+        chunk_meta = dict(self._meta)
+        if ego_response_quality is not None:
+            chunk_meta["ego_response_quality"] = [float(x) for x in ego_response_quality]
+        experience, metadata = to_flat(
+            episodes, np.asarray(member_ids), ego_index=self._ego_index, meta=chunk_meta
+        )
+        # Continue episode ids across chunks so the flat store stays contiguous.
+        experience["episode_id"] = experience["episode_id"] + np.int32(self._ep_offset)
+        n = int(experience["episode_id"].shape[1])
+        state = TrajectoryBufferState(
+            experience=experience, current_index=np.asarray(n), is_full=np.asarray(True)
+        )
+        if self._vault is None:
+            rel_dir, name, uid = _split_dir(self._dir, self._meta.get("variant"))
+            self._vault = Vault(
+                vault_name=name,
+                experience_structure=state.experience,
+                rel_dir=rel_dir,
+                vault_uid=uid,
+                metadata=metadata,
+            )
+        self._vault.write(state, source_interval=(0, n))
+        self._ep_offset += len(episodes)
+        self._n += n
+
+    @property
+    def num_episodes(self) -> int:
+        return self._ep_offset
+
+    def close(self) -> Path:
+        return self._dir

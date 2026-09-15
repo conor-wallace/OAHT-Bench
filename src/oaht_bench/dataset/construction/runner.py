@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 
 import jax
@@ -20,10 +21,13 @@ from oaht_bench.common.save_load_utils import load_train_run
 from oaht_bench.configs import load_job, save_job
 from oaht_bench.configs.job import DatasetCollectionJob
 from oaht_bench.dataset.construction.collect import collect_episode
-from oaht_bench.dataset.construction.epsilon_sampler import EPSILON_TARGETS, load_pooled, plan_for_variant
+from oaht_bench.dataset.construction.epsilon_sampler import (
+    EPSILON_TARGETS,
+    load_pooled,
+    plan_for_variant,
+)
 from oaht_bench.dataset.construction.split import derive_split
-from oaht_bench.dataset.schema import Episode
-from oaht_bench.dataset.vault import write_vault
+from oaht_bench.dataset.vault import VaultWriter
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper
 from oaht_bench.population import artifact_dir, population_from_run, released_members
@@ -90,9 +94,7 @@ def _seat_plan(eligible: list[int], num_episodes: int, mismatch_fraction: float,
     # lumpy for small k, and every teammate should appear equally often as the
     # one being modelled.
     primaries = _draw_cycling(list(eligible), n_mismatched, rng)
-    mismatched = [
-        (a, int(rng.choice([m for m in eligible if m != a]))) for a in primaries
-    ]
+    mismatched = [(a, int(rng.choice([m for m in eligible if m != a]))) for a in primaries]
 
     plan = matched + mismatched
     # Interleave, or any consumer that slices the dataset by index gets a
@@ -125,31 +127,71 @@ def run(job: DatasetCollectionJob) -> Path:
 
     env = LogWrapper(make_env(job.env.env_name, job.env.env_kwargs()))
     if isinstance(job.population_path, (list, tuple)):
-        episodes, member_ids, meta = _collect_pooled(job, env)
+        meta, stream = _collect_pooled(job, env)
     else:
-        episodes, member_ids, meta = _collect_single(job, env)
+        meta, stream = _collect_single(job, env)
 
-    write_vault(episodes, member_ids, artifact, ego_index=0, meta=meta)
-    summary = _summary(episodes, member_ids, ego_index=0)
+    # Stream episodes straight to the vault in chunks so collection never holds
+    # them all in RAM -- a 150k-episode Hanabi dataset is tens of GiB. The summary
+    # and the per-episode target labels are accumulated the same way.
+    writer = VaultWriter(artifact, ego_index=0, meta=meta)
+    chunk_eps, chunk_mids, chunk_erq, targets = [], [], [], []
+    n = length_sum = 0
+    ret_sum = 0.0
+    agents = None
+
+    def flush():
+        if not chunk_eps:
+            return
+        writer.write(chunk_eps, np.stack(chunk_mids), ego_response_quality=(chunk_erq or None))
+        chunk_eps.clear()
+        chunk_mids.clear()
+        chunk_erq.clear()
+
+    for episode, seats, erq, target in stream:
+        seats = np.asarray(seats)
+        agents = int(seats.shape[0]) if agents is None else agents
+        chunk_eps.append(episode)
+        chunk_mids.append(seats)
+        if erq is not None:
+            chunk_erq.append(float(erq))
+        if target is not None:
+            targets.append(float(target))
+        n += 1
+        length_sum += int(episode.length)
+        ret_sum += float(episode.returns()[0])
+        if len(chunk_eps) >= _WRITE_CHUNK:
+            flush()
+    flush()
+
+    summary = {
+        "episodes": n,
+        "agents": agents,
+        "mean_length": length_sum / max(n, 1),
+        "mean_ego_return": ret_sum / max(n, 1),
+    }
     (run_dir / "dataset_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    if targets:
+        # Per-episode provenance labels ride beside the vault, not in its fixed
+        # metadata (which incremental writes set once, at the first chunk).
+        (run_dir / "collection_labels.json").write_text(
+            json.dumps({"target_epsilon": targets}, indent=2) + "\n"
+        )
     log.info(
         "Dataset: %d episodes, %d agents, mean length %.1f, mean ego return %.4f",
-        summary["episodes"], summary["agents"], summary["mean_length"], summary["mean_ego_return"],
+        summary["episodes"],
+        summary["agents"],
+        summary["mean_length"],
+        summary["mean_ego_return"],
     )
     return run_dir
 
 
-def _summary(episodes: list[Episode], member_ids: np.ndarray, *, ego_index: int) -> dict:
-    """Describe a collection from the ragged episodes, without padding them."""
-    return {
-        "episodes": len(episodes),
-        "agents": int(np.asarray(member_ids).shape[1]),
-        "mean_length": float(np.mean([e.length for e in episodes])),
-        "mean_ego_return": float(np.mean([e.returns()[ego_index] for e in episodes])),
-    }
+#: Episodes flat-packed and appended to the vault per write. Bounds collection RAM.
+_WRITE_CHUNK = 2000
 
 
-def _collect_single(job: DatasetCollectionJob, env) -> tuple[list[Episode], np.ndarray, dict]:
+def _collect_single(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
     """The original path: seat one generator's designed pairing per episode.
 
     ``population_path`` is a single run directory. Only 'expert' is implemented
@@ -194,40 +236,41 @@ def _collect_single(job: DatasetCollectionJob, env) -> tuple[list[Episode], np.n
             f"mismatch_fraction={job.mismatch_fraction}. Lower holdout_per_generator."
         )
 
-    rng = jax.random.PRNGKey(job.seed)
     # The seating plan is decided up front so the matched/mismatched split is
     # exact rather than sampled, and so every teammate gets equal coverage.
     plan = _seat_plan(
-        train_members, job.num_episodes, job.mismatch_fraction,
+        train_members,
+        job.num_episodes,
+        job.mismatch_fraction,
         np.random.default_rng(job.seed),
     )
-    episodes, member_ids = [], []
-    for ep in tqdm(range(job.num_episodes), desc="Geneating dataset"):
-        rng, ep_rng = jax.random.split(rng)
-        # Matched by default: member i opposite member i, which
-        # LoadedPopulation.seat resolves to conf_i vs br_i for the paired
-        # generators and self_i vs self_i for the homogeneous ones. That is the
-        # designed pairing in every case, so the dataset stops carrying which
-        # generator produced it -- one member index means "this teammate at its
-        # intended competence" regardless of method.
-        #
-        # Independent draws per seat made this 1-in-population_size by accident:
-        # at n=5, 80% of an "expert" dataset was mismatched play, which is what
-        # the generators are tuned to make minimally cooperative.
-        primary, partner = plan[ep]
-        seats = np.asarray([primary] + [partner] * (num_seats - 1))
-        episodes.append(
-            collect_episode(
+
+    def stream():
+        rng = jax.random.PRNGKey(job.seed)
+        for ep in tqdm(range(job.num_episodes), desc="Generating dataset"):
+            rng, ep_rng = jax.random.split(rng)
+            # Matched by default: member i opposite member i, which
+            # LoadedPopulation.seat resolves to conf_i vs br_i for the paired
+            # generators and self_i vs self_i for the homogeneous ones. That is the
+            # designed pairing in every case, so the dataset stops carrying which
+            # generator produced it -- one member index means "this teammate at its
+            # intended competence" regardless of method.
+            #
+            # Independent draws per seat made this 1-in-population_size by accident:
+            # at n=5, 80% of an "expert" dataset was mismatched play, which is what
+            # the generators are tuned to make minimally cooperative.
+            primary, partner = plan[ep]
+            seats = np.asarray([primary] + [partner] * (num_seats - 1))
+            episode = collect_episode(
                 ep_rng,
                 env,
                 loaded.seat([int(m) for m in seats]),
                 max_episode_steps=job.env.rollout_length,
                 greedy=False,  # sampled: matches training and deployment (see crossplay)
             )
-        )
-        member_ids.append(seats)
-        if (ep + 1) % 10 == 0:
-            log.info("collected %d/%d episodes", ep + 1, job.num_episodes)
+            yield episode, seats, None, None  # single mode has no per-episode ε label
+            if (ep + 1) % 10 == 0:
+                log.info("collected %d/%d episodes", ep + 1, job.num_episodes)
 
     meta = {
         "config_hash": job.content_hash(),
@@ -249,7 +292,7 @@ def _collect_single(job: DatasetCollectionJob, env) -> tuple[list[Episode], np.n
             for i in split.test_indices
         ],
     }
-    return episodes, np.stack(member_ids), meta
+    return meta, stream()
 
 
 def _pooled_matrix_hash(path: Path) -> str:
@@ -259,7 +302,7 @@ def _pooled_matrix_hash(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:16]
 
 
-def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[list[Episode], np.ndarray, dict]:
+def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
     """Pooled mode: seat the ε sampler's cross-population plan (§3, dataset_design).
 
     The released members of every ``population_path`` are flattened into one
@@ -326,29 +369,29 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[list[Episode], np.n
     )
     num_seats = len(env.agents)
 
-    rng = jax.random.PRNGKey(job.seed)
-    episodes, member_ids, epsilons, targets = [], [], [], []
-    for ep, seating in enumerate(tqdm(plan, desc="Generating pooled dataset")):
-        rng, ep_rng = jax.random.split(rng)
-        ego, mate = roster[seating.ego], roster[seating.teammate]
-        # Ego in seat 0, the teammate in every other seat (two-player today).
-        seats = [(ego.params, ego.policy_cls)] + [
-            (mate.params, mate.policy_cls) for _ in range(num_seats - 1)
-        ]
-        episodes.append(
-            collect_episode(
+    def stream():
+        rng = jax.random.PRNGKey(job.seed)
+        for ep, seating in enumerate(tqdm(plan, desc="Generating pooled dataset")):
+            rng, ep_rng = jax.random.split(rng)
+            ego, mate = roster[seating.ego], roster[seating.teammate]
+            # Ego in seat 0, the teammate in every other seat (two-player today).
+            seats = [(ego.params, ego.policy_cls)] + [
+                (mate.params, mate.policy_cls) for _ in range(num_seats - 1)
+            ]
+            episode = collect_episode(
                 ep_rng,
                 env,
                 seats,
                 max_episode_steps=job.env.rollout_length,
                 greedy=False,  # sampled: matches training and deployment (see crossplay)
             )
-        )
-        member_ids.append(np.asarray([seating.ego] + [seating.teammate] * (num_seats - 1)))
-        epsilons.append(seating.epsilon)
-        targets.append(seating.target)
-        if (ep + 1) % 10 == 0:
-            log.info("collected %d/%d episodes", ep + 1, job.num_episodes)
+            member_row = np.asarray([seating.ego] + [seating.teammate] * (num_seats - 1))
+            # Per-episode ε label (ego_response_quality) and its target ride out with
+            # the episode; the runner writes ε as a flat vault field and the target to
+            # a sidecar, so neither has to sit in the fixed vault metadata.
+            yield episode, member_row, seating.epsilon, seating.target
+            if (ep + 1) % 10 == 0:
+                log.info("collected %d/%d episodes", ep + 1, job.num_episodes)
 
     meta = {
         "config_hash": job.content_hash(),
@@ -366,17 +409,16 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[list[Episode], np.n
         "split_manifest_hash": split.manifest_hash,
         "held_out": {g: sorted(ms) for g, ms in split.held_out.items()},
         "test_teammates": [
-            {"generator": roster[i].generator, "member": int(roster[i].member), "role": roster[i].role}
+            {
+                "generator": roster[i].generator,
+                "member": int(roster[i].member),
+                "role": roster[i].role,
+            }
             for i in split.test_indices
         ],
         # member_ids are indices into this roster manifest.
         "roster": [
-            {"generator": e.generator, "member": int(e.member), "role": e.role}
-            for e in roster
+            {"generator": e.generator, "member": int(e.member), "role": e.role} for e in roster
         ],
-        # Per-episode labels, aligned with the episode axis. write_vault also
-        # broadcasts ego_response_quality into a flat vault field.
-        "ego_response_quality": [float(x) for x in epsilons],
-        "target_epsilon": [float(x) for x in targets],
     }
-    return episodes, np.stack(member_ids), meta
+    return meta, stream()
