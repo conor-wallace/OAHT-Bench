@@ -20,7 +20,7 @@
       "rollout_length": 128,
       "tier": "tier1"
     },
-    "dataset_path": "results/dataset_collection/pooled_expert_hanabi-91cf4598d407/dataset.vlt",
+    "dataset_path": "results/dataset_collection/pooled_expert_hanabi-690e4dc7f41b/dataset.vlt",
     "baseline": "liam",
     "label": "liam_pooled_expert_hanabi_scaled",
     "offline": {
@@ -36,7 +36,9 @@
       "stage2_steps": 60000,
       "stage2_batch_size": 32,
       "log_every": 250,
-      "eval_episodes": 20
+      "eval_episodes": 20,
+      "stream_windows": true,
+      "stream_from_disk": true
     },
     "logging": {
       "use_wandb": false

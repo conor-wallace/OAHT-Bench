@@ -20,7 +20,7 @@
       "rollout_length": 128,
       "tier": "tier1"
     },
-    "dataset_path": "results/dataset_collection/pooled_expert_hanabi-91cf4598d407/dataset.vlt",
+    "dataset_path": "results/dataset_collection/pooled_expert_hanabi-690e4dc7f41b/dataset.vlt",
     "baseline": "tao",
     "label": "tao_pooled_expert_hanabi",
     "offline": {

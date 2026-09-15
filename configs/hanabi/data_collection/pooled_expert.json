@@ -22,7 +22,7 @@
     ],
     "pooled_matrix_path": "populations/hanabi/pooled_crossplay.npz",
     "variant": "expert",
-    "num_episodes": 25000,
+    "num_episodes": 150000,
     "mirror_trajectories": false,
     "label": "pooled_expert_hanabi",
     "logging": {"use_wandb": false}
