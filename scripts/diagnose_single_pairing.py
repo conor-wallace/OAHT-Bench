@@ -122,12 +122,6 @@ def main() -> int:
         help="Where to write the collected vault (default: a temp dir, removed after).",
     )
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument(
-        "--greedy",
-        action="store_true",
-        help="Eval the ego by argmax (teammate still samples). Diagnostic for whether "
-        "a high-accuracy policy is sunk by sampling noise vs a train/deploy mismatch.",
-    )
     args = ap.parse_args()
 
     import jax
@@ -238,36 +232,43 @@ def main() -> int:
         normalization=ds.windows.norm,
     )
     agent.build_model()
-    sc = evaluate_agent_against(
-        agent,
-        {"stage1": s1, "stage2": s2},
-        env,
-        [(args.pairing, mate.params, mate.policy_cls)],
-        rng=jax.random.PRNGKey(args.seed + 123),
-        target_return=cond,
-        max_episode_steps=job.env.rollout_length,
-        num_episodes=args.eval_episodes,
-        greedy=args.greedy,
-    )
-    ret = float(next(iter(sc.per_teammate.values())))
+
+    # Eval the same trained policy both ways: sampled is the benchmark metric;
+    # greedy (argmax ego, teammate still samples) isolates whether sampling noise
+    # -- not a train/deploy mismatch -- is sinking a high-accuracy policy.
+    def score(greedy: bool) -> float:
+        sc = evaluate_agent_against(
+            agent,
+            {"stage1": s1, "stage2": s2},
+            env,
+            [(args.pairing, mate.params, mate.policy_cls)],
+            rng=jax.random.PRNGKey(args.seed + 123),
+            target_return=cond,
+            max_episode_steps=job.env.rollout_length,
+            num_episodes=args.eval_episodes,
+            greedy=greedy,
+        )
+        return float(next(iter(sc.per_teammate.values())))
+
+    sampled = score(greedy=False)
+    greedy = score(greedy=True)
 
     if not args.vault:
         shutil.rmtree(vault_dir.parent, ignore_errors=True)
 
+    acc = logger.last_acc if logger.last_acc is not None else float("nan")
     print("\n===== SINGLE-PAIRING DIAGNOSTIC =====", flush=True)
     print(f"  baseline:               {job.baseline}", flush=True)
     print(f"  pairing:                {args.pairing}", flush=True)
-    print(
-        f"  eval mode:              {'argmax (greedy ego)' if args.greedy else 'sampled'}",
-        flush=True,
-    )
     print(f"  ceiling (dataset mean): {ego_mean:.2f}", flush=True)
+    print(f"  action accuracy:        {acc:.3f}", flush=True)
     print(
-        f"  action accuracy:        {logger.last_acc if logger.last_acc is not None else float('nan'):.3f}",
+        f"  return (sampled ego):   {sampled:.2f}  ({100 * sampled / ego_mean:.0f}% of ceiling)",
         flush=True,
     )
     print(
-        f"  trained return:         {ret:.2f}  ({100 * ret / ego_mean:.0f}% of ceiling)", flush=True
+        f"  return (argmax ego):    {greedy:.2f}  ({100 * greedy / ego_mean:.0f}% of ceiling)",
+        flush=True,
     )
     return 0
 
