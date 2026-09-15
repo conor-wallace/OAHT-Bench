@@ -172,16 +172,21 @@ def run(job: TrainingJob) -> Path:
     return run_dir
 
 
-def _teammate_policies(batch, env) -> list:
+def _teammate_policies(batch, env, which: str = "held_out") -> list:
     """The teammate policies evaluation rolls the trained ego against.
 
-    With a train/test split (§8), this is the **held-out** set -- the test
-    teammates collection never trained on, drawn from every listed population --
-    which is the generalisation measurement the benchmark is about. Without a split
-    (legacy single-population datasets, no ``held_out`` in meta) it falls back to
-    that one population's released members, an in-distribution measurement recorded
-    as such. Only ``self``/``conf`` policies are seated as teammates; a ``br`` is a
-    designed ego, never a partner -- the same restriction collection uses.
+    With a train/test split (§8), ``which`` selects which side of the split to
+    seat: ``"held_out"`` (default) is the **test** set -- the teammates collection
+    never trained on, drawn from every listed population, the generalisation
+    measurement the benchmark is about -- and ``"train"`` is its complement, the
+    in-distribution teammates whose trajectories the ego *did* learn from. Scoring
+    both is what separates "modelled the training population" from "generalised to
+    unseen partners". Without a split (legacy single-population datasets, no
+    ``held_out`` in meta) it falls back to that one population's released members as
+    an in-distribution measurement, and a ``"train"`` request returns ``[]`` because
+    there is no held-out complement to contrast against. Only ``self``/``conf``
+    policies are seated as teammates; a ``br`` is a designed ego, never a partner --
+    the same restriction collection uses.
 
     Returns ``[(label, mate_params, policy_cls)]``.
     """
@@ -192,11 +197,18 @@ def _teammate_policies(batch, env) -> list:
         held = {g: {int(m) for m in ms} for g, ms in meta["held_out"].items()}
         pop_paths = meta.get("populations") or [meta["population_run"]]
         roster = build_roster([Path(p) for p in pop_paths], env)
+        want_test = which != "train"
         return [
             (f"{e.generator}:{int(e.member)}:{e.role}", e.params, e.policy_cls)
             for e in roster
-            if int(e.member) in held.get(e.generator, set()) and e.role in ("self", "conf")
+            if e.role in ("self", "conf")
+            and (int(e.member) in held.get(e.generator, set())) == want_test
         ]
+
+    # Legacy split-less datasets carry only the in-distribution population; there is
+    # no held-out complement, so a "train" contrast has nothing to seat.
+    if which == "train":
+        return []
 
     from oaht_bench.common.save_load_utils import load_train_run
     from oaht_bench.configs import load_job
@@ -234,12 +246,13 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
 
     cfg = job.offline
     env = LogWrapper(make_env(job.env.env_name, job.env.env_kwargs()))
-    teammates = _teammate_policies(batch, env)
-    if not teammates:
+    heldout_teammates = _teammate_policies(batch, env, which="held_out")
+    if not heldout_teammates:
         raise ValueError(
             "no teammate policies resolved for evaluation -- the held-out set is "
             "empty. Check the dataset's 'held_out' meta and its populations."
         )
+    train_teammates = _teammate_policies(batch, env, which="train")
 
     resolved = _resolve_dims(cfg, windows.obs_dim, action_dim)
     all_params = {"stage1": stage1_params, "stage2": stage2_params}
@@ -271,49 +284,87 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
     # seed cannot give -- teammate-to-teammate variance already swamps the ~0.03
     # gaps between baselines, so seeds are what make an ordering trustworthy.
     ns = int(job.num_seeds)
-    per_seed = []
-    for s in range(ns):
-        params = all_params if ns == 1 else jax.tree.map(lambda x: x[s], all_params)  # noqa: B023
-        per_seed.append(
+    import numpy as np
+
+    def score(teammates, *, rng_base):
+        """Across-seed mean return against one teammate set.
+
+        ``rng_base`` offsets the per-seed eval RNG so the held-out draw stays
+        byte-identical to the pre-split runs while train gets independent episodes.
+        """
+        per_seed = [
             evaluate_agent_against(
                 agent,
-                params,
+                all_params if ns == 1 else jax.tree.map(lambda x: x[s], all_params),  # noqa: B023
                 env,
                 teammates,
-                rng=jax.random.PRNGKey(job.seed + 1 + s),
+                rng=jax.random.PRNGKey(rng_base + s),
                 target_return=cond_target,
                 max_episode_steps=job.env.rollout_length,
                 num_episodes=job.offline.eval_episodes,
             )
-        )
+            for s in range(ns)
+        ]
+        labels = list(per_seed[0].per_teammate)
+        per_teammate = {t: float(np.mean([sc.per_teammate[t] for sc in per_seed])) for t in labels}
+        seed_means = [sc.mean_return for sc in per_seed]
+        out = {
+            "num_seeds": ns,
+            "mean_return": float(np.mean(seed_means)),
+            "mean_return_std": float(np.std(seed_means)) if ns > 1 else 0.0,
+            "worst_teammate_return": float(min(per_teammate.values())),
+            "per_teammate": per_teammate,
+        }
+        if ns > 1:
+            out["per_seed_mean_return"] = [float(m) for m in seed_means]
+        return out
 
-    import numpy as np
+    # Held-out (test) is the primary metric; its rng_base is unchanged so existing
+    # runs reproduce byte-for-byte.
+    result = score(heldout_teammates, rng_base=job.seed + 1)
+    result["target_return"] = float(cond_target)
 
-    labels = list(per_seed[0].per_teammate)
-    per_teammate = {t: float(np.mean([sc.per_teammate[t] for sc in per_seed])) for t in labels}
-    seed_means = [sc.mean_return for sc in per_seed]
-    result = {
-        "num_seeds": ns,
-        "target_return": float(cond_target),
-        "mean_return": float(np.mean(seed_means)),
-        "mean_return_std": float(np.std(seed_means)) if ns > 1 else 0.0,
-        "worst_teammate_return": float(min(per_teammate.values())),
-        "per_teammate": per_teammate,
-    }
-    if ns > 1:
-        result["per_seed_mean_return"] = [float(m) for m in seed_means]
-
-    for label, v in per_teammate.items():
+    for label, v in result["per_teammate"].items():
         logger.log_item(f"Eval/Return_teammate_{label}", v)
     logger.log_item("Eval/MeanReturn", result["mean_return"])
     if ns > 1:
         logger.log_item("Eval/MeanReturnStd", result["mean_return_std"])
     logger.log_item("Eval/WorstTeammateReturn", result["worst_teammate_return"])
+
+    # In-distribution contrast: how well the ego coordinates with the *training*
+    # teammates it learned from, so a held-out score is readable as generalisation
+    # rather than raw competence. Absent for legacy split-less datasets.
+    if train_teammates:
+        train = score(train_teammates, rng_base=job.seed + 1001)
+        result["train"] = train
+        result["generalization_gap"] = float(train["mean_return"] - result["mean_return"])
+        for label, v in train["per_teammate"].items():
+            logger.log_item(f"Eval/Train_Return_teammate_{label}", v)
+        logger.log_item("Eval/TrainMeanReturn", train["mean_return"])
+        if ns > 1:
+            logger.log_item("Eval/TrainMeanReturnStd", train["mean_return_std"])
+        logger.log_item("Eval/GeneralizationGap", result["generalization_gap"])
+
     logger.commit()
-    log.info(
-        "Evaluation (%d seed%s): mean %.4f%s, worst-teammate %.4f",
-        ns, "" if ns == 1 else "s", result["mean_return"],
-        "" if ns == 1 else f" ± {result['mean_return_std']:.4f}",
-        result["worst_teammate_return"],
-    )
+    if "train" in result:
+        log.info(
+            "Evaluation (%d seed%s): held-out mean %.4f%s, train mean %.4f, gap %.4f, "
+            "worst-teammate %.4f",
+            ns,
+            "" if ns == 1 else "s",
+            result["mean_return"],
+            "" if ns == 1 else f" ± {result['mean_return_std']:.4f}",
+            result["train"]["mean_return"],
+            result["generalization_gap"],
+            result["worst_teammate_return"],
+        )
+    else:
+        log.info(
+            "Evaluation (%d seed%s): mean %.4f%s, worst-teammate %.4f",
+            ns,
+            "" if ns == 1 else "s",
+            result["mean_return"],
+            "" if ns == 1 else f" ± {result['mean_return_std']:.4f}",
+            result["worst_teammate_return"],
+        )
     return result
