@@ -1202,6 +1202,71 @@ Hanabi run (independent self-play by construction) with `actor_type="rnn"` — n
 `rnn`, **not** the conditional-critic variant, which FCP cannot build (no population index to
 condition on). Competence (SP ~11.5) is the separate open lever (PPO/architecture tuning).
 
+## Offline BC × Hanabi — not broken, data-limited (and the RAM wall that hid it)
+
+This is an offline-baseline (§3.1) entry, not teammate generation, but it is the
+sharpest "what the sweep could *not* conclude at first" case in the file, so it
+belongs here.
+
+**The scare.** Trained on the pooled `expert` Hanabi dataset (25k episodes), every
+offline baseline scored ~0.2–0.4 return against held-out teammates (ceiling ~19.7),
+and BC on a *single* clean convention (comedi:0 self-play) reached only ~24% of that
+convention's own self-play return — while the identical trainer/config reached ~84%
+of ceiling on LBF. It read like BC/DT fundamentally cannot do offline Hanabi.
+
+**What it actually was, ruled out in order.** Reporting units (the summary mixed a
+normalized RTG target with a raw return), RTG conditioning (flat across target
+quantiles — the model ignores RTG), sampling vs argmax (argmax no better), action
+leakage (causal mask; logits read off the `o_t` tokens), train/deploy window
+misalignment (training left-pads with absolute timesteps, matching deploy — verified
+by an inference-parity probe: training-forward and deploy `get_action` argmax agree),
+and over-training (early-stopping made it *worse*). What remained, measured cleanly
+with a train-seed/eval-seed split and the *saved* normalization:
+
+- a **generalization gap** — 1.00 teacher-forced accuracy on the exact training
+  deals vs ~0.80 on held-out deals (the model memorized 2k distinct trajectories),
+  and
+- a **closed-loop compounding** cost — even at 100% teacher-forced accuracy the ego
+  reached only ~51% of ceiling in closed loop, because one wrong action desyncs the
+  recurrent partner. Held-out closed-loop is the two stacked.
+
+**Both scale away with data.** Doubling then quintupling the single-convention data
+(the compounding runs in reverse — fewer per-step errors → less drift):
+
+| episodes | held-out per-step acc | held-out closed-loop (sampled teammate) |
+|---:|---:|---:|
+| 2,000 | 0.80 | ~30% of ceiling |
+| 4,000 | 0.84 | ~65% |
+| 10,000 | 0.89 | **~95%** |
+
+At 10k the in-dist/held-out gap collapses (21 → ~0 pts) and in-dist teacher-forced
+*drops* 1.00 → 0.98 — memorization giving way to generalization. **Conclusion: the
+offline trainer works; Hanabi (hidden hand, ~70-step horizon) is data-hungry, and
+per-convention cloning needs ~10k trajectories.** The LBF-inherited offline config
+(`context_length=20`, `hidden_dim=32`) caps at ~4%; the config that clears the gate
+is `context_length=80` (full episode), `hidden_dim=128`, `num_blocks=3`, `ff_dim=256`,
+`stage2_batch_size=32`, `stage2_steps=60000` — `configs/hanabi/training/pooled_expert_scaled/`.
+
+**What it could not conclude, and the tooling the answer needed.** The 25k pooled
+set gave only ~2.1k episodes per train pairing (12 pairings, `holdout_per_generator=2`
+over 20 self/conf teammates) — 5× under the ~10k bar — so the pooled numbers were
+*doubly* handicapped (undersampled per convention *and* un-conditioned BC's pooling
+incoherence). Scaling the pooled collection to 150k (~12.5k/pairing) is the open
+test, and it needed the pipeline to stop being RAM-bound: `LazyWindows`
+(`stream_windows`) builds windows on demand, `DiskEpisodeSource` (`stream_from_disk`)
+streams episodes from the vault, and `VaultWriter` collects them in chunks — so
+collection *and* training run in bounded host RAM (all three verified byte-identical
+to the eager path). Two ceilings will remain even at 150k: **un-conditioned BC is
+capped by pooling incoherence** (it cannot be 12 conventions at once at deploy — the
+teammate-modelling baselines are what turn per-convention coverage into behaviour),
+and **held-out AHT is bounded by the confederate ZSC wall** (a BRDiv/L-BRDiv `conf`'s
+only competent partner is its `br`, held out with it — best train-ego over held-out
+was ~2.4–3.6). Data cannot fix either; they are protocol properties.
+
+Reproduce the single-convention curve with `scripts/diagnose_single_pairing.py`
+(`--episodes N --streaming`), `scripts/diagnose_generalization.py` (train/eval-seed
+gap), and `scripts/diagnose_inference_parity.py` (deploy faithfulness).
+
 ## Not yet tuned
 
 All four on Overcooked-v1 and Hanabi still run at hyperparameters ported
