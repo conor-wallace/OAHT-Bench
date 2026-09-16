@@ -123,3 +123,148 @@ def collect_episode(
         avail_actions=np.stack(rec["avail"]).transpose(1, 0, 2),
         dones=np.asarray(rec["dones"], dtype=bool),
     )
+
+
+def _tree_freeze(frozen, keep, new):
+    """``keep`` where ``frozen`` (a scalar bool), else ``new`` -- leafwise."""
+    return jax.tree_util.tree_map(lambda k, v: jnp.where(frozen, k, v), keep, new)
+
+
+#: Compiled batched rollouts, keyed by everything static about them; params are
+#: passed as arguments, so repeated calls that differ only in parameters -- every
+#: sub-chunk of a pairing, and every pairing that shares a generator's policy -- reuse
+#: one compiled executable. Same rationale (and the same recompile-per-call bug it
+#: avoids) as ``run_episodes._ROLLOUT_CACHE``. Key objects are pinned so ids can't be
+#: reused while cached.
+_BATCH_ROLLOUT_CACHE: dict = {}
+
+
+def collect_episodes_batched(
+    rng,
+    env,
+    seats: Sequence[tuple[Any, Any]],
+    *,
+    max_episode_steps: int,
+    num_episodes: int,
+    batch_size: int = 256,
+    greedy: bool | Sequence[bool] = False,
+) -> list[Episode]:
+    """Collect ``num_episodes`` of one seating in a single vmapped, scanned device call.
+
+    Equivalent to calling :func:`collect_episode` on each of
+    ``jax.random.split(rng, num_episodes)`` with ``epsilon=0``, but the whole batch
+    runs on device (``lax.scan`` over steps, ``vmap`` over episodes) instead of a
+    Python per-step loop -- one to two orders of magnitude faster, and it actually
+    uses the accelerator. Every lane shares the *same* seating (policies + params),
+    so this batches one ``(ego, teammate)`` pairing; a caller with a mixed plan groups
+    it by pairing first.
+
+    The scan runs the full ``max_episode_steps`` and freezes each lane after its
+    episode ends (like :func:`~oaht_bench.common.run_episodes.run_single_episode`);
+    each episode is then sliced back to its real length, so the returned ragged
+    :class:`~oaht_bench.dataset.schema.Episode`\\ s are transition-for-transition
+    identical to the eager path. ``epsilon`` noise is not supported here (the
+    production collection path uses none); use :func:`collect_episode` for that.
+    """
+    agents = list(env.agents)
+    n = len(agents)
+    if len(seats) != n:
+        raise ValueError(f"{len(seats)} occupants for {n} seats ({agents}).")
+    seat_params = [p for p, _ in seats]
+    seat_policies = [pol for _, pol in seats]
+    greedy_seats = list(greedy) if isinstance(greedy, (list, tuple)) else [greedy] * n
+
+    def one(ep_rng, seat_params):
+        rng, reset_rng = jax.random.split(ep_rng)
+        obs0, state0 = env.reset(reset_rng)
+        hstates0 = [seat_policies[i].init_hstate(1, aux_info={"agent_id": i}) for i in range(n)]
+        done0 = {k: jnp.zeros((1,), dtype=bool) for k in agents + ["__all__"]}
+
+        def step_fn(carry, _):
+            state, obs, done_flags, hstates, rng, frozen = carry
+            avail = jax.lax.stop_gradient(env.get_avail_actions(state))
+            rec_obs, rec_act, rec_avail, new_h = [], [], [], []
+            for i, name in enumerate(agents):
+                rng, act_rng = jax.random.split(rng)
+                av = avail[name].astype(jnp.float32)
+                act, h = seat_policies[i].get_action(
+                    params=seat_params[i],
+                    obs=obs[name].reshape(1, 1, -1),
+                    done=done_flags[name].reshape(1, 1),
+                    avail_actions=av,
+                    hstate=hstates[i],
+                    rng=act_rng,
+                    aux_obs=None,
+                    env_state=state,
+                    test_mode=greedy_seats[i],
+                )
+                rec_obs.append(obs[name].reshape(-1))
+                rec_act.append(act.reshape(-1)[0].astype(jnp.int32))
+                rec_avail.append(av.reshape(-1))
+                new_h.append(h)
+            rng, step_rng = jax.random.split(rng)
+            env_act = {name: rec_act[i] for i, name in enumerate(agents)}
+            nobs, nstate, reward, ndone, _ = env.step(step_rng, state, env_act)
+            step_done = ndone["__all__"].reshape(-1)[0]
+            carry_out = (
+                _tree_freeze(frozen, state, nstate),
+                _tree_freeze(frozen, obs, nobs),
+                _tree_freeze(frozen, done_flags, ndone),
+                _tree_freeze(frozen, hstates, new_h),
+                rng,
+                frozen | step_done,
+            )
+            ys = (
+                jnp.stack(rec_obs),  # (n, obs_dim) -- pre-step observation acted on
+                jnp.stack(rec_act),  # (n,)
+                jnp.stack([reward[name].reshape(-1)[0] for name in agents]),  # (n,)
+                jnp.stack(rec_avail),  # (n, num_actions)
+                frozen | step_done,  # episode-done flag recorded this step
+            )
+            return carry_out, ys
+
+        init = (state0, obs0, done0, hstates0, rng, jnp.asarray(False))
+        _, ys = jax.lax.scan(step_fn, init, None, length=max_episode_steps)
+        return ys
+
+    key = (
+        id(env),
+        tuple(id(p) for p in seat_policies),
+        tuple(greedy_seats),
+        int(max_episode_steps),
+    )
+    cached = _BATCH_ROLLOUT_CACHE.get(key)
+    if cached is None:
+
+        @jax.jit
+        def rollout(ep_rngs, seat_params):
+            return jax.vmap(lambda r: one(r, seat_params))(ep_rngs)
+
+        _BATCH_ROLLOUT_CACHE[key] = (rollout, env, seat_policies)
+        cached = _BATCH_ROLLOUT_CACHE[key]
+    rollout = cached[0]
+    ep_rngs = jax.random.split(rng, num_episodes)
+
+    episodes: list[Episode] = []
+    # Chunk the vmap so a large group does not materialize (num_episodes x T x
+    # obs_dim) on device at once. All full chunks share the compiled rollout; a
+    # smaller final chunk recompiles once.
+    for start in range(0, num_episodes, batch_size):
+        chunk = ep_rngs[start : start + batch_size]
+        obs, acts, rews, avail, dones = rollout(chunk, seat_params)
+        obs, acts, rews = np.asarray(obs), np.asarray(acts), np.asarray(rews)
+        avail, dones = np.asarray(avail), np.asarray(dones)
+        any_done = dones.any(axis=1)
+        lengths = np.where(any_done, dones.argmax(axis=1) + 1, max_episode_steps)
+        for b in range(len(chunk)):
+            length = int(lengths[b])
+            episodes.append(
+                Episode(
+                    obs=obs[b, :length].transpose(1, 0, 2).astype(np.float32),
+                    actions=acts[b, :length].transpose(1, 0).astype(np.int64),
+                    rewards=rews[b, :length].transpose(1, 0).astype(np.float32),
+                    avail_actions=avail[b, :length].transpose(1, 0, 2).astype(np.float32),
+                    dones=dones[b, :length].astype(bool),
+                )
+            )
+    return episodes

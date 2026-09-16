@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import defaultdict
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -20,7 +21,7 @@ from tqdm import tqdm
 from oaht_bench.common.save_load_utils import load_train_run
 from oaht_bench.configs import load_job, save_job
 from oaht_bench.configs.job import DatasetCollectionJob
-from oaht_bench.dataset.construction.collect import collect_episode
+from oaht_bench.dataset.construction.collect import collect_episodes_batched
 from oaht_bench.dataset.construction.epsilon_sampler import (
     EPSILON_TARGETS,
     load_pooled,
@@ -190,6 +191,10 @@ def run(job: DatasetCollectionJob) -> Path:
 #: Episodes flat-packed and appended to the vault per write. Bounds collection RAM.
 _WRITE_CHUNK = 2000
 
+#: Episodes collected per batched call within a pairing group. Bounds the ragged
+#: episodes held in RAM before they stream on to the vault writer.
+_COLLECT_SUBGROUP = 2000
+
 
 def _collect_single(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
     """The original path: seat one generator's designed pairing per episode.
@@ -246,31 +251,35 @@ def _collect_single(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
     )
 
     def stream():
-        rng = jax.random.PRNGKey(job.seed)
-        for ep in tqdm(range(job.num_episodes), desc="Generating dataset"):
-            rng, ep_rng = jax.random.split(rng)
-            # Matched by default: member i opposite member i, which
-            # LoadedPopulation.seat resolves to conf_i vs br_i for the paired
-            # generators and self_i vs self_i for the homogeneous ones. That is the
-            # designed pairing in every case, so the dataset stops carrying which
-            # generator produced it -- one member index means "this teammate at its
-            # intended competence" regardless of method.
-            #
-            # Independent draws per seat made this 1-in-population_size by accident:
-            # at n=5, 80% of an "expert" dataset was mismatched play, which is what
-            # the generators are tuned to make minimally cooperative.
-            primary, partner = plan[ep]
-            seats = np.asarray([primary] + [partner] * (num_seats - 1))
-            episode = collect_episode(
-                ep_rng,
-                env,
-                loaded.seat([int(m) for m in seats]),
-                max_episode_steps=job.env.rollout_length,
-                greedy=False,  # sampled: matches training and deployment (see crossplay)
-            )
-            yield episode, seats, None, None  # single mode has no per-episode ε label
-            if (ep + 1) % 10 == 0:
-                log.info("collected %d/%d episodes", ep + 1, job.num_episodes)
+        # Matched-by-default seating resolves each (primary, partner) to its designed
+        # pairing (conf_i vs br_i for paired generators, self_i vs self_i otherwise).
+        # Group the plan by that pairing so each collects in one batched device call;
+        # yield order is by pairing rather than the plan's interleave (fine -- training
+        # samples at random and the split is by member).
+        by_pairing: dict[tuple[int, int], list[int]] = defaultdict(list)
+        for idx, (primary, partner) in enumerate(plan):
+            by_pairing[(int(primary), int(partner))].append(idx)
+
+        base = jax.random.PRNGKey(job.seed)
+        with tqdm(total=len(plan), desc="Generating dataset", unit="ep") as bar:
+            for gi, ((primary, partner), idxs) in enumerate(by_pairing.items()):
+                seats_members = [primary] + [partner] * (num_seats - 1)
+                seats = loaded.seat(seats_members)
+                member_row = np.asarray(seats_members)
+                for start in range(0, len(idxs), _COLLECT_SUBGROUP):
+                    sub = idxs[start : start + _COLLECT_SUBGROUP]
+                    sub_rng = jax.random.fold_in(jax.random.fold_in(base, gi), start)
+                    eps = collect_episodes_batched(
+                        sub_rng,
+                        env,
+                        seats,
+                        max_episode_steps=job.env.rollout_length,
+                        num_episodes=len(sub),
+                        greedy=False,  # sampled: matches training and deployment
+                    )
+                    for e in eps:
+                        yield e, member_row, None, None  # single mode: no ε label
+                    bar.update(len(sub))
 
     meta = {
         "config_hash": job.content_hash(),
@@ -370,28 +379,41 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
     num_seats = len(env.agents)
 
     def stream():
-        rng = jax.random.PRNGKey(job.seed)
-        for ep, seating in enumerate(tqdm(plan, desc="Generating pooled dataset")):
-            rng, ep_rng = jax.random.split(rng)
-            ego, mate = roster[seating.ego], roster[seating.teammate]
-            # Ego in seat 0, the teammate in every other seat (two-player today).
-            seats = [(ego.params, ego.policy_cls)] + [
-                (mate.params, mate.policy_cls) for _ in range(num_seats - 1)
-            ]
-            episode = collect_episode(
-                ep_rng,
-                env,
-                seats,
-                max_episode_steps=job.env.rollout_length,
-                greedy=False,  # sampled: matches training and deployment (see crossplay)
-            )
-            member_row = np.asarray([seating.ego] + [seating.teammate] * (num_seats - 1))
-            # Per-episode ε label (ego_response_quality) and its target ride out with
-            # the episode; the runner writes ε as a flat vault field and the target to
-            # a sidecar, so neither has to sit in the fixed vault metadata.
-            yield episode, member_row, seating.epsilon, seating.target
-            if (ep + 1) % 10 == 0:
-                log.info("collected %d/%d episodes", ep + 1, job.num_episodes)
+        # Group the plan by (ego, teammate) so each pairing's episodes collect in one
+        # batched device call (vmap over episodes, scan over steps) instead of the
+        # eager per-step Python loop -- 1-2 orders of magnitude faster on an
+        # accelerator. Yield order is by pairing rather than the plan's interleave,
+        # which is fine: training samples windows at random and the split is by member,
+        # not index. Per-pairing ε/target ride out with each episode as before.
+        by_pairing: dict[tuple[int, int], list[int]] = defaultdict(list)
+        for idx, seating in enumerate(plan):
+            by_pairing[(seating.ego, seating.teammate)].append(idx)
+
+        base = jax.random.PRNGKey(job.seed)
+        with tqdm(total=len(plan), desc="Generating pooled dataset", unit="ep") as bar:
+            for gi, ((ego_i, mate_i), idxs) in enumerate(by_pairing.items()):
+                ego, mate = roster[ego_i], roster[mate_i]
+                seats = [(ego.params, ego.policy_cls)] + [
+                    (mate.params, mate.policy_cls) for _ in range(num_seats - 1)
+                ]
+                for start in range(0, len(idxs), _COLLECT_SUBGROUP):
+                    sub = idxs[start : start + _COLLECT_SUBGROUP]
+                    sub_rng = jax.random.fold_in(jax.random.fold_in(base, gi), start)
+                    eps = collect_episodes_batched(
+                        sub_rng,
+                        env,
+                        seats,
+                        max_episode_steps=job.env.rollout_length,
+                        num_episodes=len(sub),
+                        greedy=False,  # sampled: matches training and deployment
+                    )
+                    for k, idx in enumerate(sub):
+                        seating = plan[idx]
+                        member_row = np.asarray(
+                            [seating.ego] + [seating.teammate] * (num_seats - 1)
+                        )
+                        yield eps[k], member_row, seating.epsilon, seating.target
+                    bar.update(len(sub))
 
     meta = {
         "config_hash": job.content_hash(),
