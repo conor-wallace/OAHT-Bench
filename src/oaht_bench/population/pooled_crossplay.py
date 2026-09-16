@@ -32,6 +32,7 @@ from typing import Any
 
 import jax
 import numpy as np
+from tqdm import tqdm
 
 from oaht_bench.common.run_episodes import run_episodes
 from oaht_bench.population.loading import artifact_dir
@@ -135,22 +136,24 @@ def evaluate_pooled(
     """
     k = len(roster)
     matrix = np.zeros((k, k), dtype=float)
-    for i, ego in enumerate(roster):
-        for j, mate in enumerate(roster):
-            rng, pair_rng = jax.random.split(rng)
-            out = run_episodes(
-                pair_rng,
-                env,
-                agent_0_param=ego.params,
-                agent_0_policy=ego.policy_cls,
-                agent_1_param=mate.params,
-                agent_1_policy=mate.policy_cls,
-                max_episode_steps=max_episode_steps,
-                num_eps=num_episodes,
-                agent_0_test_mode=greedy,
-                agent_1_test_mode=greedy,
-            )
-            matrix[i, j] = float(np.asarray(out["returned_episode_returns"]).mean())
+    with tqdm(total=k * k, desc="crossplay pairs", unit="pair") as bar:
+        for i, ego in enumerate(roster):
+            for j, mate in enumerate(roster):
+                rng, pair_rng = jax.random.split(rng)
+                out = run_episodes(
+                    pair_rng,
+                    env,
+                    agent_0_param=ego.params,
+                    agent_0_policy=ego.policy_cls,
+                    agent_1_param=mate.params,
+                    agent_1_policy=mate.policy_cls,
+                    max_episode_steps=max_episode_steps,
+                    num_eps=num_episodes,
+                    agent_0_test_mode=greedy,
+                    agent_1_test_mode=greedy,
+                )
+                matrix[i, j] = float(np.asarray(out["returned_episode_returns"]).mean())
+                bar.update(1)
     return matrix
 
 
