@@ -212,10 +212,16 @@ class _DiskEpisode:
     so a list of these is cheap to keep even for hundreds of thousands of episodes.
     """
 
-    __slots__ = ("_src", "_ep")
+    __slots__ = ("_src", "_ep", "_rec")
 
     def __init__(self, src, ep):
         self._src, self._ep = src, ep
+        self._rec = None  # this episode's five fields, read once on first access
+
+    def _get(self):
+        if self._rec is None:
+            self._rec = self._src._read(self._ep)
+        return self._rec
 
     @property
     def length(self):
@@ -227,23 +233,23 @@ class _DiskEpisode:
 
     @property
     def obs(self):
-        return self._src._read(self._ep)["obs"]
+        return self._get()["obs"]
 
     @property
     def actions(self):
-        return self._src._read(self._ep)["actions"]
+        return self._get()["actions"]
 
     @property
     def rewards(self):
-        return self._src._read(self._ep)["rewards"]
+        return self._get()["rewards"]
 
     @property
     def avail_actions(self):
-        return self._src._read(self._ep)["avail_actions"]
+        return self._get()["avail_actions"]
 
     @property
     def dones(self):
-        return self._src._read(self._ep)["dones"]
+        return self._get()["dones"]
 
     def returns(self):
         return self.rewards.sum(axis=1)
@@ -277,19 +283,23 @@ class VaultReader:
     hundred-thousand-episode Hanabi dataset). The vault's fields are tensorstore
     arrays that support lazy slice reads, and episodes are stored contiguously, so
     this reads only per-episode metadata up front (``episode_id`` boundaries,
-    ``member_ids``, ``rewards`` for returns -- all small) and fetches each episode's
-    observations/actions on demand, behind a bounded LRU. Host memory is then set by
-    the cache, not the dataset size, so windowing (via :class:`~oaht_bench.dataset.dataset.Windows`) scales
-    to arbitrarily large vaults.
+    ``member_ids``, ``rewards`` for returns -- all small) and leaves the bulk
+    (observations/actions/avail) on disk.
+
+    Windowing reads each window as a *direct contiguous slice* (:meth:`read_slices`),
+    concurrently across the minibatch -- there is no episode cache. The OS page cache
+    handles reuse (the compressed vault is small enough to sit in it), which is both
+    faster than a hand-rolled LRU for random-access training and free of a size knob.
+    :class:`~oaht_bench.dataset.dataset.Windows` prefetches the next minibatch on a
+    background thread, so these reads overlap the GPU step (the PyTorch ``DataLoader``
+    pattern).
 
     Quacks like ``EpisodeBatch`` for the fields :class:`~oaht_bench.dataset.dataset.Dataset`
     and :class:`~oaht_bench.dataset.dataset.Windows` read: ``ego_index``, ``num_agents``, ``num_episodes``,
     ``episodes`` (a lazy list), ``member_ids``, ``episode_returns()`` and ``meta``.
     """
 
-    def __init__(self, vault_dir, *, variant=None, cache_episodes: int = 1024):
-        from collections import OrderedDict
-
+    def __init__(self, vault_dir, *, variant=None):
         from flashbax.vault import Vault
 
         vault_dir = Path(vault_dir)
@@ -348,17 +358,14 @@ class VaultReader:
             self.meta["ego_response_quality"] = q
 
         self.episodes = _DiskEpisodeList(self)
-        self._cache: OrderedDict = OrderedDict()
-        self._cache_max = int(cache_episodes)
 
     def _read(self, ep):
-        hit = self._cache.get(ep)
-        if hit is not None:
-            self._cache.move_to_end(ep)
-            return hit
+        """The whole episode's five fields. Used only by ``read_vault``'s eager
+        materialization and the in-RAM window fallback; training reads window slices
+        directly through :meth:`read_slices`."""
         o, ln = int(self._offsets[ep]), int(self._lengths[ep])
         s = slice(o, o + ln)
-        rec = {
+        return {
             "obs": np.asarray(self._ds["observations"][0, s].read().result())
             .transpose(1, 0, 2)
             .astype(np.float32),
@@ -375,10 +382,30 @@ class VaultReader:
             .reshape(-1)
             .astype(bool),
         }
-        self._cache[ep] = rec
-        if len(self._cache) > self._cache_max:
-            self._cache.popitem(last=False)
-        return rec
+
+    def read_slices(self, store_key, seat, offsets, counts):
+        """Read many window slices ``ds[store_key][0, off:off+cnt, seat]`` concurrently.
+
+        The reads are issued as tensorstore futures up front and awaited together, so
+        a minibatch's windows are fetched in parallel rather than one blocking read at
+        a time -- the single biggest lever on training throughput off a disk-backed
+        vault. ``offsets`` are absolute transition offsets (episode offset + window
+        start); ``seat`` indexes the agent axis (``None`` reads all agents). Returns a
+        list of unpadded ``(cnt_i, ...)`` arrays, one per window.
+        """
+        ds = self._ds[store_key]
+        futs = []
+        for off, cnt in zip(offsets, counts, strict=True):
+            off, cnt = int(off), int(cnt)
+            sel = ds[0, off : off + cnt] if seat is None else ds[0, off : off + cnt, seat]
+            futs.append(sel.read())
+        return [np.asarray(f.result()) for f in futs]
+
+    @property
+    def transition_offsets(self):
+        """Absolute transition offset of each episode's first row (episode-contiguous
+        store), so a window ``(ep, start)`` maps to flat offset ``offsets[ep] + start``."""
+        return self._offsets
 
     @property
     def num_episodes_(self):  # pragma: no cover - convenience mirror

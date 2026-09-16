@@ -192,25 +192,22 @@ class Dataset:
         teammate_index: int | None = None,
         normalize: bool = True,
         variant: str | None = None,
-        cache_episodes: int = 1024,
     ):
         """Read the Flashbax Vault at ``vault_dir``, window it, and transform.
 
         ``variant`` selects the sub-directory; if omitted and the vault holds
         exactly one, that one is used (see :class:`~oaht_bench.dataset.vault.VaultReader`).
 
-        Episodes are always streamed from the vault via
-        :class:`~oaht_bench.dataset.vault.VaultReader` and windowed on demand by
-        :class:`Windows`: host memory is bounded by ``cache_episodes`` (a per-episode
-        LRU) rather than the dataset size, and windows are gathered per minibatch
-        rather than materialized up front (which would cost ``context_length`` copies
-        of the whole dataset). A dataset small enough to fit stays fully cached after
-        the first epoch, so this is not a penalty for small data -- it is the single
-        path that also scales to hundred-thousand-episode vaults. The normalisation is
-        read from the collection-time sidecar when present, else computed once in a
-        bounded pass (see :meth:`VaultReader.norm_stats`).
+        Episodes are streamed from the vault via
+        :class:`~oaht_bench.dataset.vault.VaultReader`, and each minibatch's windows are
+        read as direct concurrent slices (no episode cache; the OS page cache handles
+        reuse) rather than materialized up front (which would cost ``context_length``
+        copies of the whole dataset). This is the single path that scales to
+        hundred-thousand-episode vaults. The normalisation is read from the
+        collection-time sidecar when present, else computed once in a bounded pass
+        (see :meth:`VaultReader.norm_stats`).
         """
-        self.batch = VaultReader(vault_dir, variant=variant, cache_episodes=cache_episodes)
+        self.batch = VaultReader(vault_dir, variant=variant)
         norm = Normalization(*self.batch.norm_stats()) if normalize else None
         self.windows = Windows(
             self.batch,
@@ -428,6 +425,16 @@ class _LazyField:
         return np.asarray(out, dtype=dtype)
 
 
+#: Vault store key -> in-RAM :class:`~oaht_bench.dataset.schema.Episode` attribute,
+#: so the in-RAM window slice mirrors the disk read of the same field.
+_STORE_ATTR = {
+    "observations": "obs",
+    "actions": "actions",
+    "rewards": "rewards",
+    "avail_actions": "avail_actions",
+}
+
+
 class Windows:
     """Windows over the ego and teammate streams, built on demand from the source.
 
@@ -470,18 +477,30 @@ class Windows:
         self._ego, self._mate = ego, teammate_index
         self._T = int(context_length)
         self._episodes = batch.episodes
+        self._source = batch
 
-        # Return-to-go is derived per episode lazily and cached, so construction does
-        # not touch every episode's rewards up front -- which for a disk-backed source
-        # would be one read per episode (hundreds of thousands) before training starts.
+        # A disk-backed source (VaultReader) exposes read_slices/transition_offsets:
+        # windows are read directly as concurrent contiguous slices. An in-RAM
+        # EpisodeBatch has neither, so windows are sliced from resident arrays. Same
+        # numerics either way; only the read differs.
+        self._direct = hasattr(batch, "read_slices")
+        self._offsets_arr = batch.transition_offsets if self._direct else None
+
+        # Return-to-go for the in-RAM normalization pass, derived per episode lazily
+        # and cached. The disk path passes a precomputed norm, so this stays empty there.
         self._rtg_cache: dict = {}
 
         # Enumerate windows exactly as _build_windows does.
         win_ep, win_start, win_n, ids, team, ep_ret = [], [], [], [], [], []
         episode_returns = batch.episode_returns()[:, ego]
+        if hasattr(batch, "episode_lengths"):
+            elens = np.asarray(batch.episode_lengths(), np.int64)
+        else:
+            elens = np.asarray([e.length for e in self._episodes], np.int64)
+        self._elen = elens
         T = self._T
-        for ep, e in enumerate(self._episodes):
-            length = e.length
+        for ep in range(len(self._episodes)):
+            length = int(elens[ep])
             if length == 0:
                 continue
             for start in range(0, max(1, length - T + 1), stride):
@@ -500,7 +519,10 @@ class Windows:
         self.episode_id = np.asarray(ids, np.int32)
         self.teammate_id = np.asarray(team, np.int32)
         self.episode_return = np.asarray(ep_ret, np.float32)
-        self._obs_dim = int(self._episodes[0].obs[ego].shape[-1]) if len(self._episodes) else 0
+        if hasattr(batch, "_obs_dim"):
+            self._obs_dim = int(batch._obs_dim)
+        else:
+            self._obs_dim = int(self._episodes[0].obs[ego].shape[-1]) if len(self._episodes) else 0
 
         # A precomputed norm (the disk source computes it with fast bulk/sampled reads)
         # takes precedence over the per-episode streaming pass, which is prohibitive on
@@ -563,30 +585,54 @@ class Windows:
         head = np.full((self._T - n, *arr.shape[1:]), fill, dtype=arr.dtype)
         return np.concatenate([head, arr], axis=0)
 
-    def _gather(self, flat_idx, one):
-        return np.stack(
-            [
-                one(int(self._win_ep[w]), int(self._win_start[w]), int(self._win_n[w]))
-                for w in flat_idx
-            ],
-            axis=0,
-        )
+    def _coords(self, flat_idx):
+        return self._win_ep[flat_idx], self._win_start[flat_idx], self._win_n[flat_idx]
+
+    def _read_slices(self, store_key, seat, ep_ids, starts, counts):
+        """Unpadded raw window slices for one field/seat: read concurrently off disk
+        (``VaultReader.read_slices``) or sliced from resident arrays (in-RAM batch)."""
+        if self._direct:
+            offsets = self._offsets_arr[ep_ids] + np.asarray(starts, np.int64)
+            return self._source.read_slices(store_key, seat, offsets, counts)
+        attr = _STORE_ATTR[store_key]
+        return [
+            np.asarray(getattr(self._episodes[int(ep)], attr)[seat][int(s) : int(s) + int(n)])
+            for ep, s, n in zip(ep_ids, starts, counts, strict=True)
+        ]
+
+    def _pad_stack(self, slices, fill):
+        return np.stack([self._pad(sl, fill) for sl in slices], axis=0)
 
     def _obs_field(self, seat, *, next_obs=False):
-        def one(ep, s, n):
-            o = np.asarray(self._episodes[ep].obs[seat], np.float32)
+        def build(flat_idx):
+            ep_ids, starts, counts = self._coords(flat_idx)
             if next_obs:
-                o = np.concatenate([o[1:], o[-1:]], axis=0)
-            p = self._pad(o[s : s + n], 0.0)
-            return (p - self.norm.obs_mean) / self.norm.obs_std if self.norm else p
+                # Read one extra row so the next-obs shift is available, clamped at the
+                # episode end (last row repeats) -- matching concat(o[1:], o[-1:])[s:s+n].
+                elen = self._elen[ep_ids]
+                read_counts = np.minimum(counts + 1, elen - starts)
+                raw = self._read_slices("observations", seat, ep_ids, starts, read_counts)
+                slices = []
+                for r, n in zip(raw, counts, strict=True):
+                    nxt = r[1 : 1 + int(n)]
+                    if nxt.shape[0] < n:
+                        pad = np.repeat(r[-1:], int(n) - nxt.shape[0], axis=0)
+                        nxt = np.concatenate([nxt, pad], axis=0)
+                    slices.append(nxt)
+            else:
+                slices = self._read_slices("observations", seat, ep_ids, starts, counts)
+            stacked = self._pad_stack(slices, 0.0).astype(np.float32)
+            return (stacked - self.norm.obs_mean) / self.norm.obs_std if self.norm else stacked
 
-        return _LazyField(len(self), lambda fi: self._gather(fi, one))
+        return _LazyField(len(self), build)
 
-    def _int_field(self, stream_of, fill):
-        def one(ep, s, n):
-            return self._pad(np.asarray(stream_of(ep))[s : s + n], fill)
+    def _int_field(self, store_key, seat, fill):
+        def build(flat_idx):
+            ep_ids, starts, counts = self._coords(flat_idx)
+            slices = self._read_slices(store_key, seat, ep_ids, starts, counts)
+            return self._pad_stack(slices, fill)
 
-        return _LazyField(len(self), lambda fi: self._gather(fi, one))
+        return _LazyField(len(self), build)
 
     @property
     def ego_obs(self):
@@ -602,44 +648,59 @@ class Windows:
 
     @property
     def ego_rtg(self):
-        def one(ep, s, n):
-            p = self._pad(self._episode_rtg(ep)[s : s + n], 0.0)
-            return p / self.norm.rtg_scale if self.norm else p
+        def build(flat_idx):
+            ep_ids, starts, counts = self._coords(flat_idx)
+            # return-to-go needs ego rewards from the window start to the episode end;
+            # reverse-cumsum gives rtg at each position, of which we keep the window.
+            elen = self._elen[ep_ids]
+            raw = self._read_slices("rewards", self._ego, ep_ids, starts, elen - starts)
+            slices = [np.cumsum(r[::-1])[::-1][: int(n)] for r, n in zip(raw, counts, strict=True)]
+            stacked = self._pad_stack(slices, 0.0).astype(np.float32)
+            return stacked / self.norm.rtg_scale if self.norm else stacked
 
-        return _LazyField(len(self), lambda fi: self._gather(fi, one))
+        return _LazyField(len(self), build)
 
     @property
     def ego_actions(self):
-        return self._int_field(lambda ep: self._episodes[ep].actions[self._ego], -10)
+        return self._int_field("actions", self._ego, -10)
 
     @property
     def mate_actions(self):
-        return self._int_field(lambda ep: self._episodes[ep].actions[self._mate], -10)
+        return self._int_field("actions", self._mate, -10)
 
     @property
     def ego_avail(self):
-        return self._int_field(lambda ep: self._episodes[ep].avail_actions[self._ego], 1)
+        return self._int_field("avail_actions", self._ego, 1)
 
     @property
     def mate_avail(self):
-        return self._int_field(lambda ep: self._episodes[ep].avail_actions[self._mate], 1)
+        return self._int_field("avail_actions", self._mate, 1)
 
     @property
     def mate_rewards(self):
-        return self._int_field(lambda ep: self._episodes[ep].rewards[self._mate], 0)
+        return self._int_field("rewards", self._mate, 0)
 
     @property
     def timesteps(self):
-        def one(ep, s, n):
-            return self._pad(np.arange(s + 1, s + n + 1, dtype=np.int32), 0)
+        def build(flat_idx):
+            _, starts, counts = self._coords(flat_idx)
+            return np.stack(
+                [
+                    self._pad(np.arange(int(s) + 1, int(s) + int(n) + 1, dtype=np.int32), 0)
+                    for s, n in zip(starts, counts, strict=True)
+                ],
+                axis=0,
+            )
 
-        return _LazyField(len(self), lambda fi: self._gather(fi, one))
+        return _LazyField(len(self), build)
 
     @property
     def mask(self):
-        def one(ep, s, n):
-            m = np.zeros(self._T, dtype=bool)
-            m[self._T - n :] = True
-            return m
+        def build(flat_idx):
+            _, _, counts = self._coords(flat_idx)
+            out = np.zeros((len(counts), self._T), dtype=bool)
+            for j, n in enumerate(counts):
+                out[j, self._T - int(n) :] = True
+            return out
 
-        return _LazyField(len(self), lambda fi: self._gather(fi, one))
+        return _LazyField(len(self), build)

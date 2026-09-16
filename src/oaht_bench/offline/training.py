@@ -9,6 +9,9 @@ can drive a stage without importing the runner (which imports the policies).
 
 from __future__ import annotations
 
+import queue
+import threading
+
 import jax
 import jax.numpy as jnp
 import optax
@@ -21,6 +24,45 @@ def _loss_key(aux: dict) -> str | None:
     if not aux:
         return None
     return next((k for k in aux if "loss" in k), next(iter(aux)))
+
+
+_PREFETCH_DONE = object()
+
+
+class _Prefetcher:
+    """Prepare each step's batch on a background thread, a few ahead.
+
+    The sampler now reads its windows as concurrent disk slices (see
+    :class:`~oaht_bench.dataset.dataset.Windows`); running it on a background thread
+    overlaps that I/O with the GPU step on the main thread -- the PyTorch
+    ``DataLoader(num_workers>0, prefetch_factor)`` pattern. tensorstore reads and XLA
+    dispatch both release the GIL, so the overlap is real. ``depth`` batches may be in
+    flight; the thread is daemonic, so a stage that stops early never blocks exit.
+    """
+
+    def __init__(self, fn, total: int, *, depth: int = 3):
+        self._q: queue.Queue = queue.Queue(maxsize=depth)
+        self._err: BaseException | None = None
+        self._thread = threading.Thread(target=self._run, args=(fn, total), daemon=True)
+        self._thread.start()
+
+    def _run(self, fn, total):
+        try:
+            for i in range(total):
+                self._q.put(fn(i))
+        except BaseException as e:  # surface to the consumer rather than dying silently
+            self._err = e
+        finally:
+            self._q.put(_PREFETCH_DONE)
+
+    def __iter__(self):
+        while True:
+            item = self._q.get()
+            if item is _PREFETCH_DONE:
+                if self._err is not None:
+                    raise self._err
+                return
+            yield item
 
 
 def get_scheduler(cfg, total_steps: int):
@@ -90,9 +132,9 @@ def train(
             return optax.apply_updates(params, updates), opt_state, aux
 
         bar = tqdm(range(steps), desc=prefix, unit="step", dynamic_ncols=True)
-        for i in bar:
+        for i, batch in zip(bar, _Prefetcher(batches, steps), strict=False):
             rng, key = jax.random.split(rng)
-            params, opt_state, aux = step(params, opt_state, batches(i), key)
+            params, opt_state, aux = step(params, opt_state, batch, key)
             if i % log_every == 0 or i == steps - 1:
                 for name, value in aux.items():
                     logger.log_item(f"{prefix}/{name}", float(value), train_step=i)
@@ -117,10 +159,10 @@ def train(
         )
 
     bar = tqdm(range(steps), desc=prefix, unit="step", dynamic_ncols=True)
-    for i in bar:
+    for i, batch in zip(bar, _Prefetcher(batches, steps), strict=False):
         rng, sub = jax.random.split(rng)
         keys = jax.random.split(sub, num_seeds)
-        params, opt_state, aux = step(params, opt_state, batches(i), keys)
+        params, opt_state, aux = step(params, opt_state, batch, keys)
         if i % log_every == 0 or i == steps - 1:
             means = {}
             for name, value in aux.items():
