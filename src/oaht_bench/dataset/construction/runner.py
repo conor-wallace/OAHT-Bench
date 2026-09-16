@@ -164,6 +164,10 @@ def run(job: DatasetCollectionJob) -> Path:
         if len(chunk_eps) >= _WRITE_CHUNK:
             flush()
     flush()
+    # Finalise: writes the norm_stats.json sidecar (observation/rtg statistics
+    # accumulated over the whole collection as it streamed) so training loads the
+    # normalisation instead of recomputing it from disk.
+    writer.close()
 
     summary = {
         "episodes": n,

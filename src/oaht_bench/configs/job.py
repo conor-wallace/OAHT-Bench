@@ -263,21 +263,6 @@ class OfflineTrainingConfig(BaseConfig):
     # architecture is serialised either way, so it stays in the run's hash.
     network: OfflineNetworkConfig = Field(default_factory=LiamNetworkConfig)
     context_length: int = Field(default=20, gt=0, description="Timesteps per window; TAO's K.")
-    stream_windows: bool = Field(
-        default=False,
-        description="Build windows lazily (LazyWindows) instead of materializing them all. "
-        "O(dataset) host RAM instead of O(dataset x context_length), which is what lets a "
-        "long-context Hanabi dataset fit at all. Results are identical to the eager path "
-        "when episodes fit in one window (episodes <= context); the two differ only by "
-        "overlap weighting in the normalization otherwise.",
-    )
-    stream_from_disk: bool = Field(
-        default=False,
-        description="Stream episodes from the vault on disk (DiskEpisodeSource) rather than "
-        "loading them into RAM, so host memory is bounded by a per-episode LRU rather than "
-        "the dataset size -- what lets hundred-thousand-episode vaults train at all. Implies "
-        "lazy windows; windows are identical to the in-RAM path.",
-    )
     stride: int = Field(
         default=5,
         gt=0,

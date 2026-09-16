@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 
 from oaht_bench.dataset.schema import EpisodeBatch
-from oaht_bench.dataset.vault import read_vault
+from oaht_bench.dataset.vault import VaultReader
 
 
 @dataclass(frozen=True)
@@ -50,8 +50,15 @@ class Normalization:
 
 
 @dataclass(frozen=True)
-class Windows:
-    """Fixed-length windows over the ego and teammate streams.
+class _ReferenceWindows:
+    """Eagerly-materialized windows: the reference implementation of the field
+    contract, kept as the test oracle that :class:`Windows` (the streaming view) is
+    checked against. Production never builds these -- it would stack ``context_length``
+    copies of the whole dataset -- so this runs only in tests and in
+    :func:`_build_windows`. The per-field documentation below is the field contract
+    both share.
+
+    Fixed-length windows over the ego and teammate streams.
 
     Leading axis is the window. ``T`` is the context length: TAO and TAGET both
     train on fixed-length fragments rather than whole episodes, and
@@ -185,45 +192,33 @@ class Dataset:
         teammate_index: int | None = None,
         normalize: bool = True,
         variant: str | None = None,
-        streaming: bool = False,
-        on_disk: bool = False,
         cache_episodes: int = 1024,
     ):
         """Read the Flashbax Vault at ``vault_dir``, window it, and transform.
 
         ``variant`` selects the sub-directory; if omitted and the vault holds
-        exactly one, that one is used (see :func:`~oaht_bench.dataset.vault.read_vault`).
+        exactly one, that one is used (see :class:`~oaht_bench.dataset.vault.VaultReader`).
 
-        ``streaming`` swaps the eagerly-materialized :class:`Windows` for
-        :class:`LazyWindows`, which builds each window on demand from the compact
-        ragged episodes. Every window's ``(T, obs_dim)`` slice is ``context_length``
-        copies of the raw data, so the eager path reaches tens of GiB on a real
-        Hanabi dataset; the lazy path is O(dataset) and only builds the fields a
-        baseline reads (BC never touches the teammate streams). Default off, so the
-        existing path -- and its numerics -- are unchanged.
-
-        ``on_disk`` goes one step further: the episodes themselves are streamed from
-        the vault via :class:`~oaht_bench.dataset.vault.DiskEpisodeSource` rather than
-        loaded into RAM, so host memory is bounded by ``cache_episodes`` (a per-episode
-        LRU) instead of the dataset size. This is what lets hundred-thousand-episode
-        vaults train at all. It implies lazy windows.
+        Episodes are always streamed from the vault via
+        :class:`~oaht_bench.dataset.vault.VaultReader` and windowed on demand by
+        :class:`Windows`: host memory is bounded by ``cache_episodes`` (a per-episode
+        LRU) rather than the dataset size, and windows are gathered per minibatch
+        rather than materialized up front (which would cost ``context_length`` copies
+        of the whole dataset). A dataset small enough to fit stays fully cached after
+        the first epoch, so this is not a penalty for small data -- it is the single
+        path that also scales to hundred-thousand-episode vaults. The normalisation is
+        read from the collection-time sidecar when present, else computed once in a
+        bounded pass (see :meth:`VaultReader.norm_stats`).
         """
-        if on_disk:
-            from oaht_bench.dataset.vault import DiskEpisodeSource
-
-            self.batch = DiskEpisodeSource(
-                vault_dir, variant=variant, cache_episodes=cache_episodes
-            )
-            builder = LazyWindows
-        else:
-            self.batch = read_vault(vault_dir, variant=variant)
-            builder = LazyWindows if streaming else _build_windows
-        self.windows = builder(
+        self.batch = VaultReader(vault_dir, variant=variant, cache_episodes=cache_episodes)
+        norm = Normalization(*self.batch.norm_stats()) if normalize else None
+        self.windows = Windows(
             self.batch,
             context_length=context_length,
             stride=stride,
             teammate_index=teammate_index,
             normalize=normalize,
+            norm=norm,
         )
         self.index = TeammateIndex.build(self.windows)
 
@@ -267,8 +262,11 @@ def _build_windows(
     stride: int = 1,
     teammate_index: int | None = None,
     normalize: bool = True,
-) -> Windows:
+) -> _ReferenceWindows:
     """Slice every episode into overlapping windows of ``context_length``.
+
+    The eager reference builder (test oracle). Production windows the streaming
+    :class:`Windows` view instead; this stacks every window up front.
 
     Args:
         batch: A collected dataset.
@@ -383,7 +381,7 @@ def _build_windows(
         stacked_mate_next = norm.apply_obs(stacked_mate_next)
         stacked_rtg = norm.apply_rtg(stacked_rtg)
 
-    return Windows(
+    return _ReferenceWindows(
         norm=norm,
         ego_obs=stacked_ego_obs,
         ego_actions=np.stack(ego_a).astype(np.int32),
@@ -409,9 +407,10 @@ class _LazyField:
     stage 2 uses) but calls ``build`` to construct just those windows.
     """
 
-    __slots__ = ("_build",)
+    __slots__ = ("_build", "_n")
 
-    def __init__(self, build):
+    def __init__(self, n, build):
+        self._n = int(n)  # total windows, for whole-field materialization
         self._build = build  # build(flat_idx: 1-D int array) -> (M, T, ...) ndarray
 
     def __getitem__(self, idx):
@@ -419,22 +418,35 @@ class _LazyField:
         out = self._build(idx.reshape(-1))
         return out.reshape(*idx.shape, *out.shape[1:])
 
+    def __array__(self, dtype=None):
+        # Materialize every window. A baseline that needs the whole field at once
+        # (TAO reads the entire teammate stream: ``jnp.asarray(windows.mate_next_obs)``)
+        # gets it -- at the cost the streaming path otherwise avoids, so it is only
+        # affordable for datasets that already fit. The sampler-based baselines never
+        # hit this; they index minibatches through __getitem__.
+        out = self._build(np.arange(self._n))
+        return np.asarray(out, dtype=dtype)
 
-class LazyWindows:
-    """A :class:`Windows` work-alike that builds each window on demand.
 
-    :func:`_build_windows` stacks every window's ``(T, obs_dim)`` slice up front --
-    ``context_length`` copies of the raw data -- which reaches tens of GiB on a real
-    Hanabi dataset (25k episodes x 80 x 658 floats, thrice, is ~16 GiB of
-    observations alone). This keeps the compact ragged episodes and constructs only
-    the windows a minibatch indexes, so host memory is O(dataset) rather than
-    O(dataset x context). Fields a baseline never reads are never built -- BC touches
-    only the ego streams, so the teammate windows cost nothing.
+class Windows:
+    """Windows over the ego and teammate streams, built on demand from the source.
 
-    The field API matches :class:`Windows`: per-window metadata (``episode_id``,
-    ``teammate_id``, ``episode_return``) are plain arrays the samplers index
-    element-wise; per-position fields (``ego_obs`` ...) are :class:`_LazyField`
-    proxies supporting the same ``[idx]`` indexing.
+    The production window type: it holds the compact ragged episodes (streamed from
+    disk by :class:`~oaht_bench.dataset.vault.VaultReader`, or an in-RAM
+    :class:`~oaht_bench.dataset.schema.EpisodeBatch`) plus a small window index, and
+    gathers each minibatch's windows when indexed -- rather than stacking every
+    window's ``(T, obs_dim)`` slice up front the way :func:`_build_windows` (the eager
+    :class:`_ReferenceWindows` oracle) does, which is ``context_length`` copies of the
+    raw data and reaches tens of GiB on a real Hanabi dataset (25k episodes x 80 x 658
+    floats, thrice, is ~16 GiB of observations alone). Host memory is O(dataset)
+    rather than O(dataset x context), and fields a baseline never reads are never
+    built -- BC touches only the ego streams, so the teammate windows cost nothing.
+
+    The field API matches :class:`_ReferenceWindows`: per-window metadata
+    (``episode_id``, ``teammate_id``, ``episode_return``) are plain arrays the samplers
+    index element-wise; per-position fields (``ego_obs`` ...) are :class:`_LazyField`
+    proxies supporting the same ``[idx]`` indexing, and ``np.asarray`` of one
+    materializes the whole field for the baselines that need it (TAO).
 
     Normalization is computed streaming over the raw ego transitions. That equals
     :func:`_build_windows`'s per-window-position statistics *exactly* when every
@@ -443,7 +455,9 @@ class LazyWindows:
     task). With overlapping windows the two differ only by the overlap weighting.
     """
 
-    def __init__(self, batch, *, context_length, stride=1, teammate_index=None, normalize=True):
+    def __init__(
+        self, batch, *, context_length, stride=1, teammate_index=None, normalize=True, norm=None
+    ):
         ego = batch.ego_index
         if teammate_index is None:
             others = [i for i in range(batch.num_agents) if i != ego]
@@ -457,15 +471,10 @@ class LazyWindows:
         self._T = int(context_length)
         self._episodes = batch.episodes
 
-        # Return-to-go per episode, computed once (the one derived per-step stream).
-        self._rtg = []
-        for e in self._episodes:
-            length = e.length  # cheap; avoids forcing a disk read just to size the episode
-            self._rtg.append(
-                return_to_go(e.rewards[ego][None], np.ones((1, length), dtype=bool))[0]
-                if length
-                else np.zeros((0,), np.float32)
-            )
+        # Return-to-go is derived per episode lazily and cached, so construction does
+        # not touch every episode's rewards up front -- which for a disk-backed source
+        # would be one read per episode (hundreds of thousands) before training starts.
+        self._rtg_cache: dict = {}
 
         # Enumerate windows exactly as _build_windows does.
         win_ep, win_start, win_n, ids, team, ep_ret = [], [], [], [], [], []
@@ -493,7 +502,23 @@ class LazyWindows:
         self.episode_return = np.asarray(ep_ret, np.float32)
         self._obs_dim = int(self._episodes[0].obs[ego].shape[-1]) if len(self._episodes) else 0
 
-        self.norm = self._streaming_norm() if normalize else None
+        # A precomputed norm (the disk source computes it with fast bulk/sampled reads)
+        # takes precedence over the per-episode streaming pass, which is prohibitive on
+        # a large disk-backed dataset.
+        if norm is not None:
+            self.norm = norm
+        elif normalize:
+            self.norm = self._streaming_norm()
+        else:
+            self.norm = None
+
+    def _episode_rtg(self, ep):
+        r = self._rtg_cache.get(ep)
+        if r is None:
+            e = self._episodes[ep]
+            r = return_to_go(e.rewards[self._ego][None], np.ones((1, e.length), dtype=bool))[0]
+            self._rtg_cache[ep] = r
+        return r
 
     def _streaming_norm(self):
         ego = self._ego
@@ -509,7 +534,7 @@ class LazyWindows:
             s += o.sum(0)
             ss += (o * o).sum(0)
             count += o.shape[0]
-            rtgs.append(self._rtg[ep])
+            rtgs.append(self._episode_rtg(ep))
         count = max(count, 1)
         mean = s / count
         std = np.maximum(np.sqrt(np.maximum(ss / count - mean * mean, 0.0)), 1e-6)
@@ -555,13 +580,13 @@ class LazyWindows:
             p = self._pad(o[s : s + n], 0.0)
             return (p - self.norm.obs_mean) / self.norm.obs_std if self.norm else p
 
-        return _LazyField(lambda fi: self._gather(fi, one))
+        return _LazyField(len(self), lambda fi: self._gather(fi, one))
 
     def _int_field(self, stream_of, fill):
         def one(ep, s, n):
             return self._pad(np.asarray(stream_of(ep))[s : s + n], fill)
 
-        return _LazyField(lambda fi: self._gather(fi, one))
+        return _LazyField(len(self), lambda fi: self._gather(fi, one))
 
     @property
     def ego_obs(self):
@@ -578,10 +603,10 @@ class LazyWindows:
     @property
     def ego_rtg(self):
         def one(ep, s, n):
-            p = self._pad(self._rtg[ep][s : s + n], 0.0)
+            p = self._pad(self._episode_rtg(ep)[s : s + n], 0.0)
             return p / self.norm.rtg_scale if self.norm else p
 
-        return _LazyField(lambda fi: self._gather(fi, one))
+        return _LazyField(len(self), lambda fi: self._gather(fi, one))
 
     @property
     def ego_actions(self):
@@ -608,7 +633,7 @@ class LazyWindows:
         def one(ep, s, n):
             return self._pad(np.arange(s + 1, s + n + 1, dtype=np.int32), 0)
 
-        return _LazyField(lambda fi: self._gather(fi, one))
+        return _LazyField(len(self), lambda fi: self._gather(fi, one))
 
     @property
     def mask(self):
@@ -617,4 +642,4 @@ class LazyWindows:
             m[self._T - n :] = True
             return m
 
-        return _LazyField(lambda fi: self._gather(fi, one))
+        return _LazyField(len(self), lambda fi: self._gather(fi, one))

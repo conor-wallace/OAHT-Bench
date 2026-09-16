@@ -176,75 +176,32 @@ def write_vault(
 
 
 def read_vault(vault_dir: str | Path, *, variant: str | None = None) -> EpisodeBatch:
-    """Reconstruct the ragged :class:`EpisodeBatch` from a vault.
+    """Load a vault fully into an in-RAM :class:`EpisodeBatch`.
 
-    Re-groups the flat transitions by ``episode_id`` into one variable-length array
-    per episode and restores ``meta`` -- the read-side view
-    :class:`~oaht_bench.dataset.dataset.Dataset` consumes. ``variant`` selects
-    the sub-directory; if omitted and the vault holds exactly one, that one is used.
+    The eager counterpart to :class:`VaultReader` -- it materializes every episode --
+    for the rare caller that wants the whole dataset resident (tests, small tools).
+    :class:`~oaht_bench.dataset.dataset.Dataset` does *not* use this; it streams
+    through :class:`VaultReader`. Kept as a thin wrapper so the flat-store-to-episode
+    layout lives in exactly one place (:class:`VaultReader`) rather than a second,
+    divergent copy. ``variant`` selects the sub-directory; if omitted and the vault
+    holds exactly one, that one is used.
     """
-    from flashbax.vault import Vault
-
-    vault_dir = Path(vault_dir)
-    if variant is None:
-        subs = sorted(p.name for p in vault_dir.iterdir() if p.is_dir())
-        if len(subs) == 1:
-            variant = subs[0]
-        elif not subs:
-            raise FileNotFoundError(f"no variant sub-directory under {vault_dir}")
-        else:
-            raise ValueError(f"{vault_dir} holds variants {subs}; pass variant= to pick one.")
-
-    rel_dir, name, uid = _split_dir(vault_dir, variant)
-    vault = Vault(vault_name=name, rel_dir=rel_dir, vault_uid=uid)
-    state = vault.read()
-    exp = {k: np.asarray(v)[0] for k, v in state.experience.items()}  # drop B axis
-    meta = dict(vault._metadata)  # flashbax adds structure_* keys; we want ours
-
-    ego_index = int(meta["ego_index"])
-    batch_meta = dict(meta["episode_batch_meta"])
-
-    epid = exp["episode_id"]
-
-    # Regroup the flat transitions per episode. The store is transition-major with
-    # the agent axis kept, ``(N, agent, …)``; transpose back to each Episode's
-    # ``(agent, T_ep, …)`` layout.
-    #
-    # Group with a single stable sort rather than a boolean ``epid == ep`` scan per
-    # episode: the mask-per-episode form is O(episodes × transitions) and on a large
-    # pooled dataset (e.g. 25k episodes over 1.8M transitions) that is tens of minutes
-    # of pure Python. The stable sort clusters each episode's transitions while
-    # preserving their original (temporal) order, so ``np.split`` at the group
-    # boundaries yields the same per-episode index blocks the mask did -- O(N log N).
-    # ``np.unique`` returns sorted ids, so episodes come out in ascending id order,
-    # matching the previous behaviour.
-    order = np.argsort(epid, kind="stable")
-    _, starts = np.unique(epid[order], return_index=True)
-    groups = np.split(order, starts[1:])
-
-    out_episodes, member_ids = [], []
-    for g in groups:
-        out_episodes.append(
-            Episode(
-                obs=exp["observations"][g].transpose(1, 0, 2).astype(np.float32),
-                actions=exp["actions"][g].transpose(1, 0).astype(np.int64),
-                rewards=exp["rewards"][g].transpose(1, 0).astype(np.float32),
-                avail_actions=exp["avail_actions"][g].transpose(1, 0, 2).astype(np.float32),
-                dones=exp["terminals"][g].astype(bool),
-            )
+    reader = VaultReader(vault_dir, variant=variant)
+    episodes = [
+        Episode(
+            obs=e.obs,
+            actions=e.actions,
+            rewards=e.rewards,
+            avail_actions=e.avail_actions,
+            dones=e.dones,
         )
-        # member_ids is per-episode: take it off any (the first) transition.
-        member_ids.append(exp["member_ids"][g[0]])
-
-    if "ego_response_quality" in exp:
-        q = exp["ego_response_quality"]
-        batch_meta["ego_response_quality"] = [float(q[g[0]]) for g in groups]
-
+        for e in reader.episodes
+    ]
     return EpisodeBatch(
-        episodes=out_episodes,
-        member_ids=np.stack(member_ids),
-        ego_index=ego_index,
-        meta=batch_meta,
+        episodes=episodes,
+        member_ids=np.asarray(reader.member_ids),
+        ego_index=reader.ego_index,
+        meta=reader.meta,
     )
 
 
@@ -312,7 +269,7 @@ class _DiskEpisodeList:
             yield _DiskEpisode(self._src, i)
 
 
-class DiskEpisodeSource:
+class VaultReader:
     """An :class:`~oaht_bench.dataset.schema.EpisodeBatch` work-alike that streams
     transitions from the vault on disk instead of loading them into RAM.
 
@@ -322,11 +279,11 @@ class DiskEpisodeSource:
     this reads only per-episode metadata up front (``episode_id`` boundaries,
     ``member_ids``, ``rewards`` for returns -- all small) and fetches each episode's
     observations/actions on demand, behind a bounded LRU. Host memory is then set by
-    the cache, not the dataset size, so windowing (via :class:`LazyWindows`) scales
+    the cache, not the dataset size, so windowing (via :class:`~oaht_bench.dataset.dataset.Windows`) scales
     to arbitrarily large vaults.
 
     Quacks like ``EpisodeBatch`` for the fields :class:`~oaht_bench.dataset.dataset.Dataset`
-    and :class:`LazyWindows` read: ``ego_index``, ``num_agents``, ``num_episodes``,
+    and :class:`~oaht_bench.dataset.dataset.Windows` read: ``ego_index``, ``num_agents``, ``num_episodes``,
     ``episodes`` (a lazy list), ``member_ids``, ``episode_returns()`` and ``meta``.
     """
 
@@ -347,6 +304,7 @@ class DiskEpisodeSource:
 
         rel_dir, name, uid = _split_dir(vault_dir, variant)
         vault = Vault(vault_name=name, rel_dir=rel_dir, vault_uid=uid)
+        self._norm_sidecar = vault_dir / uid / "norm_stats.json"
         n = int(vault.vault_index)
         self._ds = vault._all_datastores
         meta = dict(vault._metadata)
@@ -357,7 +315,7 @@ class DiskEpisodeSource:
         epid = np.asarray(self._ds["episode_id"][0, 0:n].read().result()).reshape(-1)
         if np.any(np.diff(epid) < 0):
             raise ValueError(
-                "vault transitions are not episode-contiguous; DiskEpisodeSource assumes "
+                "vault transitions are not episode-contiguous; VaultReader assumes "
                 "each episode's transitions form one contiguous block (to_flat writes them "
                 "that way). Fall back to read_vault for this vault."
             )
@@ -376,6 +334,11 @@ class DiskEpisodeSource:
                 for o, ln in zip(self._offsets, self._lengths, strict=True)
             ]
         )
+        # Kept in RAM (small: one float per transition per agent) so the training
+        # normalisation's rtg_scale needs no per-episode disk read.
+        self._rewards = rewards_full
+        self._n_transitions = n
+        self._obs_dim = int(self._ds["observations"].shape[-1])
 
         q = None
         if "ego_response_quality" in self._ds:
@@ -427,6 +390,83 @@ class DiskEpisodeSource:
     def episode_lengths(self):
         return self._lengths
 
+    def _read_norm_sidecar(self):
+        """The stored norm iff it exists and still covers the whole vault.
+
+        The count guard is what keeps a stored derived quantity honest: it is used
+        only while it describes exactly the transitions present, so an appended-to
+        vault recomputes rather than trusting stale statistics.
+        """
+        import json
+
+        if not self._norm_sidecar.exists():
+            return None
+        d = json.loads(self._norm_sidecar.read_text())
+        if int(d.get("n_transitions", -1)) != self._n_transitions:
+            return None
+        return (
+            np.asarray(d["obs_mean"], np.float32),
+            np.asarray(d["obs_std"], np.float32),
+            float(d["rtg_scale"]),
+        )
+
+    def norm_stats(self, *, chunk: int = 100_000):
+        """Exact observation mean/std and rtg-scale for the training normalisation.
+
+        Returns raw ``(obs_mean, obs_std, rtg_scale)`` (not a ``Normalization`` --
+        that lives in :mod:`dataset` and would close an import cycle) so the caller
+        can wrap them.
+
+        Prefers the ``norm_stats.json`` sidecar :class:`VaultWriter` writes at
+        collection time (the moments accumulated for free while the data streamed
+        through RAM), so at training time the load costs nothing. The sidecar is
+        trusted only while its ``n_transitions`` still matches the vault -- if the
+        vault was appended to since, the stored norm no longer covers it and we fall
+        through to recomputing.
+
+        The fallback is the *exact* dataset statistics, accumulated in one streaming
+        pass over the ego observation column in large contiguous ``chunk`` blocks. The
+        per-episode streaming path this replaces was slow not because of total bytes
+        but read *granularity* -- one tensorstore request per episode, each pulling all
+        five fields. Reading the obs field only, in a few hundred bulk blocks, is ~5x
+        less data in ~1/1000th the requests, so the exact mean is affordable (tens of
+        seconds on a hundred-thousand-episode vault) and there is no sampling bias --
+        which matters because the batched collector writes episodes **grouped by
+        pairing**, so any partial sample skews toward whichever pairings it lands in.
+
+        ``rtg_scale`` comes from the rewards already resident in RAM.
+        """
+        cached = self._read_norm_sidecar()
+        if cached is not None:
+            return cached
+
+        ego = self.ego_index
+        obs_ds = self._ds["observations"]
+        n = self._n_transitions
+
+        total = np.zeros(self._obs_dim, np.float64)
+        total_sq = np.zeros(self._obs_dim, np.float64)
+        # Clamp the final block to n: the vault's tensorstore is allocated past the
+        # written length, and reading into that tail would fold zero padding into the
+        # moments (shrinking mean and std toward zero).
+        for st in range(0, n, chunk):
+            block = np.asarray(obs_ds[0, st : min(st + chunk, n), ego].read().result())
+            block = block.astype(np.float64)
+            total += block.sum(0)
+            total_sq += (block * block).sum(0)
+        obs_mean = total / n
+        obs_std = np.sqrt(np.maximum(total_sq / n - obs_mean * obs_mean, 0.0))
+        obs_std = np.maximum(obs_std, 1e-6).astype(np.float32)
+        obs_mean = obs_mean.astype(np.float32)
+
+        # rtg over every episode's ego rewards (reverse cumsum), std as the scale.
+        rtgs = []
+        for o, ln in zip(self._offsets, self._lengths, strict=True):
+            r = self._rewards[o : o + ln, ego]
+            rtgs.append(np.cumsum(r[::-1])[::-1])
+        rtg_scale = float(max(np.concatenate(rtgs).std(), 1e-6))
+        return obs_mean, obs_std, rtg_scale
+
 
 class VaultWriter:
     """Append episodes to a vault in chunks, so collection never holds them all in RAM.
@@ -434,7 +474,7 @@ class VaultWriter:
     ``read_vault``'s inverse for large collections: each :meth:`write` flat-packs a
     chunk and appends it (flashbax vaults grow on write), continuing episode ids
     across chunks so the store stays **episode-contiguous** -- which
-    :class:`DiskEpisodeSource` relies on. The vault-level metadata is fixed at the
+    :class:`VaultReader` relies on. The vault-level metadata is fixed at the
     first chunk, so the batch-level ``meta`` must be constant across chunks;
     per-episode labels that vary (``ego_response_quality``) are passed per chunk and
     written as flat fields (never into the fixed metadata).
@@ -451,6 +491,40 @@ class VaultWriter:
         self._vault = None
         self._ep_offset = 0
         self._n = 0
+        # Running moments for the training normalisation, accumulated over the ego
+        # observation and return-to-go as each chunk streams through -- the data is
+        # already in RAM here, so the norm costs nothing extra and need not be
+        # recomputed by a per-episode disk pass at load. Written as a sidecar on
+        # ``close`` (see :meth:`VaultReader.norm_stats`).
+        self._obs_sum = None
+        self._obs_sqsum = None
+        self._rtg_sum = 0.0
+        self._rtg_sqsum = 0.0
+        self._rtg_count = 0
+
+    def _accumulate_norm(self, experience, episodes) -> None:
+        ego = self._ego_index
+        # Reduce over the flat observation array ``to_flat`` already built for this
+        # chunk -- no extra copy, one memory-bound pass -- rather than looping over
+        # episodes (overhead-bound: it cost ~10% of collection wall-clock). ``einsum``
+        # gives the sum of squares without materialising a squared temporary.
+        flat_obs = experience["observations"][0, :, ego]  # (N_transitions, obs_dim)
+        if flat_obs.shape[0]:
+            if self._obs_sum is None:
+                self._obs_sum = np.zeros(flat_obs.shape[-1], np.float64)
+                self._obs_sqsum = np.zeros(flat_obs.shape[-1], np.float64)
+            self._obs_sum += flat_obs.sum(0, dtype=np.float64)
+            self._obs_sqsum += np.einsum("ij,ij->j", flat_obs, flat_obs, dtype=np.float64)
+        # rtg is inherently per-trajectory (a reverse-cumsum), but over length-T
+        # reward vectors it is negligible next to the observation reduction.
+        for ep in episodes:
+            r = np.asarray(ep.rewards[ego], np.float64)  # (T,)
+            if r.shape[0] == 0:
+                continue
+            rtg = np.cumsum(r[::-1])[::-1]
+            self._rtg_sum += float(rtg.sum())
+            self._rtg_sqsum += float((rtg * rtg).sum())
+            self._rtg_count += rtg.shape[0]
 
     def write(self, episodes, member_ids, *, ego_response_quality=None) -> None:
         if len(episodes) == 0:
@@ -464,6 +538,8 @@ class VaultWriter:
         experience, metadata = to_flat(
             episodes, np.asarray(member_ids), ego_index=self._ego_index, meta=chunk_meta
         )
+        # Accumulate the training norm off the flat array to_flat just built.
+        self._accumulate_norm(experience, episodes)
         # Continue episode ids across chunks so the flat store stays contiguous.
         experience["episode_id"] = experience["episode_id"] + np.int32(self._ep_offset)
         n = int(experience["episode_id"].shape[1])
@@ -488,4 +564,33 @@ class VaultWriter:
         return self._ep_offset
 
     def close(self) -> Path:
+        """Finalise the vault and write the ``norm_stats.json`` sidecar.
+
+        The norm is exact (accumulated over the full contents as they were written)
+        and tagged with the transition count it covers, so a reader trusts it only
+        while the vault still has that many transitions -- if the vault is later
+        appended to, the count no longer matches and the reader recomputes.
+        """
+        import json
+
+        if self._obs_sum is not None and self._n > 0:
+            n = self._n
+            obs_mean = self._obs_sum / n
+            obs_std = np.sqrt(np.maximum(self._obs_sqsum / n - obs_mean * obs_mean, 0.0))
+            obs_std = np.maximum(obs_std, 1e-6)
+            c = max(self._rtg_count, 1)
+            rtg_mean = self._rtg_sum / c
+            rtg_scale = max((self._rtg_sqsum / c - rtg_mean * rtg_mean) ** 0.5, 1e-6)
+            uid = self._meta.get("variant") or "data"
+            sidecar = self._dir / uid / "norm_stats.json"
+            sidecar.write_text(
+                json.dumps(
+                    {
+                        "n_transitions": int(n),
+                        "obs_mean": obs_mean.tolist(),
+                        "obs_std": obs_std.tolist(),
+                        "rtg_scale": float(rtg_scale),
+                    }
+                )
+            )
         return self._dir

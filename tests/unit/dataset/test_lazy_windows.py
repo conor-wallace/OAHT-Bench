@@ -1,6 +1,7 @@
-"""LazyWindows must be a drop-in for the eagerly-materialized Windows.
+"""The streaming :class:`Windows` view must be a drop-in for the eager
+:class:`_ReferenceWindows` oracle.
 
-The lazy path exists to fit long-context datasets that O(dataset x context) up-front
+The view exists to fit long-context datasets that O(dataset x context) up-front
 materialization cannot, so it is only worth having if it produces the *same*
 windows. These pin field-for-field equivalence (raw and normalized) and the
 normalization equality that holds when every transition belongs to one window.
@@ -11,7 +12,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from oaht_bench.dataset.dataset import LazyWindows, _build_windows
+from oaht_bench.dataset.dataset import Windows, _build_windows
 from oaht_bench.dataset.schema import Episode, EpisodeBatch
 
 _PER_POS_FLOAT = ("ego_obs", "ego_rtg", "mate_obs", "mate_next_obs")
@@ -59,7 +60,7 @@ def test_raw_fields_identical_multiwindow():
     longer than the context, so stride cuts several overlapping windows each."""
     batch = _batch([16, 16, 16, 16])
     kw = dict(context_length=8, stride=4, normalize=False)
-    eager, lazy = _build_windows(batch, **kw), LazyWindows(batch, **kw)
+    eager, lazy = _build_windows(batch, **kw), Windows(batch, **kw)
     assert len(eager) == len(lazy) and len(eager) > len(batch.episodes)  # overlapping windows
     _assert_fields_match(eager, lazy, np.arange(len(eager)), normalized=False)
 
@@ -69,7 +70,7 @@ def test_normalized_fields_and_norm_identical_when_one_window_per_episode():
     normalization equals the per-window-position statistics exactly."""
     batch = _batch([6, 7, 5, 8, 6, 7])  # all <= context 8
     kw = dict(context_length=8, stride=4, normalize=True)
-    eager, lazy = _build_windows(batch, **kw), LazyWindows(batch, **kw)
+    eager, lazy = _build_windows(batch, **kw), Windows(batch, **kw)
     assert len(eager) == len(lazy) == len(batch.episodes)  # one window per episode
     assert np.allclose(eager.norm.obs_mean, lazy.norm.obs_mean, atol=1e-5)
     assert np.allclose(eager.norm.obs_std, lazy.norm.obs_std, atol=1e-5)
@@ -77,23 +78,26 @@ def test_normalized_fields_and_norm_identical_when_one_window_per_episode():
     _assert_fields_match(eager, lazy, np.array([0, 3, 5, 1]), normalized=True)
 
 
-def test_disk_streaming_matches_in_ram(tmp_path):
-    """DiskEpisodeSource (streamed from the vault) must window identically to the
-    in-RAM path, so hundred-thousand-episode vaults train without loading."""
+def test_dataset_streams_from_vault_matches_eager_reference(tmp_path):
+    """The production path -- Dataset, which always streams episodes from the vault
+    via VaultReader and windows them with the view -- must produce the same windows
+    as the eager _build_windows reference over the same episodes in RAM."""
     from oaht_bench.dataset.dataset import Dataset
-    from oaht_bench.dataset.vault import write_vault
+    from oaht_bench.dataset.vault import read_vault, write_vault
 
     batch = _batch([6, 7, 5, 8, 6, 7, 6, 5])  # <= context 8: one window per episode
     vault = tmp_path / "v.vlt"
     write_vault(batch.episodes, batch.member_ids, vault, ego_index=0, meta={"variant": "single"})
     kw = dict(context_length=8, stride=4, normalize=True)
-    ram = Dataset(str(vault), streaming=True, **kw).windows
-    disk = Dataset(str(vault), on_disk=True, **kw).windows
+    streamed = Dataset(str(vault), **kw).windows
+    # Reference off the same vault (via read_vault -> _build_windows), so the only
+    # thing under test is the windowing, not the vault's float32 store round-trip.
+    reference = _build_windows(read_vault(str(vault)), **kw)
 
-    assert len(ram) == len(disk)
-    assert np.allclose(ram.norm.obs_mean, disk.norm.obs_mean, atol=1e-5)
-    assert ram.norm.rtg_scale == pytest.approx(disk.norm.rtg_scale, rel=1e-5)
-    _assert_fields_match(ram, disk, np.array([0, 3, 5, 1, 7]), normalized=True)
+    assert len(streamed) == len(reference)
+    assert np.allclose(streamed.norm.obs_mean, reference.norm.obs_mean, atol=1e-5)
+    assert streamed.norm.rtg_scale == pytest.approx(reference.norm.rtg_scale, rel=1e-5)
+    _assert_fields_match(reference, streamed, np.array([0, 3, 5, 1, 7]), normalized=True)
 
 
 def test_vault_writer_chunked_matches_one_shot(tmp_path):
@@ -113,6 +117,8 @@ def test_vault_writer_chunked_matches_one_shot(tmp_path):
     w.write(eps[3:7], mids[3:7])
     w.write(eps[7:], mids[7:])
 
+    w.close()
+
     a, b = read_vault(one), read_vault(chunked)
     assert a.num_episodes == b.num_episodes == len(eps)
     assert np.array_equal(a.episode_lengths(), b.episode_lengths())
@@ -123,12 +129,50 @@ def test_vault_writer_chunked_matches_one_shot(tmp_path):
         assert np.array_equal(a.episodes[i].actions, b.episodes[i].actions)
 
 
+def test_norm_sidecar_matches_recompute_and_guards_on_count(tmp_path):
+    """VaultWriter.close writes a norm_stats.json accumulated over the whole
+    collection; norm_stats() must return it exactly, and must ignore it once its
+    transition count no longer matches the vault (the append-safety guard)."""
+    import json
+
+    from oaht_bench.dataset.vault import VaultReader, VaultWriter
+
+    batch = _batch([6, 7, 5, 8, 6, 7, 4, 9])
+    eps, mids = batch.episodes, batch.member_ids
+    vd = tmp_path / "v.vlt"
+    w = VaultWriter(vd, ego_index=0, meta={"variant": "single"})
+    w.write(eps[:5], mids[:5])  # two chunks -> cross-chunk accumulation
+    w.write(eps[5:], mids[5:])
+    w.close()
+
+    sidecar = vd / "single" / "norm_stats.json"
+    assert sidecar.exists()
+
+    src = VaultReader(vd)
+    stored = src.norm_stats()  # served from the sidecar
+
+    # Exact recompute (chunked pass) with the sidecar hidden.
+    sidecar.rename(sidecar.with_suffix(".bak"))
+    exact = VaultReader(vd).norm_stats()
+    assert np.allclose(stored[0], exact[0], atol=1e-6)  # obs_mean
+    assert np.allclose(stored[1], exact[1], atol=1e-6)  # obs_std
+    assert abs(stored[2] - exact[2]) < 1e-4  # rtg_scale
+
+    # A stale count (as if the vault grew after the norm was written) is ignored:
+    # the reader must fall through to recompute rather than trust it.
+    d = json.loads(sidecar.with_suffix(".bak").read_text())
+    d["n_transitions"] = int(d["n_transitions"]) + 1
+    sidecar.write_text(json.dumps(d))
+    guarded = VaultReader(vd)
+    assert guarded._read_norm_sidecar() is None
+
+
 def test_two_dimensional_index_matches():
     """Stage 2 indexes with a (batch, C) context array; the lazy proxy must
     reshape the same way."""
     batch = _batch([6, 6, 6, 6, 6, 6])
     kw = dict(context_length=8, stride=4, normalize=True)
-    eager, lazy = _build_windows(batch, **kw), LazyWindows(batch, **kw)
+    eager, lazy = _build_windows(batch, **kw), Windows(batch, **kw)
     cidx = np.array([[0, 1, 2], [3, 4, 5]])
     for k in ("mate_next_obs", "mate_actions", "mask"):
         a, b = getattr(eager, k)[cidx], getattr(lazy, k)[cidx]

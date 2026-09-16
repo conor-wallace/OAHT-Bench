@@ -36,9 +36,7 @@
       "stage2_steps": 60000,
       "stage2_batch_size": 32,
       "log_every": 250,
-      "eval_episodes": 20,
-      "stream_windows": true,
-      "stream_from_disk": true
+      "eval_episodes": 20
     },
     "logging": {
       "use_wandb": false
