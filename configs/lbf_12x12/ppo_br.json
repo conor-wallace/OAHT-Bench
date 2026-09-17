@@ -23,7 +23,7 @@
         "populations/lbf_12x12/brdiv",
         "populations/lbf_12x12/lbrdiv"
       ],
-      "total_timesteps": 24000000.0
+      "total_timesteps": 2400000.0
     },
     "job_type": "teammate_generation",
     "label": "ppo_br_lbf_12x12"

@@ -539,6 +539,14 @@ def build(generator: str, preset_name: str, num_checkpoints: int = 5):
 #: them. Exactly the pooled offline roster (rpg is not part of it).
 PPO_BR_SOURCES = ("fcp", "comedi", "brdiv", "lbrdiv")
 
+#: ppo_br trains a *warm-started* best response (seeded from an already-competent policy),
+#: so it needs far fewer updates than FCP's from-scratch per-member budget. Divide FCP's
+#: family budget by this. UNTUNED first estimate -- FCP's own Overcooked budget was ~7.5x
+#: too high even from scratch (docs/tuning_record.md), and warm-starting only shortens it
+#: further -- so confirm against the BR-vs-teammate curve and cut further if it plateaus
+#: early. Kept modest (not aggressive) so a first run is unlikely to *under*-train.
+PPO_BR_WARMSTART_DIVISOR = 10.0
+
 
 def build_ppo_br(preset_name: str) -> PpoBrConfig:
     """One pooled best-response run over the whole released roster for an env.
@@ -547,10 +555,9 @@ def build_ppo_br(preset_name: str) -> PpoBrConfig:
     PPO-trains one ego per teammate, warm-started from an already-competent policy. Each
     source's architecture is derived from its own job at runtime (so ``actor_type``/
     ``network`` here are placeholders); the BR is a single-agent PPO against a fixed
-    partner, so it borrows FCP's vanilla PPO / batch / per-member budget for the family.
-    ``members_per_chunk`` stays 0 (train each source's members at once, H100-sized); set
-    it small on a memory-limited GPU. The budget is generous -- warm-starting from a
-    competent policy should converge well inside it.
+    partner, so it borrows FCP's vanilla PPO / batch for the family at a fraction of its
+    budget (``PPO_BR_WARMSTART_DIVISOR``). ``members_per_chunk`` stays 0 (train each
+    source's members at once, H100-sized); set it small on a memory-limited GPU.
     """
     fam = _family(preset_name)
     fcp_scale = SCALE["fcp"][fam]
@@ -558,7 +565,7 @@ def build_ppo_br(preset_name: str) -> PpoBrConfig:
         source_population_path=[f"populations/{preset_name}/{g}" for g in PPO_BR_SOURCES],
         ppo=PpoHyperparams(**PPO["fcp"][fam]),
         num_envs=fcp_scale["num_envs"],
-        total_timesteps=fcp_scale["total_timesteps"],
+        total_timesteps=fcp_scale["total_timesteps"] / PPO_BR_WARMSTART_DIVISOR,
         num_checkpoints=1,
     )
 

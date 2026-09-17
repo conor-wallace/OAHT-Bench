@@ -37,7 +37,7 @@
         "populations/hanabi/brdiv",
         "populations/hanabi/lbrdiv"
       ],
-      "total_timesteps": 3000000000.0
+      "total_timesteps": 300000000.0
     },
     "job_type": "teammate_generation",
     "label": "ppo_br_hanabi"

@@ -30,7 +30,7 @@
         "populations/overcooked_v2_counter_circuit/brdiv",
         "populations/overcooked_v2_counter_circuit/lbrdiv"
       ],
-      "total_timesteps": 240000000.0
+      "total_timesteps": 24000000.0
     },
     "job_type": "teammate_generation",
     "label": "ppo_br_overcooked_v2_counter_circuit"
