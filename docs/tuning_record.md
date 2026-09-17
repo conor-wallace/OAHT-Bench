@@ -1264,8 +1264,65 @@ only competent partner is its `br`, held out with it — best train-ego over hel
 was ~2.4–3.6). Data cannot fix either; they are protocol properties.
 
 Reproduce the single-convention curve with `scripts/diagnose_single_pairing.py`
-(`--episodes N --streaming`), `scripts/diagnose_generalization.py` (train/eval-seed
+(`--episodes N`), `scripts/diagnose_generalization.py` (train/eval-seed
 gap), and `scripts/diagnose_inference_parity.py` (deploy faithfulness).
+
+## Offline BC × Hanabi (pooled) — the ego has no best-response, and BC *should* fail
+
+A 150k-episode pooled `expert` retrain (the scale-up the section above called for)
+left **both BC and LIAM at ~5% of ceiling** — train-partner return ~1.0, held-out
+~0.5 (ceiling ~19.7), against 87% teacher-forced action accuracy — and scaling the
+data 25k → 150k moved nothing. It read like a fundamental break. It is not, but the
+"pooling incoherence, a protocol property" framing above was too vague; three checks
+pin what it actually is.
+
+**The dataset is K distinct per-teammate egos.** The pooled `expert` set is 12 fixed
+`(ego, teammate)` pairings, ~2.1k episodes each: 6 self (`ego=mate`, an FCP/CoMeDi
+member's self-play) and 6 cross (`ego=br, mate=conf` for BRDiv/L-BRDiv). The ego seat
+— the stream BC clones — therefore holds **12 different networks**, one per teammate
+(verified: `member_ids[:, ego_index]` has 12 distinct values). Un-conditioned BC has
+no teammate signal, so it averages 12 experts into a policy coherent for none; over a
+~66-step episode, 87% per-step accuracy is `0.87^66 ≈ 1e-4` chance of an error-free
+episode, so it desyncs against every specific partner. Single-convention BC works
+(84%) because there is exactly one ego to clone.
+
+**This matches the papers — un-conditioned BC failing here is the expected result,
+not a bug.** TAO (§3) generates each controlled-agent trajectory `T^{1,k}` "employing
+its approximate best response policy `π^{1,k,*}`" — a *distinct BR per opponent*;
+OMIS (Alg.) trains `{BR(π^{-1,k})}_K`, one per opponent. So the multi-ego
+construction is *correct*. None of these methods clone un-conditioned; they condition
+on the (inferred) opponent. And the field's own AHT-scale benchmark reports the same
+failure: **ICRL4AHT's AD/DPT "struggle to consistently outperform a random baseline"**
+(DPT 12.4 ± 11.0 vs Random 5.5, and that skewed by a no-coordination teammate
+family). (An earlier pass this session claimed the papers use a *single* shared
+best-response ego; reading TAO/OMIS refuted it — recorded so it isn't re-derived.)
+
+**The collected data is competent.** Mean ego return in the pooled vault is **12.4**
+(population self-play ≈ 11.5), pairings ranging 0.94 (a weak `br`, `ego=3/mate=2`) to
+19.76. So the ~1.0 BC eval is the averaging, not bad data.
+
+**Two structural gaps against ICRL4AHT stay open.** (1) Our egos are *not* dedicated
+best-responses — they are reused self-play members / BRDiv-internal `br`s, a
+non-uniform procedure with no competence guarantee (the 0.94 pairing is the tell).
+ICRL4AHT §4.2 fixes the generated teammates and **trains an ego PPO best-response
+against each** — the `ppo_br.py` step this benchmark still lacks (Known-open,
+CLAUDE.md). (2) They collect *learning histories* (random→expert per teammate) with
+quality filtering and optional expert-action relabeling; we collect static expert
+only. Which matters depends on the method (opponent-modelling wants expert BR; AD
+wants histories).
+
+**The instrument, and what it cannot yet conclude.** `scripts/diagnose_oracle_bc.py`
+trains the BC backbone with a per-teammate embedding of the *ground-truth* id (an
+oracle — it consumes the true teammate identity, so it is an upper bound, not a
+deployable method) and rolls it closed-loop against each train teammate. It separates
+the two hypotheses: if the oracle recovers ~12, the data/egos are cloneable and the
+wall is teammate *inference* (→ the modelling baselines, TAO/OMIS-strength); if it
+stays ~1, the egos themselves are not cloneable and the fix is `ppo_br`. Validated
+end-to-end on the local 25k pooled vault (correct 12-teammate id mapping; conditioning
+verified to change logits; plain BC — `num_teammates=0` — byte-identical) but **not
+yet run to length**: the number needs a full GPU run. Also unrun: whether
+TAO/OMIS-strength conditioning clears the bar where LIAM (weak, ego-history-only
+inference — 65% teammate-action reconstruction) does not.
 
 ## Not yet tuned
 
