@@ -32,6 +32,7 @@ from oaht_bench.configs.teammate_gen import (
     CoMeDiConfig,
     FcpConfig,
     LBrDivConfig,
+    PpoBrConfig,
     PpoHyperparams,
     RpgConfig,
 )
@@ -534,6 +535,36 @@ def build(generator: str, preset_name: str, num_checkpoints: int = 5):
     raise ValueError(f"unknown generator {generator!r}")
 
 
+#: Source generators whose released populations get a best-response ego trained against
+#: them. Exactly the pooled offline roster (rpg is not part of it).
+PPO_BR_SOURCES = ("fcp", "comedi", "brdiv", "lbrdiv")
+
+
+def build_ppo_br(source_generator: str, preset_name: str) -> PpoBrConfig:
+    """A best-response ego trained against a released population's teammates.
+
+    Not a diversity generator: it consumes ``populations/<env>/<source>`` and PPO-trains
+    one ego per teammate, warm-started from an already-competent policy. A BR is a
+    single-agent PPO against a fixed partner, so it borrows FCP's vanilla PPO / batch /
+    per-member budget for the family -- but the *architecture* (``actor_type``,
+    ``network``) must match the source so the warm-start params load. The budget is
+    generous: warm-starting from a competent policy should converge well inside it.
+    """
+    fam = _family(preset_name)
+    src = build(source_generator, preset_name)  # for the source's actor_type/network
+    fcp_scale = SCALE["fcp"][fam]
+    return PpoBrConfig(
+        source_population_path=f"populations/{preset_name}/{source_generator}",
+        actor_type=src.actor_type,
+        network=src.network,
+        ppo=PpoHyperparams(**PPO["fcp"][fam]),
+        num_envs=fcp_scale["num_envs"],
+        total_timesteps=fcp_scale["total_timesteps"],
+        population_size=src.population_size,
+        num_checkpoints=1,
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -575,6 +606,24 @@ def main() -> int:
             save_job(job, path, minimal=True)
             written.append((env_name, generator, gen, job))
 
+    # ppo_br: a best-response ego per released population (the offline dataset's egos).
+    # Emitted separately because it *consumes* a released population -- run it after the
+    # teammate_gen population above is trained and released to populations/<env>/<gen>.
+    br_written = []
+    for env_name in envs:
+        env = get_preset(env_name)
+        for source in PPO_BR_SOURCES:
+            gen = build_ppo_br(source, env_name)
+            kwargs = {}
+            if args.wandb:
+                kwargs["logging"] = LoggingConfig(use_wandb=True, wandb_project=args.wandb)
+            job = TeammateGenerationJob(
+                label=f"ppo_br_{source}_{env_name}", env=env, generator=gen, **kwargs
+            )
+            path = CONFIGS_ROOT / env_name / "ppo_br" / f"{source}.json"
+            save_job(job, path, minimal=True)
+            br_written.append((env_name, source, gen, job))
+
     print(f"{'environment':30s} {'gen':8s} {'pop':>4s} {'envs':>5s} {'budget':>10s}  hash")
     for env_name, generator, gen, job in written:
         budget = getattr(gen, "total_timesteps", None) or gen.total_timesteps_per_iteration
@@ -583,6 +632,14 @@ def main() -> int:
             f"{gen.num_envs:5d} {budget:10.1e}  {job.short_hash()}"
         )
     print(f"\n{len(written)} configs -> configs/<env>/teammate_gen/")
+
+    print(f"\n{'environment':30s} {'ppo_br src':10s} {'envs':>5s} {'budget':>10s}  hash")
+    for env_name, source, gen, job in br_written:
+        print(
+            f"{env_name:30s} {source:10s} {gen.num_envs:5d} "
+            f"{gen.total_timesteps:10.1e}  {job.short_hash()}"
+        )
+    print(f"\n{len(br_written)} configs -> configs/<env>/ppo_br/")
     return 0
 
 

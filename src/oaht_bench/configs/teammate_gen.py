@@ -288,8 +288,31 @@ class RpgConfig(GeneratorBase):
     manipulator_entropy_coef: float = Field(default=0.0, ge=0)
 
 
+class PpoBrConfig(GeneratorBase):
+    """Train a dedicated best-response ego against each fixed teammate in a released
+    population, warm-started from an already-competent policy.
+
+    Not a diversity generator: it *consumes* a released population (``self``/``conf``
+    members become fixed teammates) and produces one PPO best-response ego per teammate,
+    warm-started from the paired ``br`` where one exists, else the self-play member
+    itself. This is the ego the offline dataset should clone (TAO/OMIS/ICRL4AHT build
+    the offline set from per-teammate best responses); reusing population policies as
+    the ego caps the dataset at ~45% of competence (``docs/tuning_record.md``).
+    ``actor_type`` must match the source population's.
+    """
+
+    generator: Literal["ppo_br"] = "ppo_br"
+    source_population_path: str = Field(
+        description="Released teammate-generation run dir to best-respond to "
+        "(``populations/<env>/<gen>/``). Its released self/conf members become the "
+        "fixed teammates; the paired br (or the member) seeds each BR ego.",
+    )
+    actor_type: ActorType = "mlp"
+    total_timesteps: float = Field(default=1e6, gt=0, description="Per best-response trained.")
+
+
 #: Discriminated union, selected by ``generator``.
 GeneratorConfig = Annotated[
-    FcpConfig | CoMeDiConfig | BrDivConfig | LBrDivConfig | RpgConfig,
+    FcpConfig | CoMeDiConfig | BrDivConfig | LBrDivConfig | RpgConfig | PpoBrConfig,
     Field(discriminator="generator"),
 ]

@@ -1,0 +1,28 @@
+{
+  "job": {
+    "env": {
+      "env_name": "lbf",
+      "grid_size": 12,
+      "name": "lbf_12x12",
+      "notes": "Gridworld. Matches the existing checkpoints/lbf/lbf_12x12 populations.",
+      "num_food": 6,
+      "rollout_length": 128,
+      "tier": "tier1"
+    },
+    "generator": {
+      "actor_type": "actor_with_conditional_critic",
+      "generator": "ppo_br",
+      "num_checkpoints": 1,
+      "ppo": {
+        "clip_eps": 0.03,
+        "entropy_coef": 0.003,
+        "learning_rate": 0.001
+      },
+      "source_population_path": "populations/lbf_12x12/comedi",
+      "total_timesteps": 24000000.0
+    },
+    "job_type": "teammate_generation",
+    "label": "ppo_br_comedi_lbf_12x12"
+  },
+  "schema_version": 1
+}

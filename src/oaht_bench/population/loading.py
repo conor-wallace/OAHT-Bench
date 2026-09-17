@@ -328,3 +328,35 @@ def population_from_run(
         # what made every downstream seat out-of-distribution.
         partner_params=out.get("final_params_br"),
     )
+
+
+def load_br_egos(br_dir: Path | str, env: TrainingEnv) -> dict:
+    """Map each teammate identity to its trained best-response ego.
+
+    Reads a ``ppo_br`` run (its ``br_manifest.json`` + ``saved_train_run``) and returns
+    ``{(generator, member, role): (ego_params, policy_cls)}`` so dataset collection can
+    seat the best-response ego for a given teammate. The BR params carry a leading
+    *member* axis in manifest order (no seed axis — ``ppo_br`` vmaps over members), so
+    index that axis directly rather than via ``get_member_params``. ``policy_cls`` is the
+    source population's (the BR is warm-started from and shares its architecture).
+    """
+    import json
+
+    from oaht_bench.common.save_load_utils import load_train_run
+    from oaht_bench.configs import load_job
+
+    br_dir = Path(br_dir)
+    run_dir = br_dir.parent.parent if br_dir.name == "saved_train_run" else br_dir
+    br_job = load_job(run_dir / "job.json")
+    src = Path(br_job.generator.source_population_path)
+    src_run = src.parent.parent if src.name == "saved_train_run" else src
+    src_job = load_job(src_run / "job.json")
+    loaded = population_from_run(src_job, load_train_run(str(artifact_dir(src_run))), env)
+
+    manifest = json.loads((run_dir / "br_manifest.json").read_text())
+    br_params = load_train_run(str(artifact_dir(run_dir)))["final_params"]
+    egos = {}
+    for i, e in enumerate(manifest):
+        key = (e["generator"], int(e["member"]), e["role"])
+        egos[key] = (jax.tree.map(lambda leaf, i=i: leaf[i], br_params), loaded.policy_cls)
+    return egos

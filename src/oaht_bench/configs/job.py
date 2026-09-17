@@ -159,6 +159,15 @@ class DatasetCollectionJob(JobBase):
         "(populations/<env>/pooled_crossplay.npz) that the ε sampler reads in "
         "pooled mode. Required when population_path is a list; ignored otherwise.",
     )
+    br_population_path: list[str] | None = Field(
+        default=None,
+        description="Pooled 'expert' mode only. Run dirs of `ppo_br` best-response "
+        "populations (one per source population). When set, the 'expert' ego is the "
+        "*trained* best-response for each teammate (seat 0), instead of the ε-matrix's "
+        "best existing roster partner -- the dedicated ego the offline baselines should "
+        "clone (docs/tuning_record.md). The reused-policy ego caps the dataset at ~45% "
+        "of competence; the BR ego is meant to lift that ceiling.",
+    )
     allow_self_pairing: bool = Field(
         default=True,
         description="Pooled mode only. Whether the ego may be the same roster "

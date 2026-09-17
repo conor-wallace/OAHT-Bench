@@ -27,6 +27,7 @@ def _generators() -> dict[str, Callable[..., Any]]:
     from oaht_bench.teammate_gen.comedi import run_comedi
     from oaht_bench.teammate_gen.fcp import run_fcp
     from oaht_bench.teammate_gen.lbrdiv import run_lbrdiv
+    from oaht_bench.teammate_gen.ppo_br import run_ppo_br
     from oaht_bench.teammate_gen.rpg import run_rpg
 
     return {
@@ -35,6 +36,7 @@ def _generators() -> dict[str, Callable[..., Any]]:
         "brdiv": run_brdiv,
         "lbrdiv": run_lbrdiv,
         "rpg": run_rpg,
+        "ppo_br": run_ppo_br,
     }
 
 
@@ -82,13 +84,16 @@ def run(job: TeammateGenerationJob) -> Path:
         config=json.loads(job.canonical_json()),
         verbose=job.logging.verbose,
     ) as logger:
-        # All four generators read the typed job directly.
+        # All generators read the typed job directly.
         params, population = runners[alg](job, logger)
 
-        # One cross-play evaluation for every generator, computed the same way,
-        # so FCP -- which has no notion of cross-play during training -- is
-        # measurable alongside the others.
-        _evaluate_population(job, params, population, logger)
+        # One cross-play evaluation for every diversity generator, computed the same
+        # way, so FCP -- which has no notion of cross-play during training -- is
+        # measurable alongside the others. ppo_br produces best-response *egos*, not a
+        # diversity population; a BR is measured against its own fixed teammate (which
+        # run_ppo_br logs), so the self-crossplay matrix does not apply.
+        if alg != "ppo_br":
+            _evaluate_population(job, params, population, logger)
 
     return run_dir
 

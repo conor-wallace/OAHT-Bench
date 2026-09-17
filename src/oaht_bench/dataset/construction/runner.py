@@ -382,6 +382,25 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
     )
     num_seats = len(env.agents)
 
+    # Best-response egos: for the 'expert' variant, seat the *trained* BR for each
+    # teammate (seat 0) instead of the ε-matrix's best existing roster partner. The BR
+    # is 1:1 with its teammate, so its recorded ego id is the teammate's roster index;
+    # the ego stream the offline baselines clone is then a dedicated best-response
+    # (docs/tuning_record.md), not a reused population policy.
+    br_egos = None
+    if job.br_population_path:
+        if job.variant != "expert":
+            raise NotImplementedError(
+                f"br_population_path seats the trained best-response as the expert ego; "
+                f"variant={job.variant!r} needs an ego competence ladder (BR checkpoints), "
+                f"not yet built. Use variant='expert'."
+            )
+        from oaht_bench.population.loading import load_br_egos
+
+        br_egos = {}
+        for p in job.br_population_path:
+            br_egos.update(load_br_egos(p, env))
+
     def stream():
         # Group the plan by (ego, teammate) so each pairing's episodes collect in one
         # batched device call (vmap over episodes, scan over steps) instead of the
@@ -396,8 +415,17 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
         base = jax.random.PRNGKey(job.seed)
         with tqdm(total=len(plan), desc="Generating pooled dataset", unit="ep") as bar:
             for gi, ((ego_i, mate_i), idxs) in enumerate(by_pairing.items()):
-                ego, mate = roster[ego_i], roster[mate_i]
-                seats = [(ego.params, ego.policy_cls)] + [
+                mate = roster[mate_i]
+                if br_egos is not None:
+                    # Seat the trained best-response for this teammate; its ego id is
+                    # the teammate's roster index (BR is 1:1 with the teammate).
+                    ego_params, ego_cls = br_egos[(mate.generator, int(mate.member), mate.role)]
+                    ego_row_id = mate_i
+                else:
+                    ego = roster[ego_i]
+                    ego_params, ego_cls = ego.params, ego.policy_cls
+                    ego_row_id = ego_i
+                seats = [(ego_params, ego_cls)] + [
                     (mate.params, mate.policy_cls) for _ in range(num_seats - 1)
                 ]
                 for start in range(0, len(idxs), _COLLECT_SUBGROUP):
@@ -414,7 +442,7 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
                     for k, idx in enumerate(sub):
                         seating = plan[idx]
                         member_row = np.asarray(
-                            [seating.ego] + [seating.teammate] * (num_seats - 1)
+                            [ego_row_id] + [seating.teammate] * (num_seats - 1)
                         )
                         yield eps[k], member_row, seating.epsilon, seating.target
                     bar.update(len(sub))
@@ -428,6 +456,8 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
         "pooled_matrix_path": str(job.pooled_matrix_path),
         "pooled_matrix_hash": _pooled_matrix_hash(job.pooled_matrix_path),
         "allow_self_pairing": job.allow_self_pairing,
+        # When set, seat 0 is the trained best-response per teammate, not a roster policy.
+        "br_population_path": job.br_population_path,
         # Train/test teammate split (§8). test_teammates are the held-out policies
         # online evaluation rolls the trained ego against; they never appear below.
         "split_seed": job.split_seed,
