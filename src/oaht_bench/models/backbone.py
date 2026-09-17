@@ -104,6 +104,12 @@ class DecisionTransformer(nn.Module):
     use_cross_attention: bool = False
     dropout: float = 0.1
     max_timesteps: int = 4096
+    #: >0 turns on the teammate-identity oracle: a learned per-teammate embedding
+    #: added to every token (like the positional encoding). Off (0) by default, so
+    #: every existing baseline is byte-identical. Not a deployable method -- it
+    #: consumes the ground-truth teammate id, so it only bounds what a model could do
+    #: given perfect teammate identification.
+    num_teammates: int = 0
 
     @nn.compact
     def __call__(
@@ -116,6 +122,7 @@ class DecisionTransformer(nn.Module):
         mask=None,
         context=None,
         context_mask=None,
+        teammate_id=None,
         train: bool = False,
     ):
         B, T = obs.shape[0], obs.shape[1]
@@ -128,6 +135,14 @@ class DecisionTransformer(nn.Module):
         # Episodic timestep encoding, added to every modality (Chen et al. 2021).
         pos = nn.Embed(self.max_timesteps, self.hidden_dim)(timesteps)
         g_tok, o_tok, a_tok = g_tok + pos, o_tok + pos, a_tok + pos
+
+        # Teammate-identity oracle: a per-teammate bias added to every token,
+        # broadcast over the window. Present only when enabled; the ground-truth id
+        # makes this an upper bound, not a method.
+        if self.num_teammates > 0 and teammate_id is not None:
+            team = nn.Embed(self.num_teammates, self.hidden_dim)(teammate_id)  # (B, hidden)
+            team = team[:, None, :]
+            g_tok, o_tok, a_tok = g_tok + team, o_tok + team, a_tok + team
 
         # Interleave to (G_0, o_0, a_0, G_1, o_1, a_1, ...).
         x = jnp.stack([g_tok, o_tok, a_tok], axis=2).reshape(B, T * 3, self.hidden_dim)
