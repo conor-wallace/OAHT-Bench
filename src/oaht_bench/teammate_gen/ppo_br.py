@@ -35,7 +35,7 @@ from oaht_bench.teammate_gen.marl.ppo_utils import (
 from oaht_bench.teammate_gen.marl.reward_shaping import add_shaped_reward
 
 
-def make_br_train(runtime, env, ego_policy, teammate_policy, logger=None):
+def make_br_train(runtime, env, ego_policy, teammate_policy, logger=None, progress_callback=None):
     """Build the vmappable BR-training function.
 
     Returns ``train(rng, teammate_params, ego_init_params)`` — vmap it over a leading
@@ -233,6 +233,11 @@ def make_br_train(runtime, env, ego_policy, teammate_policy, logger=None):
 
             mask = traj.info.get("returned_episode", jnp.ones_like(traj.reward))
             metric = {"ego_return": _mean(traj.info.get("returned_episode_returns", traj.reward), mask)}
+            # Tick the host-side progress bar once per update (fires once per update even
+            # under the member vmap -- io_callback batches the lane axis), the same
+            # mechanism ippo uses to stream from inside its device scan.
+            if progress_callback is not None:
+                jax.experimental.io_callback(lambda _u: progress_callback(), None, upd)
             runner_state = (train_state, env_state, last_obs, last_done, ego_h, mate_h, upd + 1, rng)
             return runner_state, metric
 
@@ -337,11 +342,28 @@ def _train_source(src_path, job, env, base, source_index, logger):
         num_agents=base.num_agents,
         pop_size=loaded.pop_size,
     )
-    train = make_br_train(rt, env, loaded.policy_cls, loaded.policy_cls, logger=logger)
-    rngs = jax.random.split(jax.random.PRNGKey(gen.train_seed + source_index), len(members))
-    result = _vmap_train_chunked(
-        train, rngs, teammate_params, ego_init_params, ego_aux_ids, int(gen.members_per_chunk)
+    from tqdm import tqdm
+
+    chunk = int(gen.members_per_chunk)
+    n = len(members)
+    n_chunks = 1 if chunk <= 0 or chunk >= n else -(-n // chunk)
+    bar = tqdm(
+        total=rt.num_updates * n_chunks,
+        desc=f"ppo_br {loaded.generator} ({n} BRs)",
+        unit="update",
+        dynamic_ncols=True,
     )
+    train = make_br_train(
+        rt, env, loaded.policy_cls, loaded.policy_cls, logger=logger,
+        progress_callback=lambda: bar.update(1),
+    )
+    rngs = jax.random.split(jax.random.PRNGKey(gen.train_seed + source_index), len(members))
+    try:
+        result = _vmap_train_chunked(
+            train, rngs, teammate_params, ego_init_params, ego_aux_ids, chunk
+        )
+    finally:
+        bar.close()
     return result["final_params"], entries, loaded.policy_cls, result["metrics"]
 
 
