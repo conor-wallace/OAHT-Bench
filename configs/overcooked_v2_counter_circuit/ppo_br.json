@@ -11,13 +11,7 @@
       "tier": "tier1"
     },
     "generator": {
-      "actor_type": "cnn_rnn",
       "generator": "ppo_br",
-      "network": {
-        "activation": "relu",
-        "architecture": "mlp",
-        "hidden_dim": 128
-      },
       "num_checkpoints": 1,
       "num_envs": 256,
       "ppo": {
@@ -30,11 +24,16 @@
         "reward_shaping_horizon": 5000000.0,
         "update_epochs": 4
       },
-      "source_population_path": "populations/overcooked_v2_counter_circuit/fcp",
+      "source_population_path": [
+        "populations/overcooked_v2_counter_circuit/fcp",
+        "populations/overcooked_v2_counter_circuit/comedi",
+        "populations/overcooked_v2_counter_circuit/brdiv",
+        "populations/overcooked_v2_counter_circuit/lbrdiv"
+      ],
       "total_timesteps": 240000000.0
     },
     "job_type": "teammate_generation",
-    "label": "ppo_br_fcp_overcooked_v2_counter_circuit"
+    "label": "ppo_br_overcooked_v2_counter_circuit"
   },
   "schema_version": 1
 }

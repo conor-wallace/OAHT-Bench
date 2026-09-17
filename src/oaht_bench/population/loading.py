@@ -333,12 +333,14 @@ def population_from_run(
 def load_br_egos(br_dir: Path | str, env: TrainingEnv) -> dict:
     """Map each teammate identity to its trained best-response ego.
 
-    Reads a ``ppo_br`` run (its ``br_manifest.json`` + ``saved_train_run``) and returns
-    ``{(generator, member, role): (ego_params, policy_cls)}`` so dataset collection can
-    seat the best-response ego for a given teammate. The BR params carry a leading
-    *member* axis in manifest order (no seed axis — ``ppo_br`` vmaps over members), so
-    index that axis directly rather than via ``get_member_params``. ``policy_cls`` is the
-    source population's (the BR is warm-started from and shares its architecture).
+    Reads a ``ppo_br`` run (``br_manifest.json`` + the ``br_by_source`` artifact) and
+    returns ``{(generator, member, role): (ego_params, policy_cls)}`` so dataset
+    collection can seat the best-response ego for a given teammate. The artifact stores
+    one member-axis param stack per source population (they carry different architectures
+    in pooled mode); each manifest entry names its ``source_index`` and its ``pos`` on
+    that source's member axis, and ``policy_cls`` is that source population's (the BR is
+    warm-started from and shares its architecture). One ``ppo_br`` run can cover the whole
+    released roster, so collection needs a single ``br_population_path`` entry.
     """
     import json
 
@@ -347,16 +349,26 @@ def load_br_egos(br_dir: Path | str, env: TrainingEnv) -> dict:
 
     br_dir = Path(br_dir)
     run_dir = br_dir.parent.parent if br_dir.name == "saved_train_run" else br_dir
-    br_job = load_job(run_dir / "job.json")
-    src = Path(br_job.generator.source_population_path)
-    src_run = src.parent.parent if src.name == "saved_train_run" else src
-    src_job = load_job(src_run / "job.json")
-    loaded = population_from_run(src_job, load_train_run(str(artifact_dir(src_run))), env)
-
     manifest = json.loads((run_dir / "br_manifest.json").read_text())
-    br_params = load_train_run(str(artifact_dir(run_dir)))["final_params"]
+    by_source = load_train_run(str(artifact_dir(run_dir)))["br_by_source"]
+
+    cls_cache: dict[str, Any] = {}
+
+    def _policy_cls(src_path: str):
+        if src_path not in cls_cache:
+            sr = Path(src_path)
+            sr = sr.parent.parent if sr.name == "saved_train_run" else sr
+            sj = load_job(sr / "job.json")
+            cls_cache[src_path] = population_from_run(
+                sj, load_train_run(str(artifact_dir(sr))), env
+            ).policy_cls
+        return cls_cache[src_path]
+
     egos = {}
-    for i, e in enumerate(manifest):
-        key = (e["generator"], int(e["member"]), e["role"])
-        egos[key] = (jax.tree.map(lambda leaf, i=i: leaf[i], br_params), loaded.policy_cls)
+    for e in manifest:
+        params = jax.tree.map(lambda leaf, p=e["pos"]: leaf[p], by_source[str(e["source_index"])])
+        egos[(e["generator"], int(e["member"]), e["role"])] = (
+            params,
+            _policy_cls(e["source_population_path"]),
+        )
     return egos

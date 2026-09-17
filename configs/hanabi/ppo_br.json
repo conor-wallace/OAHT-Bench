@@ -20,7 +20,6 @@
       "tier": "tier1"
     },
     "generator": {
-      "actor_type": "rnn_actor_with_conditional_critic",
       "generator": "ppo_br",
       "num_checkpoints": 1,
       "num_envs": 1024,
@@ -32,11 +31,16 @@
         "max_grad_norm": 0.5,
         "update_epochs": 4
       },
-      "source_population_path": "populations/hanabi/brdiv",
+      "source_population_path": [
+        "populations/hanabi/fcp",
+        "populations/hanabi/comedi",
+        "populations/hanabi/brdiv",
+        "populations/hanabi/lbrdiv"
+      ],
       "total_timesteps": 3000000000.0
     },
     "job_type": "teammate_generation",
-    "label": "ppo_br_brdiv_hanabi"
+    "label": "ppo_br_hanabi"
   },
   "schema_version": 1
 }

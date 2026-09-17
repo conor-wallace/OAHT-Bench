@@ -540,27 +540,25 @@ def build(generator: str, preset_name: str, num_checkpoints: int = 5):
 PPO_BR_SOURCES = ("fcp", "comedi", "brdiv", "lbrdiv")
 
 
-def build_ppo_br(source_generator: str, preset_name: str) -> PpoBrConfig:
-    """A best-response ego trained against a released population's teammates.
+def build_ppo_br(preset_name: str) -> PpoBrConfig:
+    """One pooled best-response run over the whole released roster for an env.
 
-    Not a diversity generator: it consumes ``populations/<env>/<source>`` and PPO-trains
-    one ego per teammate, warm-started from an already-competent policy. A BR is a
-    single-agent PPO against a fixed partner, so it borrows FCP's vanilla PPO / batch /
-    per-member budget for the family -- but the *architecture* (``actor_type``,
-    ``network``) must match the source so the warm-start params load. The budget is
-    generous: warm-starting from a competent policy should converge well inside it.
+    Not a diversity generator: it consumes every ``populations/<env>/<source>`` and
+    PPO-trains one ego per teammate, warm-started from an already-competent policy. Each
+    source's architecture is derived from its own job at runtime (so ``actor_type``/
+    ``network`` here are placeholders); the BR is a single-agent PPO against a fixed
+    partner, so it borrows FCP's vanilla PPO / batch / per-member budget for the family.
+    ``members_per_chunk`` stays 0 (train each source's members at once, H100-sized); set
+    it small on a memory-limited GPU. The budget is generous -- warm-starting from a
+    competent policy should converge well inside it.
     """
     fam = _family(preset_name)
-    src = build(source_generator, preset_name)  # for the source's actor_type/network
     fcp_scale = SCALE["fcp"][fam]
     return PpoBrConfig(
-        source_population_path=f"populations/{preset_name}/{source_generator}",
-        actor_type=src.actor_type,
-        network=src.network,
+        source_population_path=[f"populations/{preset_name}/{g}" for g in PPO_BR_SOURCES],
         ppo=PpoHyperparams(**PPO["fcp"][fam]),
         num_envs=fcp_scale["num_envs"],
         total_timesteps=fcp_scale["total_timesteps"],
-        population_size=src.population_size,
         num_checkpoints=1,
     )
 
@@ -606,23 +604,21 @@ def main() -> int:
             save_job(job, path, minimal=True)
             written.append((env_name, generator, gen, job))
 
-    # ppo_br: a best-response ego per released population (the offline dataset's egos).
-    # Emitted separately because it *consumes* a released population -- run it after the
-    # teammate_gen population above is trained and released to populations/<env>/<gen>.
+    # ppo_br: one pooled best-response run over the whole released roster per env (the
+    # offline dataset's egos). Emitted separately because it *consumes* the released
+    # populations -- run it after the teammate_gen populations above are trained and
+    # released to populations/<env>/<gen>.
     br_written = []
     for env_name in envs:
         env = get_preset(env_name)
-        for source in PPO_BR_SOURCES:
-            gen = build_ppo_br(source, env_name)
-            kwargs = {}
-            if args.wandb:
-                kwargs["logging"] = LoggingConfig(use_wandb=True, wandb_project=args.wandb)
-            job = TeammateGenerationJob(
-                label=f"ppo_br_{source}_{env_name}", env=env, generator=gen, **kwargs
-            )
-            path = CONFIGS_ROOT / env_name / "ppo_br" / f"{source}.json"
-            save_job(job, path, minimal=True)
-            br_written.append((env_name, source, gen, job))
+        gen = build_ppo_br(env_name)
+        kwargs = {}
+        if args.wandb:
+            kwargs["logging"] = LoggingConfig(use_wandb=True, wandb_project=args.wandb)
+        job = TeammateGenerationJob(label=f"ppo_br_{env_name}", env=env, generator=gen, **kwargs)
+        path = CONFIGS_ROOT / env_name / "ppo_br.json"
+        save_job(job, path, minimal=True)
+        br_written.append((env_name, gen, job))
 
     print(f"{'environment':30s} {'gen':8s} {'pop':>4s} {'envs':>5s} {'budget':>10s}  hash")
     for env_name, generator, gen, job in written:
@@ -633,13 +629,13 @@ def main() -> int:
         )
     print(f"\n{len(written)} configs -> configs/<env>/teammate_gen/")
 
-    print(f"\n{'environment':30s} {'ppo_br src':10s} {'envs':>5s} {'budget':>10s}  hash")
-    for env_name, source, gen, job in br_written:
+    print(f"\n{'environment':30s} {'sources':>8s} {'envs':>5s} {'budget':>10s}  hash")
+    for env_name, gen, job in br_written:
         print(
-            f"{env_name:30s} {source:10s} {gen.num_envs:5d} "
+            f"{env_name:30s} {len(gen.source_population_path):8d} {gen.num_envs:5d} "
             f"{gen.total_timesteps:10.1e}  {job.short_hash()}"
         )
-    print(f"\n{len(br_written)} configs -> configs/<env>/ppo_br/")
+    print(f"\n{len(br_written)} pooled ppo_br configs -> configs/<env>/ppo_br.json")
     return 0
 
 

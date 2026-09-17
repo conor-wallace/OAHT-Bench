@@ -302,10 +302,23 @@ class PpoBrConfig(GeneratorBase):
     """
 
     generator: Literal["ppo_br"] = "ppo_br"
-    source_population_path: str = Field(
-        description="Released teammate-generation run dir to best-respond to "
-        "(``populations/<env>/<gen>/``). Its released self/conf members become the "
-        "fixed teammates; the paired br (or the member) seeds each BR ego.",
+    source_population_path: str | list[str] = Field(
+        description="Released teammate-generation run dir(s) to best-respond to "
+        "(``populations/<env>/<gen>/``). Their released self/conf members become the "
+        "fixed teammates; the paired br (or the member) seeds each BR ego. A *list* is "
+        "pooled mode: one run trains best responses for the whole released roster across "
+        "generators, saved as one combined artifact. Each source's architecture is read "
+        "from its own job, so `actor_type`/`network` here are unused (they are derived "
+        "per source); the BR training budget (`ppo`/`num_envs`/`total_timesteps`) is "
+        "shared across sources.",
+    )
+    members_per_chunk: int = Field(
+        default=0,
+        ge=0,
+        description="vmap this many members (best responses) at a time; 0 trains a "
+        "source's whole member set at once. The VRAM lever: peak memory scales with the "
+        "concurrent lane count, so a small chunk fits a 6GB GPU while 0 saturates an "
+        "H100. Chunked results are identical to unchunked (concatenated over members).",
     )
     actor_type: ActorType = "mlp"
     total_timesteps: float = Field(default=1e6, gt=0, description="Per best-response trained.")

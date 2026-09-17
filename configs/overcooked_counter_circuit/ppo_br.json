@@ -9,7 +9,6 @@
       "tier": "tier1"
     },
     "generator": {
-      "actor_type": "actor_with_conditional_critic",
       "generator": "ppo_br",
       "num_checkpoints": 1,
       "num_envs": 8,
@@ -19,11 +18,16 @@
         "learning_rate": 0.001,
         "num_minibatches": 16
       },
-      "source_population_path": "populations/overcooked_counter_circuit/comedi",
+      "source_population_path": [
+        "populations/overcooked_counter_circuit/fcp",
+        "populations/overcooked_counter_circuit/comedi",
+        "populations/overcooked_counter_circuit/brdiv",
+        "populations/overcooked_counter_circuit/lbrdiv"
+      ],
       "total_timesteps": 4000000.0
     },
     "job_type": "teammate_generation",
-    "label": "ppo_br_comedi_overcooked_counter_circuit"
+    "label": "ppo_br_overcooked_counter_circuit"
   },
   "schema_version": 1
 }

@@ -246,45 +246,59 @@ def make_br_train(runtime, env, ego_policy, teammate_policy, logger=None):
     return train
 
 
-def run_ppo_br(job, logger):
-    """Train one best-response ego per fixed teammate in a released population.
+def _tree_slice(tree, sl):
+    return jax.tree.map(lambda x: x[sl], tree)
 
-    Loads ``job.generator.source_population_path``; its released ``self``/``conf``
-    members become fixed teammates (``br`` is an ego, never a teammate). Each BR ego is
-    warm-started from the paired ``br`` (paired populations) or the member itself
-    (homogeneous), and all members train in one vmapped run. Saves the BR params and a
-    ``br_manifest.json`` mapping each lane to its teammate ``(generator, member, role)``.
-    Returns ``(params, population)`` to match the generator contract; the runner skips
-    the diversity cross-play eval for ``ppo_br`` (a BR is measured against its teammate,
-    which this logs, not against other BRs).
+
+def _vmap_train_chunked(train, rngs, teammate_params, ego_init_params, ego_aux_ids, chunk):
+    """vmap ``train`` over the member axis, in chunks of ``chunk`` (0 = all at once).
+
+    Chunking bounds peak VRAM to ``chunk`` concurrent lanes -- the lever that lets a
+    pooled run fit a 6GB GPU (small chunk) or saturate an H100 (chunk=0). Each chunk's
+    outputs are concatenated back along the member axis, so the result is identical to
+    an unchunked vmap.
     """
-    import json
+    n = int(rngs.shape[0])
+    in_axes = (0, 0, 0, None if ego_aux_ids is None else 0)
+    vtrain = jax.jit(jax.vmap(train, in_axes=in_axes))
+    if chunk <= 0 or chunk >= n:
+        return vtrain(rngs, teammate_params, ego_init_params, ego_aux_ids)
+    outs = []
+    for s in range(0, n, chunk):
+        sl = slice(s, s + chunk)
+        aux = None if ego_aux_ids is None else ego_aux_ids[sl]
+        outs.append(
+            vtrain(rngs[sl], _tree_slice(teammate_params, sl), _tree_slice(ego_init_params, sl), aux)
+        )
+    return jax.tree.map(lambda *xs: jnp.concatenate(xs, axis=0), *outs)
+
+
+def _train_source(src_path, job, env, base, source_index, logger):
+    """Train one best-response per teammate in a single released population.
+
+    Architecture (``actor_type``/``network``/``pop_size``) is taken from the *source's*
+    own job -- so the warm-start params load and each population keeps its own actor --
+    while the BR training budget (``ppo``/``num_envs``/``total_timesteps``) comes from
+    this ``ppo_br`` job. Returns ``(br_params, entries, policy_cls)`` where ``br_params``
+    carries a leading member axis in ``entries`` order.
+    """
     from pathlib import Path
 
-    import numpy as np
-
-    from oaht_bench.common.save_load_utils import load_train_run, save_train_run
+    from oaht_bench.common.save_load_utils import load_train_run
     from oaht_bench.configs import load_job
-    from oaht_bench.envs import make_env
-    from oaht_bench.envs.log_wrapper import LogWrapper
-    from oaht_bench.models.population_interface import AgentPopulation
-    from oaht_bench.population import artifact_dir
-    from oaht_bench.population.loading import population_from_run
+    from oaht_bench.population.loading import artifact_dir, population_from_run
     from oaht_bench.population.members import get_member_params, released_members
     from oaht_bench.teammate_gen.runtime import PpoRuntime
 
     gen = job.generator
-    base = make_env(job.env.env_name, job.env.env_kwargs())
-    env = LogWrapper(base)
-
-    src = Path(gen.source_population_path)
+    src = Path(src_path)
     src_run = src.parent.parent if src.name == "saved_train_run" else src
     src_job = load_job(src_run / "job.json")
     loaded = population_from_run(src_job, load_train_run(str(artifact_dir(src_run))), env)
     members = [int(m) for m in released_members(src_job, loaded.pop_size)]
 
-    teammate_list, ego_list, manifest = [], [], []
-    for m in members:
+    teammate_list, ego_list, entries = [], [], []
+    for pos, m in enumerate(members):
         if loaded.paired:
             teammate_list.append(get_member_params(loaded.params, m))  # confederate (fixed)
             ego_list.append(get_member_params(loaded.partner_params, m))  # its br (warm start)
@@ -294,20 +308,28 @@ def run_ppo_br(job, logger):
             teammate_list.append(p)  # self member (fixed)
             ego_list.append(p)  # warm-start from itself
             role = "self"
-        manifest.append({"generator": loaded.generator, "member": m, "role": role})
+        entries.append(
+            {
+                "generator": loaded.generator,
+                "member": m,
+                "role": role,
+                "source_index": source_index,
+                "pos": pos,
+                "source_population_path": str(src_path),
+            }
+        )
     teammate_params = jax.tree.map(lambda *xs: jnp.stack(xs), *teammate_list)
     ego_init_params = jax.tree.map(lambda *xs: jnp.stack(xs), *ego_list)
 
-    conditional = "conditional_critic" in gen.actor_type
     ego_aux_ids = None
-    if conditional:
+    if "conditional_critic" in src_job.generator.actor_type:
         eye = jnp.eye(loaded.pop_size)
         ego_aux_ids = jnp.stack([eye[m] for m in members])  # (members, pop_size) onehot
 
     rt = PpoRuntime.from_config(
         ppo=gen.ppo,
-        network=gen.network,
-        actor_type=gen.actor_type,
+        network=src_job.generator.network,
+        actor_type=src_job.generator.actor_type,
         rollout_length=job.env.rollout_length,
         num_envs=gen.num_envs,
         total_timesteps=gen.total_timesteps,
@@ -316,23 +338,66 @@ def run_ppo_br(job, logger):
         pop_size=loaded.pop_size,
     )
     train = make_br_train(rt, env, loaded.policy_cls, loaded.policy_cls, logger=logger)
-    in_axes = (0, 0, 0, 0 if conditional else None)
-    vtrain = jax.jit(jax.vmap(train, in_axes=in_axes))
-    rngs = jax.random.split(jax.random.PRNGKey(gen.train_seed), len(members))
-    result = vtrain(rngs, teammate_params, ego_init_params, ego_aux_ids)
+    rngs = jax.random.split(jax.random.PRNGKey(gen.train_seed + source_index), len(members))
+    result = _vmap_train_chunked(
+        train, rngs, teammate_params, ego_init_params, ego_aux_ids, int(gen.members_per_chunk)
+    )
+    return result["final_params"], entries, loaded.policy_cls, result["metrics"]
 
-    # Final BR-vs-teammate return per member (the meaningful signal for this job).
-    final_ret = np.asarray(result["metrics"]["ego_return"])[:, -1]
+
+def run_ppo_br(job, logger):
+    """Train a best-response ego for every teammate in one or more released populations.
+
+    ``source_population_path`` may be a single run dir or a *list* (pooled mode: the whole
+    released roster across generators). Each population's ``self``/``conf`` members become
+    fixed teammates; each BR ego is warm-started from the paired ``br`` (paired) or the
+    member itself (homogeneous). Populations are trained per-source (they carry different
+    actor architectures, which cannot share one ``vmap``), member-chunked for bounded
+    VRAM, and saved as one combined artifact: ``br_by_source`` (params per source) plus a
+    ``br_manifest.json`` mapping every teammate ``(generator, member, role)`` to its BR.
+    The runner skips the diversity cross-play eval for ``ppo_br`` (a BR is scored against
+    its own teammate, which this logs).
+    """
+    import json
+    from pathlib import Path
+
+    import numpy as np
+
     from oaht_bench.common.logging import nonfatal
+    from oaht_bench.common.save_load_utils import save_train_run
+    from oaht_bench.envs import make_env
+    from oaht_bench.envs.log_wrapper import LogWrapper
+    from oaht_bench.models.population_interface import AgentPopulation
+
+    gen = job.generator
+    base = make_env(job.env.env_name, job.env.env_kwargs())
+    env = LogWrapper(base)
+
+    sources = gen.source_population_path
+    if isinstance(sources, str):
+        sources = [sources]
+
+    br_by_source, manifest, all_returns, first_cls = {}, [], [], None
+    for i, src_path in enumerate(sources):
+        br_params, entries, policy_cls, metrics = _train_source(src_path, job, env, base, i, logger)
+        br_by_source[str(i)] = br_params
+        manifest.extend(entries)
+        all_returns.append((entries, np.asarray(metrics["ego_return"])[:, -1]))
+        first_cls = first_cls or policy_cls
 
     with nonfatal("ppo_br reporting"):
-        for entry, r in zip(manifest, final_ret.tolist(), strict=True):
-            logger.log_item(f"BR/return_{entry['generator']}:{entry['member']}:{entry['role']}", float(r))
-        logger.log_item("BR/mean_return", float(final_ret.mean()))
+        means = []
+        for entries, rets in all_returns:
+            for entry, r in zip(entries, rets.tolist(), strict=True):
+                logger.log_item(
+                    f"BR/return_{entry['generator']}:{entry['member']}:{entry['role']}", float(r)
+                )
+                means.append(float(r))
+        logger.log_item("BR/mean_return", float(np.mean(means)))
         logger.commit()
 
-    save_train_run({"final_params": result["final_params"]}, job.run_dir(), savename="saved_train_run")
+    save_train_run({"br_by_source": br_by_source}, job.run_dir(), savename="saved_train_run")
     (Path(job.run_dir()) / "br_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
-    population = AgentPopulation(pop_size=len(members), policy_cls=loaded.policy_cls)
-    return result["final_params"], population
+    population = AgentPopulation(pop_size=len(manifest), policy_cls=first_cls)
+    return br_by_source, population
