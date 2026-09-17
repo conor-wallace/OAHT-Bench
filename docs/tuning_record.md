@@ -1311,18 +1311,44 @@ quality filtering and optional expert-action relabeling; we collect static exper
 only. Which matters depends on the method (opponent-modelling wants expert BR; AD
 wants histories).
 
-**The instrument, and what it cannot yet conclude.** `scripts/diagnose_oracle_bc.py`
-trains the BC backbone with a per-teammate embedding of the *ground-truth* id (an
-oracle — it consumes the true teammate identity, so it is an upper bound, not a
-deployable method) and rolls it closed-loop against each train teammate. It separates
-the two hypotheses: if the oracle recovers ~12, the data/egos are cloneable and the
-wall is teammate *inference* (→ the modelling baselines, TAO/OMIS-strength); if it
-stays ~1, the egos themselves are not cloneable and the fix is `ppo_br`. Validated
-end-to-end on the local 25k pooled vault (correct 12-teammate id mapping; conditioning
-verified to change logits; plain BC — `num_teammates=0` — byte-identical) but **not
-yet run to length**: the number needs a full GPU run. Also unrun: whether
-TAO/OMIS-strength conditioning clears the bar where LIAM (weak, ego-history-only
-inference — 65% teammate-action reconstruction) does not.
+**The instrument.** `scripts/diagnose_oracle_bc.py` trains the BC backbone with a
+per-teammate embedding of the *ground-truth* id (an oracle — it consumes the true
+teammate identity, so it is an upper bound, not a deployable method; `num_teammates=0`
+leaves plain BC byte-identical) and rolls it closed-loop against each train teammate.
+It was meant to separate two hypotheses — oracle ~12 (egos cloneable, the wall is
+teammate *inference*) vs oracle ~1 (egos not cloneable, the fix is `ppo_br`).
+
+**The answer is *both*, and it lands in the middle.** Converged (60k steps, 0.886
+teacher-forced accuracy, matching plain BC's 0.869), the oracle scores **mean 5.64**
+vs un-conditioned pooled BC's **1.06** and the data's own **12.4** competence:
+
+| | mean return | of data (12.4) |
+|---|---:|---:|
+| un-conditioned pooled BC | 1.06 | ~9% |
+| teammate-id oracle (perfect id) | **5.64** | **~45%** |
+
+So (1) teammate identity is a **large** lever — perfect id is **5.3× over BC**, i.e.
+teammate modelling has real headroom and BC-on-pooled failing is genuinely mostly the
+averaging; but (2) even perfect identity caps a single shared model at **~45% of
+competence** — a second ceiling beyond inference. The per-teammate spread shows both:
+some egos are cleanly cloneable given the id (lbrdiv:4 → 11.3, comedi:3 → 10.0,
+lbrdiv:1 → 10.0, at the data), others resist even trained (fcp:24 → 2.1, comedi:0 →
+2.2, fcp:19 → 2.4) — shared-model interference across 12 unrelated egos and/or the
+reused egos being harder to clone. (A plausible contributor to the residual: the ~45%
+tracks the single-convention **closed-loop compounding tax** — even 100% teacher-forced
+reached only ~51% of ceiling above — so part of the gap may be generic drift, not
+multi-ego interference.)
+
+**Consequences.** The oracle is the ceiling for *any* teammate-conditioned method on
+this dataset: TAO/OMIS cannot exceed ~5.6 here no matter how good their inference, so
+running them measures how much of the 1.06 → 5.64 gap realistic inference recovers,
+against a dataset ceiling that is itself <50% of competence. Raising that ceiling
+toward 12 needs the dataset fixed — **`ppo_br`**: uniform, dedicated best-responses
+(ICRL4AHT's fix-teammates-then-train-ego-PPO) address both the ego-quality and the
+"12 unrelated networks" interference. Priority order: `ppo_br` to lift the ceiling,
+then modelling baselines to approach it. Still unrun: whether TAO/OMIS-strength
+conditioning approaches the 5.64 oracle where LIAM (weak, ego-history-only inference —
+65% teammate-action reconstruction) sat at BC's floor.
 
 ## Not yet tuned
 
