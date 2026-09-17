@@ -235,9 +235,16 @@ def make_br_train(runtime, env, ego_policy, teammate_policy, logger=None, progre
             metric = {"ego_return": _mean(traj.info.get("returned_episode_returns", traj.reward), mask)}
             # Tick the host-side progress bar once per update (fires once per update even
             # under the member vmap -- io_callback batches the lane axis), the same
-            # mechanism ippo uses to stream from inside its device scan.
+            # mechanism ippo uses to stream from inside its device scan. The callback must
+            # return nothing (result_shape=None): tqdm's update() returns a truthy value,
+            # so wrap it to discard the return, or the GPU callback path raises
+            # "Mismatched number of outputs from callback".
             if progress_callback is not None:
-                jax.experimental.io_callback(lambda _u: progress_callback(), None, upd)
+
+                def _tick(_u):
+                    progress_callback()
+
+                jax.experimental.io_callback(_tick, None, upd)
             runner_state = (train_state, env_state, last_obs, last_done, ego_h, mate_h, upd + 1, rng)
             return runner_state, metric
 
