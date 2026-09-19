@@ -126,7 +126,11 @@ def load_train_run(path):
             msg = str(exc)
             recoverable = (
                 "sharding passed to deserialization" in msg
-                or "Device cuda:0 was not found in jax.local_devices()" in msg
+                # Any device recorded in the checkpoint (cuda:0, TFRT_CPU_0, TPU_0, ...)
+                # that is absent on the loading machine -- checkpoints move between
+                # machines (train on H100, load on a CPU/2060 box), so fall back to a
+                # device-agnostic host restore rather than only handling cuda:0.
+                or "was not found in jax.local_devices()" in msg
             )
             if not recoverable:
                 raise
