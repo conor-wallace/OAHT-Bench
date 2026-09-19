@@ -55,7 +55,10 @@ def _family(preset_name: str) -> str:
     if "hanabi" in preset_name:
         return "hanabi"
     if preset_name.startswith("mpe"):
-        return "mpe"
+        # Each MPE scenario is its own tuning family: they share the PPO backbone but
+        # converge at different rates (simple_reference plateaus far sooner than the
+        # simple_spread budget the jaxmarl baseline is sized for), so their budgets differ.
+        return preset_name
     return "lbf"
 
 
@@ -490,18 +493,30 @@ _MPE_PPO = dict(
     max_grad_norm=0.5,
     anneal_lr=True,
 )
-for _gen in PPO:
-    PPO[_gen]["mpe"] = dict(_MPE_PPO)
-SCALE["fcp"]["mpe"] = dict(total_timesteps=1e7, num_envs=16, pop=POPULATION_SIZE)
-SCALE["comedi"]["mpe"] = dict(
-    total_timesteps_per_iteration=1e7, num_envs=16, pop=POPULATION_SIZE
-)
-SCALE["brdiv"]["mpe"] = _paired_scale(64, 4e7)  # 192 envs (n^2-safe), ~jaxmarl update count
-SCALE["lbrdiv"]["mpe"] = _paired_scale(64, 4e7)
-for _gen in CROSS_PLAY_WEIGHT:  # inner values are floats
-    CROSS_PLAY_WEIGHT[_gen]["mpe"] = CROSS_PLAY_WEIGHT[_gen]["lbf"]
-MIXED_PLAY_WEIGHT["mpe"] = MIXED_PLAY_WEIGHT["lbf"]
-TOLERANCE_FACTOR["mpe"] = TOLERANCE_FACTOR["lbf"]
+#: Per-scenario timestep budget (num_envs stays jaxmarl's 16 for FCP/CoMeDi; paired keep
+#: the n^2-safe scale). simple_spread uses jaxmarl's single-run budget (1e7); the paired
+#: base (4e7 x mult=3 = 1.2e8) holds its update count. simple_reference converges ~5x
+#: sooner -- the JaxMARL paper's own appendix shows the IPPO-family curves flat by ~0.5e6
+#: and fully plateaued at the 2e6 plot end, and our FCP run plateaued at ~1e6 -- so it gets
+#: 1/5 the budget (2e6 for FCP/CoMeDi, matching the paper's run length; 8e6 paired base,
+#: which holds the same 976 updates). Both still UNTUNED for the diversity generators.
+_MPE_BUDGET = {
+    "mpe_spread": dict(fcp=1e7, comedi=1e7, paired=4e7),
+    "mpe_reference": dict(fcp=2e6, comedi=2e6, paired=8e6),
+}
+for _fam, _b in _MPE_BUDGET.items():
+    for _gen in PPO:
+        PPO[_gen][_fam] = dict(_MPE_PPO)
+    SCALE["fcp"][_fam] = dict(total_timesteps=_b["fcp"], num_envs=16, pop=POPULATION_SIZE)
+    SCALE["comedi"][_fam] = dict(
+        total_timesteps_per_iteration=_b["comedi"], num_envs=16, pop=POPULATION_SIZE
+    )
+    SCALE["brdiv"][_fam] = _paired_scale(64, _b["paired"])  # 192 envs (n^2-safe)
+    SCALE["lbrdiv"][_fam] = _paired_scale(64, _b["paired"])
+    for _gen in CROSS_PLAY_WEIGHT:  # inner values are floats
+        CROSS_PLAY_WEIGHT[_gen][_fam] = CROSS_PLAY_WEIGHT[_gen]["lbf"]
+    MIXED_PLAY_WEIGHT[_fam] = MIXED_PLAY_WEIGHT["lbf"]
+    TOLERANCE_FACTOR[_fam] = TOLERANCE_FACTOR["lbf"]
 
 #: L-BRDiv's Lagrange multipliers receive gradient from an unnormalized sum over
 #: ~n^2 pair terms, so the learning rate must be scaled by ~(n_ref/n)^2 relative

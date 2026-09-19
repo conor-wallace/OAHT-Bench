@@ -18,7 +18,7 @@
         "max_grad_norm": 0.5,
         "update_epochs": 4
       },
-      "total_timesteps": 10000000.0
+      "total_timesteps": 2000000.0
     },
     "job_type": "teammate_generation",
     "label": "fcp_mpe_reference"

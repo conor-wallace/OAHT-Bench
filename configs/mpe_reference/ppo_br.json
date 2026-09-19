@@ -24,7 +24,8 @@
         "populations/mpe_reference/comedi",
         "populations/mpe_reference/brdiv",
         "populations/mpe_reference/lbrdiv"
-      ]
+      ],
+      "total_timesteps": 200000.0
     },
     "job_type": "teammate_generation",
     "label": "ppo_br_mpe_reference"
