@@ -1,0 +1,20 @@
+{
+  "job": {
+    "job_type": "dataset_collection",
+    "env": {
+        "env_name": "lbf",
+        "grid_size": 12,
+        "name": "lbf_12x12",
+        "notes": "Gridworld. Matches the existing checkpoints/lbf/lbf_12x12 populations.",
+        "num_food": 6,
+        "rollout_length": 128,
+        "tier": "tier1"
+    },
+    "population_path": "results/teammate_generation/fcp_lbf_stage1__learning_rate=0.001_entropy_coef=0.003_total_timesteps=24000000.0-7d9c7c4ada1b/artifacts/saved_train_run",
+    "variant": "expert",
+    "num_episodes": 25000,
+    "mirror_trajectories": false,
+    "label": "fcp_lbf_12x12",
+    "logging": {"use_wandb": false}
+  }
+}

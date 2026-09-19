@@ -216,3 +216,29 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Reference papers — third-party PDFs, not redistributable.
+# Read locally; findings are extracted into docs/baseline_specs.md.
+papers/
+
+# uv
+.venv/
+
+# Local Claude Code settings (machine-specific permissions)
+.claude/settings.local.json
+
+# Sweep outputs are generated; regenerate with scripts/sweep.py
+configs/sweeps/
+
+# Run artifacts. Checkpoints and metrics are large, binary, and regenerable from
+# the config whose hash names the directory -- the provenance record is the
+# config, not the output. Released populations get published separately.
+results/
+wandb/
+
+# Duplicate results tree: save_load_utils.REPO_PATH resolves to src/oaht_bench
+# rather than the repo root, so every run also writes its checkpoints here.
+src/oaht_bench/results/
+
+# macOS Finder metadata
+.DS_Store

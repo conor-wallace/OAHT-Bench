@@ -1,0 +1,374 @@
+"""Rebuild a released population from a finished teammate-generation run.
+
+Each generator writes the same four-key checkpoint but means something different
+by it: FCP flattens a ``(runs, checkpoints)`` grid into one member axis, while
+the others release ``final_params_conf``. Turning a checkpoint into "the
+population" therefore needs a per-generator builder, and those builders live
+here rather than beside the training code so that reading an artifact does not
+require importing the trainer that produced it.
+
+The builders take only ``(job, out, env)`` and touch only ``agents`` and
+``configs``, which is what makes this package free of any dependency on
+:mod:`oaht_bench.teammate_gen`.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, TypedDict
+
+import chex
+import jax
+
+from oaht_bench.models.mlp_actor_critic_agent import (
+    ActorWithConditionalCriticPolicy,
+    MLPActorCriticPolicy,
+)
+from oaht_bench.models.population_interface import AgentPopulation
+from oaht_bench.models.rnn_actor_critic_agent import (
+    RNNActorCriticPolicy,
+    RNNActorWithConditionalCriticPolicy,
+)
+from oaht_bench.models.cnn_rnn_actor_critic_agent import (
+    CNNRNNActorCriticPolicy,
+    CNNRNNActorWithConditionalCriticPolicy,
+)
+from oaht_bench.models.initialize_agents import _unwrap_obs_shape
+from oaht_bench.configs.job import TeammateGenerationJob
+from oaht_bench.envs.protocols import TrainingEnv
+from oaht_bench.population.members import get_member_params
+
+log = logging.getLogger(__name__)
+
+
+class TrainOutput(TypedDict):
+    r"""What the PPO training function returns.
+
+    Written down because three functions index into this dict and none of them
+    said what was in it. Leading axes are added by the ``vmap``\ s the callers
+    apply, so shapes are described relative to a single training run.
+    """
+
+    #: Parameters at the end of training.
+    final_params: chex.ArrayTree
+    #: Per-update statistics, keyed by metric name.
+    metrics: dict[str, chex.Array]
+    #: Snapshots taken during training; leading axis is ``num_checkpoints``.
+    checkpoints: chex.ArrayTree
+    #: Index of the checkpoint selected as each member's final policy.
+    final_ckpt_idx: chex.Array
+
+
+def artifact_dir(run_dir: Path) -> Path:
+    """Locate a run's Orbax checkpoint directory.
+
+    Two layouts exist. The runner writes ``<run_dir>/artifacts/saved_train_run``,
+    but the absorbed ``save_train_run`` resolves relative paths against
+    ``REPO_PATH``, which after absorption points at ``src/oaht_bench`` rather
+    than the repo root -- so the same run also appears under
+    ``src/oaht_bench/results/...``. The two are byte-identical; this prefers the
+    runner's layout and falls back, rather than silently scoring nothing.
+    """
+    run_dir = Path(run_dir)
+    candidates = [
+        run_dir / "artifacts" / "saved_train_run",
+        run_dir / "saved_train_run",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c.resolve()
+    raise FileNotFoundError(
+        f"no saved_train_run under {run_dir}; looked in "
+        f"{[str(c) for c in candidates]}. A run that crashed before its "
+        f"checkpoint write cannot be re-scored -- it has to be re-run."
+    )
+
+
+def get_fcp_population(
+    job: TeammateGenerationJob, out: TrainOutput, env: TrainingEnv
+) -> FcpPopulation:
+    '''Flatten each seed's partner pool for downstream use.'''
+    gen = job.generator
+    num_seeds = gen.num_seeds
+    fcp_pop_size = gen.population_size * gen.num_checkpoints
+
+    partner_params = out['checkpoints'] # shape is (num_seeds, partner_pop_size, num_ckpts, ...)
+    flattened_partner_params = jax.tree.map(lambda x: x.reshape(num_seeds, fcp_pop_size, *x.shape[3:]), partner_params)
+
+    # Dispatch matches initialize_agents.py's EGO_ACTOR_TYPE branching --
+    # this is the same choice made at training time, reconstructed here so a
+    # saved checkpoint can be scored without re-importing the trainer. RNN's
+    # gru_hidden_dim isn't a network config field (MlpNetwork.to_agent_dict()
+    # doesn't emit GRU_HIDDEN_DIM), so training used initialize_rnn_agent's
+    # default of 64; matched here for the same reason, not independently
+    # chosen. CoMeDi/BRDiv/L-BRDiv don't get this dispatch: there's no RNN
+    # variant of ActorWithConditionalCriticPolicy, so actor_type="rnn" isn't
+    # a valid choice for them yet (see docs/tuning_record.md).
+    if gen.actor_type == "rnn":
+        partner_policy = RNNActorCriticPolicy(
+            action_dim=env.action_space(env.agents[1]).n,
+            obs_dim=env.observation_space(env.agents[1]).shape[0],
+            activation=gen.network.activation,
+            gru_hidden_dim=64,
+        )
+    elif gen.actor_type == "cnn_rnn":
+        # GRU_HIDDEN_DIM isn't a network config field, so training used
+        # initialize_cnn_rnn_agent's default of 128 (the paper's value);
+        # matched here, like the rnn branch matches its own default.
+        partner_policy = CNNRNNActorCriticPolicy(
+            action_dim=env.action_space(env.agents[1]).n,
+            obs_dim=env.observation_space(env.agents[1]).shape[0],
+            obs_shape=_unwrap_obs_shape(env),
+            activation=gen.network.activation,
+            fc_hidden_dim=gen.network.hidden_dim,
+            gru_hidden_dim=128,
+        )
+    else:
+        partner_policy = MLPActorCriticPolicy(
+            action_dim=env.action_space(env.agents[1]).n,
+            obs_dim=env.observation_space(env.agents[1]).shape[0],
+            activation=gen.network.activation,
+        )
+
+    # Create partner population
+    partner_population = AgentPopulation(
+        pop_size=fcp_pop_size,
+        policy_cls=partner_policy
+    )
+
+    return flattened_partner_params, partner_population
+
+
+def _conditional_critic_policy(job: TeammateGenerationJob, env: TrainingEnv, pop_size: int):
+    """Reconstruct the conditional-critic policy a CoMeDi/BRDiv/L-BRDiv checkpoint
+    was trained with, for scoring. Mirrors the construction each generator and
+    ``initialize_actor_with_conditional_critic`` make: the recurrent flat-obs
+    variant, the CNN+GRU grid variant (Overcooked-v2), or the MLP default. GRU/FC
+    dims match the training-time defaults for the same reason the fcp/rnn branch
+    does -- they are not independently chosen. See docs/tuning_record.md.
+    """
+    actor_type = job.generator.actor_type
+    kwargs = dict(
+        action_dim=env.action_space(env.agents[1]).n,
+        obs_dim=env.observation_space(env.agents[1]).shape[0],
+        pop_size=pop_size,  # used to create onehot agent id
+        activation=job.generator.network.activation,
+    )
+    if actor_type == "rnn_actor_with_conditional_critic":
+        return RNNActorWithConditionalCriticPolicy(**kwargs)
+    if actor_type == "cnn_rnn_actor_with_conditional_critic":
+        return CNNRNNActorWithConditionalCriticPolicy(
+            obs_shape=_unwrap_obs_shape(env),
+            fc_hidden_dim=job.generator.network.hidden_dim,
+            gru_hidden_dim=128,
+            **kwargs,
+        )
+    return ActorWithConditionalCriticPolicy(**kwargs)
+
+
+def get_comedi_population(
+    job: TeammateGenerationJob, out: TrainOutput, env: TrainingEnv
+) -> CoMeDiPopulation:
+    '''Build the partner population from a completed CoMeDi run.'''
+    comedi_pop_size = job.generator.population_size
+
+    # partner_params has shape (num_seeds, comedi_pop_size, ...)
+    partner_params = out['final_params_conf']
+
+    partner_policy = _conditional_critic_policy(job, env, comedi_pop_size)
+
+    # Create partner population
+    partner_population = AgentPopulation(
+        pop_size=comedi_pop_size,
+        policy_cls=partner_policy
+    )
+
+    return partner_params, partner_population
+
+
+# Returns confederates only; population_from_run pairs them with
+# final_params_br so seats get their designed roles.
+def get_brdiv_population(
+    job: TeammateGenerationJob, out: TrainOutput, env: TrainingEnv
+) -> PairedPopulation:
+    '''
+    Get the partner params and partner population for ego training.
+    '''
+    brdiv_pop_size = job.generator.population_size
+
+    # partner_params has shape (num_seeds, brdiv_pop_size, ...)
+    partner_params = out['final_params_conf']
+
+    partner_policy = _conditional_critic_policy(job, env, brdiv_pop_size)
+
+    # Create partner population
+    partner_population = AgentPopulation(
+        pop_size=brdiv_pop_size,
+        policy_cls=partner_policy
+    )
+
+    return partner_params, partner_population
+
+
+# Returns confederates only; population_from_run pairs them with
+# final_params_br so seats get their designed roles.
+def get_lbrdiv_population(
+    job: TeammateGenerationJob, out: TrainOutput, env: TrainingEnv
+) -> PairedPopulation:
+    '''
+    Get the partner params and partner population for ego training.
+    '''
+    pop_size = job.generator.population_size
+
+    # partner_params has shape (num_seeds, pop_size, ...)
+    partner_params = out['final_params_conf']
+
+    partner_policy = _conditional_critic_policy(job, env, pop_size)
+
+    # Create partner population
+    partner_population = AgentPopulation(
+        pop_size=pop_size,
+        policy_cls=partner_policy
+    )
+
+    return partner_params, partner_population
+
+
+@dataclass(frozen=True)
+class LoadedPopulation:
+    """A population read back off disk, with its seating roles intact.
+
+    BRDiv and L-BRDiv train confederate/best-response *pairs* and save both sets.
+    Their designed pairing is confederate ``i`` against best response ``j`` — a
+    confederate is never trained to play with another confederate, so seating two
+    of them is out of distribution and under-reports competence by 25-40% on LBF.
+    Returning only ``final_params_conf``, as this used to, made that the default
+    for anything that did not know to reach into the checkpoint for the other
+    half.
+
+    FCP and CoMeDi release a single set of self-play policies, so every seat
+    draws from the same set and ``partner_params`` is ``None``.
+    """
+
+    params: Any
+    #: Named to match AgentPopulation so crossplay accepts either.
+    policy_cls: Any
+    pop_size: int
+    generator: str
+    #: Best responses, for the paired generators only.
+    partner_params: Any | None = None
+
+    @property
+    def paired(self) -> bool:
+        """Whether seats have distinct roles rather than being interchangeable."""
+        return self.partner_params is not None
+
+    def seat(self, member_indices, *, seed_index: int = 0) -> list[tuple[Any, Any]]:
+        """``(params, policy)`` per seat, honouring the generator's roles.
+
+        For a paired population seat 0 is a confederate and seat 1 its best
+        response, matching the diagonal that ``crossplay`` scores. For a
+        homogeneous one every seat draws from the same set.
+        """
+        idx = list(member_indices)
+        if not self.paired:
+            return [(get_member_params(self.params, i, seed_index=seed_index), self.policy_cls)
+                    for i in idx]
+        if len(idx) != 2:
+            raise ValueError(
+                f"{self.generator} trains confederate/best-response pairs and has "
+                f"no role for a third seat, but {len(idx)} seats were requested. "
+                f"The paired generators assert num_agents == 2 during training too."
+            )
+        conf, br = idx
+        return [
+            (get_member_params(self.params, conf, seed_index=seed_index), self.policy_cls),
+            (get_member_params(self.partner_params, br, seed_index=seed_index), self.policy_cls),
+        ]
+
+
+#: Which builder reads which *generated* population's checkpoint. Scripted OOD
+#: teammates (§7.6) would be the other population kind, but they are not built yet:
+#: they have no checkpoint and are heterogeneous (each member a different policy
+#: class), so they do not fit ``LoadedPopulation``'s "one ``policy_cls`` + a
+#: member-indexed param tree" shape. When added, they belong on the heterogeneous
+#: roster (:mod:`oaht_bench.population.pooled_crossplay`'s ``RosterEntry``, which
+#: already carries a per-member ``policy_cls``), not on this checkpoint dispatch.
+_BUILDERS = {
+    "fcp": get_fcp_population,
+    "comedi": get_comedi_population,
+    "brdiv": get_brdiv_population,
+    "lbrdiv": get_lbrdiv_population,
+}
+
+
+def population_from_run(
+    job: TeammateGenerationJob, out: Any, env: TrainingEnv
+) -> LoadedPopulation:
+    """Rebuild the released population for whichever generator produced ``out``.
+
+    One definition of what a generator's population *is*, shared by scoring and
+    by dataset collection. A second copy would let the two disagree about which
+    policy a member index refers to — and, before this returned roles, they did:
+    scoring paired confederates against best responses while collection paired
+    confederates against each other.
+    """
+    name = job.generator.generator
+    if name not in _BUILDERS:
+        raise ValueError(f"no population builder for {name!r}. Known: {sorted(_BUILDERS)}")
+    params, population = _BUILDERS[name](job, out, env)
+    return LoadedPopulation(
+        params=params,
+        policy_cls=population.policy_cls,
+        pop_size=population.pop_size,
+        generator=name,
+        # Paired generators save both halves; keeping only the confederates is
+        # what made every downstream seat out-of-distribution.
+        partner_params=out.get("final_params_br"),
+    )
+
+
+def load_br_egos(br_dir: Path | str, env: TrainingEnv) -> dict:
+    """Map each teammate identity to its trained best-response ego.
+
+    Reads a ``ppo_br`` run (``br_manifest.json`` + the ``br_by_source`` artifact) and
+    returns ``{(generator, member, role): (ego_params, policy_cls)}`` so dataset
+    collection can seat the best-response ego for a given teammate. The artifact stores
+    one member-axis param stack per source population (they carry different architectures
+    in pooled mode); each manifest entry names its ``source_index`` and its ``pos`` on
+    that source's member axis, and ``policy_cls`` is that source population's (the BR is
+    warm-started from and shares its architecture). One ``ppo_br`` run can cover the whole
+    released roster, so collection needs a single ``br_population_path`` entry.
+    """
+    import json
+
+    from oaht_bench.common.save_load_utils import load_train_run
+    from oaht_bench.configs import load_job
+
+    br_dir = Path(br_dir)
+    run_dir = br_dir.parent.parent if br_dir.name == "saved_train_run" else br_dir
+    manifest = json.loads((run_dir / "br_manifest.json").read_text())
+    by_source = load_train_run(str(artifact_dir(run_dir)))["br_by_source"]
+
+    cls_cache: dict[str, Any] = {}
+
+    def _policy_cls(src_path: str):
+        if src_path not in cls_cache:
+            sr = Path(src_path)
+            sr = sr.parent.parent if sr.name == "saved_train_run" else sr
+            sj = load_job(sr / "job.json")
+            cls_cache[src_path] = population_from_run(
+                sj, load_train_run(str(artifact_dir(sr))), env
+            ).policy_cls
+        return cls_cache[src_path]
+
+    egos = {}
+    for e in manifest:
+        params = jax.tree.map(lambda leaf, p=e["pos"]: leaf[p], by_source[str(e["source_index"])])
+        egos[(e["generator"], int(e["member"]), e["role"])] = (
+            params,
+            _policy_cls(e["source_population_path"]),
+        )
+    return egos

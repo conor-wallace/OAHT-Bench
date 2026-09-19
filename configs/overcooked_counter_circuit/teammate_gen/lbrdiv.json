@@ -1,0 +1,28 @@
+{
+  "job": {
+    "env": {
+      "env_name": "overcooked-v1",
+      "layout": "counter_circuit",
+      "name": "overcooked_counter_circuit",
+      "notes": "Full resource-sharing; discriminates between methods.",
+      "rollout_length": 400,
+      "tier": "tier1"
+    },
+    "generator": {
+      "generator": "lbrdiv",
+      "lagrange_learning_rate": 0.0036,
+      "num_envs": 384,
+      "ppo": {
+        "clip_eps": 0.01,
+        "entropy_coef": 0.05,
+        "learning_rate": 0.001,
+        "num_minibatches": 8
+      },
+      "tolerance_factor": 10.0,
+      "total_timesteps": 270000000.0
+    },
+    "job_type": "teammate_generation",
+    "label": "lbrdiv_overcooked_counter_circuit"
+  },
+  "schema_version": 1
+}

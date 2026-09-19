@@ -1,0 +1,39 @@
+{
+  "job": {
+    "env": {
+      "agent_view_size": 2,
+      "env_name": "overcooked-v2",
+      "layout": "counter_circuit",
+      "name": "overcooked_v2_counter_circuit",
+      "negative_rewards": true,
+      "notes": "Full resource-sharing; discriminates between methods in v1.",
+      "rollout_length": 400,
+      "tier": "tier1"
+    },
+    "generator": {
+      "generator": "ppo_br",
+      "num_checkpoints": 1,
+      "num_envs": 256,
+      "ppo": {
+        "anneal_lr": true,
+        "clip_eps": 0.2,
+        "learning_rate": 0.0005,
+        "lr_warmup": 0.05,
+        "max_grad_norm": 0.25,
+        "num_minibatches": 64,
+        "reward_shaping_horizon": 5000000.0,
+        "update_epochs": 4
+      },
+      "source_population_path": [
+        "populations/overcooked_v2_counter_circuit/fcp",
+        "populations/overcooked_v2_counter_circuit/comedi",
+        "populations/overcooked_v2_counter_circuit/brdiv",
+        "populations/overcooked_v2_counter_circuit/lbrdiv"
+      ],
+      "total_timesteps": 24000000.0
+    },
+    "job_type": "teammate_generation",
+    "label": "ppo_br_overcooked_v2_counter_circuit"
+  },
+  "schema_version": 1
+}
