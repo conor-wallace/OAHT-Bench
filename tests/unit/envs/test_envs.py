@@ -25,12 +25,15 @@ ALL_PRESETS = preset_names()
 def test_presets_cover_the_committed_scope():
     """Seven v1 results configurations plus one debug configuration (§12.1),
     plus overcooked_v2 (PROVENANCE.md) mirroring v1's five layouts at the
-    same tiers."""
+    same tiers, plus the two MPE cooperative tasks (simple_reference,
+    simple_spread) added as fast 2-player convention-rich iteration envs."""
     assert set(preset_names("tier1")) == {
         "lbf_12x12",
         "overcooked_counter_circuit",
         "overcooked_v2_counter_circuit",
         "hanabi",
+        "mpe_reference",
+        "mpe_spread",
     }
     assert len(preset_names("tier2")) == 8  # v1's 4 remaining layouts + v2's mirror
     assert preset_names("debug") == ["mini_hanabi"]

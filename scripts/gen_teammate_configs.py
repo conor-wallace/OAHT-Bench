@@ -54,6 +54,8 @@ def _family(preset_name: str) -> str:
         return "overcooked"
     if "hanabi" in preset_name:
         return "hanabi"
+    if preset_name.startswith("mpe"):
+        return "mpe"
     return "lbf"
 
 
@@ -467,6 +469,19 @@ MIXED_PLAY_WEIGHT = {"lbf": 0.4, "overcooked": 0.5, "overcooked_v2": 0.5, "hanab
 #: mechanism from BRDiv's cross_play_weight), so the lower value wins on
 #: competence without giving up much separation. See docs/tuning_record.md.
 TOLERANCE_FACTOR = {"lbf": 0.03, "overcooked": 10.0, "overcooked_v2": 10.0, "hanabi": 0.1}
+
+# MPE (simple_reference/spread) is LBF-scale -- flat obs, an MLP actor, short 25-step
+# episodes -- so it starts from LBF's tuning across every table. UNTUNED: MPE is smaller
+# than LBF, so these budgets are likely generous; confirm against the population crossplay
+# (and the ppo_br/oracle curve) before trusting, and record what a sweep concludes (§7.2).
+for _t in (PPO, SCALE):  # inner values are dicts -> copy
+    for _gen in _t:
+        if "lbf" in _t[_gen]:
+            _t[_gen]["mpe"] = dict(_t[_gen]["lbf"])
+for _gen in CROSS_PLAY_WEIGHT:  # inner values are floats
+    CROSS_PLAY_WEIGHT[_gen]["mpe"] = CROSS_PLAY_WEIGHT[_gen]["lbf"]
+MIXED_PLAY_WEIGHT["mpe"] = MIXED_PLAY_WEIGHT["lbf"]
+TOLERANCE_FACTOR["mpe"] = TOLERANCE_FACTOR["lbf"]
 
 #: L-BRDiv's Lagrange multipliers receive gradient from an unnormalized sum over
 #: ~n^2 pair terms, so the learning rate must be scaled by ~(n_ref/n)^2 relative

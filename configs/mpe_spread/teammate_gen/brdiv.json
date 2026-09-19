@@ -1,0 +1,26 @@
+{
+  "job": {
+    "env": {
+      "env_name": "mpe",
+      "name": "mpe_spread",
+      "notes": "MPE cooperative spread: 2-player (pinned from the default 3), discrete, landmark-assignment conventions, no communication. Fast iteration.",
+      "rollout_length": 25,
+      "scenario": "simple_spread",
+      "tier": "tier1"
+    },
+    "generator": {
+      "cross_play_weight": 0.1,
+      "generator": "brdiv",
+      "num_envs": 192,
+      "ppo": {
+        "entropy_coef": 0.003,
+        "learning_rate": 0.0005,
+        "num_minibatches": 2
+      },
+      "total_timesteps": 540000000.0
+    },
+    "job_type": "teammate_generation",
+    "label": "brdiv_mpe_spread"
+  },
+  "schema_version": 1
+}

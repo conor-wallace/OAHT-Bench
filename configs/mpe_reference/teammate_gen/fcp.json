@@ -1,0 +1,24 @@
+{
+  "job": {
+    "env": {
+      "env_name": "mpe",
+      "name": "mpe_reference",
+      "notes": "MPE cooperative reference: 2-player, discrete, communication-code conventions (arbitrary signalling protocol). Fast iteration vs Overcooked/Hanabi.",
+      "rollout_length": 25,
+      "scenario": "simple_reference",
+      "tier": "tier1"
+    },
+    "generator": {
+      "generator": "fcp",
+      "ppo": {
+        "clip_eps": 0.03,
+        "entropy_coef": 0.003,
+        "learning_rate": 0.001
+      },
+      "total_timesteps": 24000000.0
+    },
+    "job_type": "teammate_generation",
+    "label": "fcp_mpe_reference"
+  },
+  "schema_version": 1
+}

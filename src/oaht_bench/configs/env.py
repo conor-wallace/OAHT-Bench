@@ -354,10 +354,43 @@ class HanabiConfig(EnvConfigBase):
         }
 
 
+class MpeConfig(EnvConfigBase):
+    """MPE cooperative tasks (JaxMARL), selected by ``scenario``.
+
+    Fast, 2-player, discrete, convention-rich cooperative games for quick iteration --
+    ``simple_reference`` (each agent must communicate the other's target through a
+    channel with no fixed meaning: the code is an arbitrary convention) and
+    ``simple_spread`` (agents cover landmarks with no communication: the convention is
+    who-covers-which). Flat observations + discrete actions, so they reuse the MLP actor
+    like LBF. Rewards are team-shared in the wrapper (fully cooperative).
+    """
+
+    env_name: Literal["mpe"] = "mpe"
+    scenario: Literal["simple_reference", "simple_spread"]
+    num_agents: int = Field(default=2, gt=0, description="2 for the AHT setting.")
+
+    @property
+    def turn_based(self) -> bool:
+        return False
+
+    def env_kwargs(self) -> dict[str, Any]:
+        jaxmarl_id = {
+            "simple_reference": "MPE_simple_reference_v3",
+            "simple_spread": "MPE_simple_spread_v3",
+        }[self.scenario]
+        kwargs: dict[str, Any] = {"scenario": jaxmarl_id}
+        # simple_reference is fixed 2-player; simple_spread defaults to 3, so pin the
+        # agent/landmark counts to make it a 2-player task.
+        if self.scenario == "simple_spread":
+            kwargs["num_agents"] = self.num_agents
+            kwargs["num_landmarks"] = self.num_agents
+        return kwargs
+
+
 #: Discriminated union. Pydantic selects the member by ``env_name``, so a JSON
 #: config naming an environment gets that environment's validation rules.
 EnvConfig = Annotated[
-    LbfConfig | OvercookedV1Config | OvercookedV2Config | HanabiConfig,
+    LbfConfig | OvercookedV1Config | OvercookedV2Config | HanabiConfig | MpeConfig,
     Field(discriminator="env_name"),
 ]
 
@@ -370,10 +403,10 @@ EnvConfig = Annotated[
 # experiment files reference by name.
 # --------------------------------------------------------------------------
 
-_PRESETS: dict[str, LbfConfig | OvercookedV1Config | OvercookedV2Config | HanabiConfig] = {}
+_PRESETS: dict[str, LbfConfig | OvercookedV1Config | OvercookedV2Config | HanabiConfig | MpeConfig] = {}
 
 
-def _register(cfg: LbfConfig | OvercookedV1Config | OvercookedV2Config | HanabiConfig):
+def _register(cfg: LbfConfig | OvercookedV1Config | OvercookedV2Config | HanabiConfig | MpeConfig):
     if cfg.name in _PRESETS:
         raise ValueError(
             f"Duplicate env preset {cfg.name!r}. Names appear in dataset metadata "
@@ -392,6 +425,29 @@ LBF_12X12 = _register(
         rollout_length=128,
         tier="tier1",
         notes="Gridworld. Matches the existing checkpoints/lbf/lbf_12x12 populations.",
+    )
+)
+
+MPE_REFERENCE = _register(
+    MpeConfig(
+        name="mpe_reference",
+        scenario="simple_reference",
+        rollout_length=25,
+        tier="tier1",
+        notes="MPE cooperative reference: 2-player, discrete, communication-code "
+        "conventions (arbitrary signalling protocol). Fast iteration vs Overcooked/Hanabi.",
+    )
+)
+
+MPE_SPREAD = _register(
+    MpeConfig(
+        name="mpe_spread",
+        scenario="simple_spread",
+        num_agents=2,
+        rollout_length=25,
+        tier="tier1",
+        notes="MPE cooperative spread: 2-player (pinned from the default 3), discrete, "
+        "landmark-assignment conventions, no communication. Fast iteration.",
     )
 )
 

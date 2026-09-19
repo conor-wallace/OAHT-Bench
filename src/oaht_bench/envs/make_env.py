@@ -141,6 +141,17 @@ def make_env(env_name: str, env_kwargs: dict = {}):
         
         env = HanabiWrapper(**env_kwargs_copy)
 
+    elif env_name == 'mpe':
+        # MPE cooperative tasks (simple_reference, simple_spread): 2-player, discrete,
+        # convention-rich, fast (25-step episodes). Already a JaxMARL MultiAgentEnv, so
+        # only a thin wrapper (all-ones avail actions + shared rewards) is needed.
+        from oaht_bench.envs.mpe.mpe_wrapper import MPECooperativeWrapper
+
+        env_kwargs_copy = dict(copy.deepcopy(env_kwargs))
+        scenario = env_kwargs_copy.pop("scenario")
+        base = jaxmarl.make(scenario, **env_kwargs_copy)
+        env = MPECooperativeWrapper(base, share_rewards=True)
+
     else:
         raise NotImplementedError(f"Environment {env_name} not implemented in make_env.")
 
