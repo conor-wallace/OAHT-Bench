@@ -425,8 +425,15 @@ def run_ppo_br(job, logger):
         logger.log_item("BR/mean_return", float(np.mean(means)))
         logger.commit()
 
-    save_train_run({"br_by_source": br_by_source}, job.run_dir(), savename="saved_train_run")
-    (Path(job.run_dir()) / "br_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    # Save to the *absolute* run dir: save_train_run resolves a relative savedir against
+    # REPO_PATH (src/oaht_bench), which would put the checkpoint under
+    # src/oaht_bench/results/... while the manifest (written CWD-relative below) lands in
+    # the repo-root results/... -- so load_br_egos, which reads both from one run dir,
+    # would not find the params. ppo_br is consumed straight from results/ (no release
+    # step), so both must sit together there.
+    run_dir = Path(job.run_dir()).resolve()
+    save_train_run({"br_by_source": br_by_source}, str(run_dir), savename="saved_train_run")
+    (run_dir / "br_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
     population = AgentPopulation(pop_size=len(manifest), policy_cls=first_cls)
     return br_by_source, population
