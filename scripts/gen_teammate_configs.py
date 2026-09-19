@@ -59,6 +59,12 @@ def _family(preset_name: str) -> str:
         # converge at different rates (simple_reference plateaus far sooner than the
         # simple_spread budget the jaxmarl baseline is sized for), so their budgets differ.
         return preset_name
+    if preset_name == "lbf_20x20":
+        # Its own family, NOT "lbf": lbf_20x20 adopts lbf_12x12's tuning but *smoothed*
+        # to one shared PPO backbone + budget across all four generators (see the
+        # _LBF_20X20_* block below), where lbf_12x12 carries four separately-chased
+        # per-generator settings. Kept distinct so the two never share a table entry.
+        return "lbf_20x20"
     return "lbf"
 
 
@@ -517,6 +523,58 @@ for _fam, _b in _MPE_BUDGET.items():
         CROSS_PLAY_WEIGHT[_gen][_fam] = CROSS_PLAY_WEIGHT[_gen]["lbf"]
     MIXED_PLAY_WEIGHT[_fam] = MIXED_PLAY_WEIGHT["lbf"]
     TOLERANCE_FACTOR[_fam] = TOLERANCE_FACTOR["lbf"]
+
+# LBF 20x20 partial observability (TAGET's cooperative setup). All four generators
+# are *fully standardized*: identical PPO backbone, identical num_envs=256, identical
+# budget. Knob values are adopted from lbf_12x12 but "smoothed" to the majority value
+# where the 12x12 generators disagree; only the intrinsic diversity knobs
+# (cross_play_weight / tolerance_factor / mixed_play_weight, inherited from lbf) still
+# differ per generator.
+#
+# num_envs=256 for *all four*, including the paired generators: a flat 256 already
+# clears invariant #4's envs-per-pairing floor -- 256/n^2 = 10.2 at POPULATION_SIZE=5,
+# above LBF's established-safe 7.7 -- so _paired_scale's n^2 multiplier is unnecessary
+# here. COUPLED to n=5: if POPULATION_SIZE grows, 256/n^2 falls (4.0 at n=8, below the
+# safe floor) and BRDiv/L-BRDiv would need _paired_scale again. total_timesteps=7.2e8
+# holds ~22k updates (BRDiv/CoMeDi's converged 12x12 count) at 256 envs -- scaling
+# timesteps with num_envs to keep the update count fixed, exactly as _paired_scale does.
+#
+# Fits a 6GB card (RTX 2060) with wide margin: LBF's 18-float obs x 128-step rollout is
+# ~60x smaller per env than Overcooked's 1040-float x 400-step (the case that OOMs at
+# 384 envs / 11.9 GiB -- Known-open), so 256 LBF envs is ~40 MB of rollout buffers.
+# UNTUNED for 20x20: a uniform starting point, not a result. The ~22k-update budget
+# over-provisions FCP; if it converges early, its later checkpoints collapse the
+# competence spread its diversity depends on (invariant #3), so check the FCP curve.
+_LBF_20X20_PPO = dict(
+    learning_rate=5e-4,  # 3/4 of the 12x12 generators (FCP's 1e-3 was 12x12-specific)
+    update_epochs=15,  # unanimous at 12x12
+    num_minibatches=4,  # FCP/L-BRDiv's value (CoMeDi 8, BRDiv 2 at 12x12)
+    clip_eps=0.05,  # 3/4 at 12x12 (FCP 0.03)
+    entropy_coef=0.003,  # 3/4 at 12x12 (CoMeDi 0.001)
+)
+_LBF_20X20_ENVS = 256  # standardized across all four generators (n^2-safe at n=5)
+_LBF_20X20_TIMESTEPS = 7.2e8  # ~22k updates at num_envs=256, rollout_length=128
+for _gen in ("fcp", "comedi", "brdiv", "lbrdiv"):
+    PPO[_gen]["lbf_20x20"] = dict(_LBF_20X20_PPO)
+SCALE["fcp"]["lbf_20x20"] = dict(
+    total_timesteps=_LBF_20X20_TIMESTEPS, num_envs=_LBF_20X20_ENVS, pop=POPULATION_SIZE
+)
+SCALE["comedi"]["lbf_20x20"] = dict(
+    total_timesteps_per_iteration=_LBF_20X20_TIMESTEPS,
+    num_envs=_LBF_20X20_ENVS,
+    pop=POPULATION_SIZE,
+)
+# Flat 256 (no _paired_scale): 256/n^2 = 10.2 envs/pairing at n=5 clears invariant #4.
+SCALE["brdiv"]["lbf_20x20"] = dict(
+    total_timesteps=_LBF_20X20_TIMESTEPS, num_envs=_LBF_20X20_ENVS, pop=POPULATION_SIZE
+)
+SCALE["lbrdiv"]["lbf_20x20"] = dict(
+    total_timesteps=_LBF_20X20_TIMESTEPS, num_envs=_LBF_20X20_ENVS, pop=POPULATION_SIZE
+)
+for _gen in CROSS_PLAY_WEIGHT:  # inner values are floats
+    CROSS_PLAY_WEIGHT[_gen]["lbf_20x20"] = CROSS_PLAY_WEIGHT[_gen]["lbf"]
+MIXED_PLAY_WEIGHT["lbf_20x20"] = MIXED_PLAY_WEIGHT["lbf"]
+TOLERANCE_FACTOR["lbf_20x20"] = TOLERANCE_FACTOR["lbf"]
 
 #: L-BRDiv's Lagrange multipliers receive gradient from an unnormalized sum over
 #: ~n^2 pair terms, so the learning rate must be scaled by ~(n_ref/n)^2 relative

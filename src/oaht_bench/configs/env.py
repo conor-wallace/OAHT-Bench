@@ -428,6 +428,31 @@ LBF_12X12 = _register(
     )
 )
 
+LBF_20X20 = _register(
+    LbfConfig(
+        name="lbf_20x20",
+        grid_size=20,
+        num_food=4,
+        # fov is a Chebyshev radius (an item is visible iff |dpos| <= fov on both
+        # axes), so the perception window is (2*fov+1)^2. fov=2 -> a 5x5 window,
+        # matching TAGET's cooperative LBF (ICML 2025). Full-obs lbf_12x12 uses
+        # fov=None (defaults to grid_size).
+        fov=2,
+        different_levels=True,
+        rollout_length=128,
+        tier="tier1",
+        notes=(
+            "Partially observable LBF matching TAGET's cooperative setup (ICML 2025): "
+            "20x20 grid, 4 food, 2 agents, 5x5 view (fov=2). force_coop + shared reward "
+            "make it fully cooperative like TAGET (both agents must co-locate to collect; "
+            "team reward normalized to the food fraction). Added to test whether partial "
+            "observability restores the offline teammate-modeling discrimination that "
+            "full-obs lbf_12x12/mpe_spread lack. Episode horizon stays at Jumanji's 100 "
+            "(TAGET uses 50; time_limit is not a config knob here)."
+        ),
+    )
+)
+
 MPE_REFERENCE = _register(
     MpeConfig(
         name="mpe_reference",

@@ -26,9 +26,13 @@ def test_presets_cover_the_committed_scope():
     """Seven v1 results configurations plus one debug configuration (§12.1),
     plus overcooked_v2 (PROVENANCE.md) mirroring v1's five layouts at the
     same tiers, plus the two MPE cooperative tasks (simple_reference,
-    simple_spread) added as fast 2-player convention-rich iteration envs."""
+    simple_spread) added as fast 2-player convention-rich iteration envs,
+    plus lbf_20x20 -- a partially observable (fov=2, 5x5) cooperative LBF
+    matching TAGET's setup, added to test whether partial observability
+    restores offline teammate-modeling discrimination."""
     assert set(preset_names("tier1")) == {
         "lbf_12x12",
+        "lbf_20x20",
         "overcooked_counter_circuit",
         "overcooked_v2_counter_circuit",
         "hanabi",
