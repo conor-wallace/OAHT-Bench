@@ -4,7 +4,7 @@
       "env_name": "mpe",
       "name": "mpe_reference",
       "notes": "MPE cooperative reference: 2-player, discrete, communication-code conventions (arbitrary signalling protocol). Fast iteration vs Overcooked/Hanabi.",
-      "rollout_length": 25,
+      "rollout_length": 128,
       "scenario": "simple_reference",
       "tier": "tier1"
     },
@@ -13,11 +13,13 @@
       "generator": "brdiv",
       "num_envs": 192,
       "ppo": {
-        "entropy_coef": 0.003,
-        "learning_rate": 0.0005,
-        "num_minibatches": 2
+        "anneal_lr": true,
+        "clip_eps": 0.2,
+        "learning_rate": 0.00025,
+        "max_grad_norm": 0.5,
+        "update_epochs": 4
       },
-      "total_timesteps": 540000000.0
+      "total_timesteps": 120000000.0
     },
     "job_type": "teammate_generation",
     "label": "brdiv_mpe_reference"

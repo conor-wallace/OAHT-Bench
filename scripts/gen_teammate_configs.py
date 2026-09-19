@@ -470,14 +470,34 @@ MIXED_PLAY_WEIGHT = {"lbf": 0.4, "overcooked": 0.5, "overcooked_v2": 0.5, "hanab
 #: competence without giving up much separation. See docs/tuning_record.md.
 TOLERANCE_FACTOR = {"lbf": 0.03, "overcooked": 10.0, "overcooked_v2": 10.0, "hanabi": 0.1}
 
-# MPE (simple_reference/spread) is LBF-scale -- flat obs, an MLP actor, short 25-step
-# episodes -- so it starts from LBF's tuning across every table. UNTUNED: MPE is smaller
-# than LBF, so these budgets are likely generous; confirm against the population crossplay
-# (and the ppo_br/oracle curve) before trusting, and record what a sweep concludes (§7.2).
-for _t in (PPO, SCALE):  # inner values are dicts -> copy
-    for _gen in _t:
-        if "lbf" in _t[_gen]:
-            _t[_gen]["mpe"] = dict(_t[_gen]["lbf"])
+# MPE baselines off JaxMARL's IPPO MPE config
+# (baselines/IPPO/config/ippo_ff_mpe.yaml) -- *not* LBF's tuned knobs. The PPO
+# hyperparameters below are jaxmarl's verbatim; NUM_STEPS=128 lives on the env preset's
+# rollout_length. FCP/CoMeDi take jaxmarl's single-policy scale (num_envs=16, 1e7); the
+# paired generators keep the n^2-per-pairing env scaling (invariant #4 -- 16 envs would
+# give ~0.6 per pairing and collapse), holding the update count near jaxmarl's. Diversity
+# knobs (cross_play_weight, tolerance_factor) have no jaxmarl baseline, so they start from
+# LBF. UNTUNED: confirm against the population crossplay and record what a sweep concludes.
+_MPE_PPO = dict(
+    learning_rate=2.5e-4,
+    update_epochs=4,
+    num_minibatches=4,
+    gamma=0.99,
+    gae_lambda=0.95,
+    clip_eps=0.2,
+    entropy_coef=0.01,
+    value_coef=0.5,
+    max_grad_norm=0.5,
+    anneal_lr=True,
+)
+for _gen in PPO:
+    PPO[_gen]["mpe"] = dict(_MPE_PPO)
+SCALE["fcp"]["mpe"] = dict(total_timesteps=1e7, num_envs=16, pop=POPULATION_SIZE)
+SCALE["comedi"]["mpe"] = dict(
+    total_timesteps_per_iteration=1e7, num_envs=16, pop=POPULATION_SIZE
+)
+SCALE["brdiv"]["mpe"] = _paired_scale(64, 4e7)  # 192 envs (n^2-safe), ~jaxmarl update count
+SCALE["lbrdiv"]["mpe"] = _paired_scale(64, 4e7)
 for _gen in CROSS_PLAY_WEIGHT:  # inner values are floats
     CROSS_PLAY_WEIGHT[_gen]["mpe"] = CROSS_PLAY_WEIGHT[_gen]["lbf"]
 MIXED_PLAY_WEIGHT["mpe"] = MIXED_PLAY_WEIGHT["lbf"]

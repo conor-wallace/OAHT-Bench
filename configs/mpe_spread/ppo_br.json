@@ -4,25 +4,27 @@
       "env_name": "mpe",
       "name": "mpe_spread",
       "notes": "MPE cooperative spread: 2-player (pinned from the default 3), discrete, landmark-assignment conventions, no communication. Fast iteration.",
-      "rollout_length": 25,
+      "rollout_length": 128,
       "scenario": "simple_spread",
       "tier": "tier1"
     },
     "generator": {
       "generator": "ppo_br",
       "num_checkpoints": 1,
+      "num_envs": 16,
       "ppo": {
-        "clip_eps": 0.03,
-        "entropy_coef": 0.003,
-        "learning_rate": 0.001
+        "anneal_lr": true,
+        "clip_eps": 0.2,
+        "learning_rate": 0.00025,
+        "max_grad_norm": 0.5,
+        "update_epochs": 4
       },
       "source_population_path": [
         "populations/mpe_spread/fcp",
         "populations/mpe_spread/comedi",
         "populations/mpe_spread/brdiv",
         "populations/mpe_spread/lbrdiv"
-      ],
-      "total_timesteps": 2400000.0
+      ]
     },
     "job_type": "teammate_generation",
     "label": "ppo_br_mpe_spread"

@@ -432,7 +432,7 @@ MPE_REFERENCE = _register(
     MpeConfig(
         name="mpe_reference",
         scenario="simple_reference",
-        rollout_length=25,
+        rollout_length=128,
         tier="tier1",
         notes="MPE cooperative reference: 2-player, discrete, communication-code "
         "conventions (arbitrary signalling protocol). Fast iteration vs Overcooked/Hanabi.",
@@ -444,7 +444,7 @@ MPE_SPREAD = _register(
         name="mpe_spread",
         scenario="simple_spread",
         num_agents=2,
-        rollout_length=25,
+        rollout_length=128,
         tier="tier1",
         notes="MPE cooperative spread: 2-player (pinned from the default 3), discrete, "
         "landmark-assignment conventions, no communication. Fast iteration.",
