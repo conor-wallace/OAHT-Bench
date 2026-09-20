@@ -262,11 +262,13 @@ class TaoTrainer(BaseAhtTrainer):
         # Factor the single ``batch_size`` into TAO's teammate-first contrastive
         # batch: use as many teammates as possible (more contrastive negatives),
         # filling with ``batch_size / n_teammates`` windows each -- floored at the 2
-        # positives the contrastive term requires. The stage-1 batch is therefore
-        # ~= batch_size, capped below it only when there are very few teammates.
+        # positives the contrastive term requires and CAPPED at 8. The cap matters
+        # on a small roster: contrastive learning saturates on positives, so without
+        # it a large batch_size balloons stage 1 (e.g. 12 teammates x 21 windows =
+        # 252) for no benefit. With it, stage 1 is min(batch_size, n_teammates * 8).
         n_teammates = len(self.dataset.index.teammates)
         tpb = max(1, min(n_teammates, self.config.batch_size // 2))
-        wpt = max(2, round(self.config.batch_size / tpb))
+        wpt = min(max(2, round(self.config.batch_size / tpb)), 8)
         return to_jax(
             sample_stage1(
                 self.dataset.windows,
