@@ -82,7 +82,7 @@ def main() -> None:
     np_rng = np.random.default_rng(job.seed)
 
     def sample():
-        idx = np_rng.choice(len(w), size=cfg.stage2_batch_size, replace=False)
+        idx = np_rng.choice(len(w), size=cfg.batch_size, replace=False)
         b = to_jax({k: getattr(w, k)[idx] for k in KEYS})
         tid = jnp.asarray([dense[int(t)] for t in w.teammate_id[idx]], jnp.int32)
         return b, tid

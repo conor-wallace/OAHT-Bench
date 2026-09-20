@@ -115,11 +115,11 @@ class BcTrainer(BaseAhtTrainer):
         self._filtered_idx = _filter_by_return(
             self.dataset.windows, self.config.network.top_return_quantile
         )
-        if len(self._filtered_idx) < self.config.stage2_batch_size:
+        if len(self._filtered_idx) < self.config.batch_size:
             raise ValueError(
                 f"top_return_quantile={self.config.network.top_return_quantile} keeps "
                 f"only {len(self._filtered_idx)} windows, fewer than "
-                f"stage2_batch_size={self.config.stage2_batch_size}. Raise the "
+                f"batch_size={self.config.batch_size}. Raise the "
                 f"quantile or lower the batch size."
             )
 
@@ -128,7 +128,7 @@ class BcTrainer(BaseAhtTrainer):
         fresh minibatch, so the step index is ignored, matching every other
         ego-history baseline's sampler."""
         idx = self.np_rng.choice(
-            self._filtered_idx, size=self.config.stage2_batch_size, replace=False
+            self._filtered_idx, size=self.config.batch_size, replace=False
         )
         return to_jax({k: getattr(self.dataset.windows, k)[idx] for k in _BATCH_KEYS})
 

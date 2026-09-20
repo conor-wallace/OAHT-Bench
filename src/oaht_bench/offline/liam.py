@@ -135,7 +135,7 @@ class LiamTrainer(BaseAhtTrainer):
         """Sample a batch of windows. LIAM's encoder reads the ego stream, so a
         batch is just windows -- no cross trajectory and no contrastive term. The
         step index is ignored; each call draws a fresh minibatch."""
-        return sample_window_batch(self.dataset.windows, self.np_rng, self.config.stage2_batch_size)
+        return sample_window_batch(self.dataset.windows, self.np_rng, self.config.batch_size)
 
     def train_stage_1(self):
         init_batch = self._sample_batch(0)

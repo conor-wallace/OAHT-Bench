@@ -259,13 +259,21 @@ class TaoTrainer(BaseAhtTrainer):
         self.agent.build_model()
 
     def _stage1_batch(self, _step):
+        # Factor the single ``batch_size`` into TAO's teammate-first contrastive
+        # batch: use as many teammates as possible (more contrastive negatives),
+        # filling with ``batch_size / n_teammates`` windows each -- floored at the 2
+        # positives the contrastive term requires. The stage-1 batch is therefore
+        # ~= batch_size, capped below it only when there are very few teammates.
+        n_teammates = len(self.dataset.index.teammates)
+        tpb = max(1, min(n_teammates, self.config.batch_size // 2))
+        wpt = max(2, round(self.config.batch_size / tpb))
         return to_jax(
             sample_stage1(
                 self.dataset.windows,
                 self.dataset.index,
                 self.np_rng,
-                teammates_per_batch=self.config.teammates_per_batch,
-                windows_per_teammate=self.config.windows_per_teammate,
+                teammates_per_batch=tpb,
+                windows_per_teammate=wpt,
             )
         )
 
@@ -275,7 +283,7 @@ class TaoTrainer(BaseAhtTrainer):
                 self.dataset.windows,
                 self.dataset.index,
                 self.np_rng,
-                batch_size=self.config.stage2_batch_size,
+                batch_size=self.config.batch_size,
                 context_trajectories=self.config.context_trajectories,
             )
         )

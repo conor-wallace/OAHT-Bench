@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 
 from oaht_bench.configs.base import BaseConfig, VersionedConfig
 from oaht_bench.configs.env import EnvConfig
@@ -320,21 +320,19 @@ class OfflineTrainingConfig(BaseConfig):
         "into a sum of three embeddings.",
     )
 
-    teammates_per_batch: int = Field(
-        default=4,
+    batch_size: int = Field(
+        default=64,
         gt=0,
-        description="Distinct teammates per stage-1 batch. The reference draws "
-        "trajectories uniformly and gets contrastive positives for free from "
-        "many trajectories per opponent; our coverage is ragged, so the batch is "
-        "built teammate-first to guarantee them.",
+        # One knob for every baseline and both stages. BC/LIAM/MeLIBA/OMIS use it
+        # for their single training loop; TAO uses it for stage 2 and *derives* its
+        # stage-1 contrastive factorization from it (all available teammates x
+        # batch_size/n_teammates windows each, >=2 positives -- see TaoTrainer).
+        # Accepts the old `stage2_batch_size` key so existing configs keep loading.
+        validation_alias=AliasChoices("batch_size", "stage2_batch_size"),
+        description="Minibatch size, shared by every baseline and both training "
+        "stages. TAO's stage-1 contrastive batch is factored from it over the "
+        "available teammates.",
     )
-    windows_per_teammate: int = Field(
-        default=8,
-        gt=1,
-        description="Windows per teammate in a stage-1 batch. Must exceed 1 or "
-        "every anchor is its own only positive.",
-    )
-    stage2_batch_size: int = Field(default=64, gt=0)
     context_trajectories: int = Field(
         default=5,
         gt=0,

@@ -50,9 +50,7 @@ def _job(tmp_path: Path, baseline: str, **overrides) -> TrainingJob:
         stage1_steps=2,
         stage2_steps=2,
         log_every=1,
-        stage2_batch_size=8,
-        teammates_per_batch=2,
-        windows_per_teammate=4,
+        batch_size=8,
         context_trajectories=2,
     )
     return TrainingJob(
