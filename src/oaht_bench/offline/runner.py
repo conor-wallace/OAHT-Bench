@@ -286,12 +286,66 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
     ns = int(job.num_seeds)
     import numpy as np
 
+    # TAO (and OMIS later) adapt across episodes via an Opponent Context Window, so
+    # they evaluate through the sequential in-context path; the within-episode
+    # baselines (BC/LIAM/MeLIBA) keep the parallel per-episode eval unchanged.
+    incontext = resolved.network.architecture in ("tao",)
+
+    def _score_incontext(teammates, *, rng_base):
+        """TAO/OMIS scoring: sequential episodes per teammate, OCW re-encoded each one.
+
+        Same shape as :func:`score`, plus ``adaptation_curve`` -- the per-episode return
+        averaged over teammates and seeds. That curve is the point of cross-episode
+        adaptation: a within-episode baseline would be flat, TAO should climb as its OCW
+        fills. ``ocw_size`` is TAO's ``C`` (``context_trajectories``, the reference's
+        OCW_SIZE), so deployment matches the context size stage 2 trained on.
+        """
+        from oaht_bench.offline.incontext_eval import evaluate_incontext
+
+        seed_pt, seed_curves, seed_means = [], [], []
+        for s in range(ns):
+            p = all_params if ns == 1 else jax.tree.map(lambda x: x[s], all_params)  # noqa: B023
+            mean, curve = evaluate_incontext(
+                agent,
+                p,
+                env,
+                teammates,
+                max_episode_steps=job.env.rollout_length,
+                num_episodes=job.offline.eval_episodes,
+                ocw_size=job.offline.context_trajectories,
+                obs_dim=windows.obs_dim,
+                rng=jax.random.PRNGKey(rng_base + s),
+            )
+            seed_pt.append(mean)
+            seed_curves.append(curve)
+            seed_means.append(float(np.mean(list(mean.values()))))
+        labels = list(seed_pt[0])
+        per_teammate = {t: float(np.mean([m[t] for m in seed_pt])) for t in labels}
+        n_eps = int(job.offline.eval_episodes)
+        adaptation_curve = [
+            float(np.mean([seed_curves[s][t][e] for s in range(ns) for t in labels]))
+            for e in range(n_eps)
+        ]
+        out = {
+            "num_seeds": ns,
+            "mean_return": float(np.mean(seed_means)),
+            "mean_return_std": float(np.std(seed_means)) if ns > 1 else 0.0,
+            "worst_teammate_return": float(min(per_teammate.values())),
+            "per_teammate": per_teammate,
+            "adaptation_curve": adaptation_curve,
+        }
+        if ns > 1:
+            out["per_seed_mean_return"] = [float(m) for m in seed_means]
+        return out
+
     def score(teammates, *, rng_base):
         """Across-seed mean return against one teammate set.
 
         ``rng_base`` offsets the per-seed eval RNG so the held-out draw stays
         byte-identical to the pre-split runs while train gets independent episodes.
         """
+        if incontext:
+            return _score_incontext(teammates, rng_base=rng_base)
         per_seed = [
             evaluate_agent_against(
                 agent,
@@ -330,6 +384,10 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
     if ns > 1:
         logger.log_item("Eval/MeanReturnStd", result["mean_return_std"])
     logger.log_item("Eval/WorstTeammateReturn", result["worst_teammate_return"])
+    # Adaptation curve (in-context baselines only): held-out return per episode index
+    # as the OCW fills -- flat for a within-episode method, climbing if TAO adapts.
+    for e, v in enumerate(result.get("adaptation_curve", [])):
+        logger.log_item(f"Eval/AdaptationReturn_ep{e}", v)
 
     # In-distribution contrast: how well the ego coordinates with the *training*
     # teammates it learned from, so a held-out score is readable as generalisation
