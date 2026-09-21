@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 
 from oaht_bench.dataset.sampler import sample_stage1, sample_stage2
@@ -411,15 +412,24 @@ class TaoTrainer(BaseAhtTrainer):
         """The C-trajectory Opponent Context Window, encoded from the dataset."""
         c = self.config.context_trajectories
         hidden = self.config.network.hidden_dim
+        # Read and encode ONLY the c windows this keeps. The window fields are
+        # lazy/streaming, so materializing the whole teammate stream here (the
+        # earlier ``jnp.asarray(windows.mate_next_obs)``) pulled the entire dataset
+        # into memory just to slice ``tokens[:c]`` -- tens of GB on a large dataset,
+        # OOM-killing the run right after stage 2. The encoder embeds each trajectory
+        # independently, so encoding ``windows[:c]`` gives byte-identical tokens.
+        # ``_LazyField`` indexes by integer array, not slices, hence ``np.arange``.
+        w = self.dataset.windows
+        idx = np.arange(min(c, len(w)))  # min mirrors the old tokens[:c] when windows < c
         tokens = self.agent.encoder.apply(
             encoder_params,
-            jnp.asarray(self.dataset.windows.mate_next_obs),
-            jnp.asarray(self.dataset.windows.mate_actions),
-            jnp.asarray(self.dataset.windows.mate_rewards),
-            mask=jnp.asarray(self.dataset.windows.mask),
-            timesteps=jnp.asarray(self.dataset.windows.timesteps),
+            jnp.asarray(w.mate_next_obs[idx]),
+            jnp.asarray(w.mate_actions[idx]),
+            jnp.asarray(w.mate_rewards[idx]),
+            mask=jnp.asarray(w.mask[idx]),
+            timesteps=jnp.asarray(w.timesteps[idx]),
             train=False,
         )
-        context = tokens[:c].reshape(1, -1, hidden)
-        context_mask = jnp.asarray(self.dataset.windows.mask)[:c].reshape(1, -1)
+        context = tokens.reshape(1, -1, hidden)
+        context_mask = jnp.asarray(w.mask[idx]).reshape(1, -1)
         return context, context_mask
