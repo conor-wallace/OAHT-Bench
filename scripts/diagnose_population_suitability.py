@@ -157,8 +157,10 @@ def _load_windows(config_path, max_windows, dataset_override=None):
     return job, obs, act, mask, tid, action_dim
 
 
-def _crossplay_metrics(npz_path):
-    """The two orthogonal, *deterministic* population-quality scalars from the crossplay.
+def ds_from_matrix(m, *, diagonal_is_selfplay=True):
+    """The two orthogonal, *deterministic* population-quality scalars from a crossplay
+    (sub)matrix ``m[ego, teammate]``. Pure -- so any sub-population (a generator/role
+    slice of a pooled matrix, one cross_play_weight cell, ...) can be scored the same way.
 
     **Diversity D** = ``1 - best_generalist / oracle_ceiling`` -- the headroom a
     per-teammate-adaptive ego has over the single best FIXED ego. D->0 means one policy
@@ -166,44 +168,70 @@ def _crossplay_metrics(npz_path):
     different best-response (modelling is essential). (This is ZSC-Eval's BR-Div read off
     the matrix.)
 
-    **Sparseness S** (navigability) = how catastrophic a mismatch is: ``cross/self``
-    (low = mismatches collapse coordination) and ``dead_fraction`` (share of off-diagonal
-    pairs near the worst response for their teammate -> a minefield).
+    **Sparseness S** (navigability) = how catastrophic a mismatch is: ``cross/self`` (low
+    = mismatches collapse coordination) and ``dead_fraction`` (share of non-self pairs
+    near the worst response for their teammate -> a minefield).
 
-    A population is a good AHT testbed iff D is HIGH (modelling needed) AND S is LOW
-    (mismatches survivable). High-D + high-S is the un-generalizable adversarial corner;
-    low-D is the trivial/non-discriminative corner.
+    ``diagonal_is_selfplay`` (default True) is for a *square* roster where ``m[i,i]`` is
+    self-play. Set it False for an **asymmetric** block -- egos and teammates are different
+    policy sets (e.g. BR egos x confederate teammates), where there is no self-play
+    diagonal: ``cross/self`` is then undefined (NaN) and every cell counts toward
+    ``dead_fraction``. D generalises either way. Good testbed = high D + low S; high-D +
+    high-S is the adversarial corner, low-D is trivial.
     """
     from oaht_bench.population.pooled_crossplay import normalise_per_teammate
 
-    if str(npz_path).endswith(".csv"):
-        import pandas as pd
-
-        m = pd.read_csv(npz_path, index_col=0).values.astype(float)
-    else:
-        m = np.asarray(np.load(npz_path, allow_pickle=True)["matrix"], float)
-    k = m.shape[0]
-    diag = np.diag(m)
-    off = m[~np.eye(k, dtype=bool)]
-    ratio = float(off.mean() / diag.mean()) if diag.mean() != 0 else float("nan")
-    # Column-normalised: for each teammate, best ego -> 1, worst -> 0. Off-diagonal
-    # cells that map near 0 are "dead" responses (near-worst for their teammate).
-    q = normalise_per_teammate(m)
-    off_q = q[~np.eye(k, dtype=bool)]
-    dead_frac = float((off_q < 0.1).mean())
+    m = np.asarray(m, float)
+    n_ego, n_tm = m.shape
+    if n_ego < 1 or n_tm < 2:
+        nan = float("nan")
+        return {"roster_size": n_tm, "diversity": nan, "cross_over_self": nan,
+                "dead_fraction": nan, "self_mean": nan, "cross_mean": nan,
+                "best_generalist": nan, "oracle_ceiling": nan}
     best_generalist = float(m.mean(1).max())  # best single FIXED ego over all teammates
     oracle_ceiling = float(m.max(0).mean())  # mean over teammates of the best ego for THAT teammate
     diversity = 1 - best_generalist / oracle_ceiling if oracle_ceiling != 0 else float("nan")
+    # Column-normalised: for each teammate, best ego -> 1, worst -> 0. Cells near 0 are
+    # "dead" responses (near-worst for their teammate).
+    q = normalise_per_teammate(m)
+    if diagonal_is_selfplay and n_ego == n_tm:
+        diag = np.diag(m)
+        off = m[~np.eye(n_tm, dtype=bool)]
+        ratio = float(off.mean() / diag.mean()) if diag.mean() != 0 else float("nan")
+        dead = float((q[~np.eye(n_tm, dtype=bool)] < 0.1).mean())
+        self_mean, cross_mean = float(diag.mean()), float(off.mean())
+    else:  # asymmetric ego != teammate: no self-play diagonal
+        ratio, self_mean, cross_mean = float("nan"), float("nan"), float(m.mean())
+        dead = float((q < 0.1).mean())
     return {
-        "roster_size": k,
-        "self_mean": float(diag.mean()),
-        "cross_mean": float(off.mean()),
+        "roster_size": n_tm,
+        "self_mean": self_mean,
+        "cross_mean": cross_mean,
         "diversity": float(diversity),
         "best_generalist": best_generalist,
         "oracle_ceiling": oracle_ceiling,
         "cross_over_self": ratio,
-        "dead_fraction": dead_frac,
+        "dead_fraction": dead,
     }
+
+
+def load_crossplay(path):
+    """Return ``(matrix, generators, roles)`` from a pooled_crossplay .npz (or bare .csv,
+    which has no roster labels so cannot be sub-sliced)."""
+    if str(path).endswith(".csv"):
+        import pandas as pd
+
+        return pd.read_csv(path, index_col=0).values.astype(float), None, None
+    d = np.load(path, allow_pickle=True)
+    m = np.asarray(d["matrix"], float)
+    gens = [str(g) for g in d["roster_generator"]] if "roster_generator" in d.files else None
+    roles = [str(r) for r in d["roster_role"]] if "roster_role" in d.files else None
+    return m, gens, roles
+
+
+def _crossplay_metrics(path):
+    """(D, S) for a whole crossplay file -- the probe's use. See :func:`ds_from_matrix`."""
+    return ds_from_matrix(load_crossplay(path)[0])
 
 
 def main() -> None:
