@@ -1,0 +1,63 @@
+{
+  "job": {
+    "env": {
+      "different_levels": true,
+      "env_name": "lbf",
+      "fov": null,
+      "grid_size": 12,
+      "name": "lbf_12x12",
+      "notes": "Gridworld. Matches the existing checkpoints/lbf/lbf_12x12 populations.",
+      "num_agents": 2,
+      "num_food": 6,
+      "rollout_length": 128,
+      "schema_version": 1,
+      "tier": "tier1"
+    },
+    "evaluation_episodes": 20,
+    "evaluation_greedy": false,
+    "generator": {
+      "actor_type": "actor_with_conditional_critic",
+      "cross_play_weight": 0.2,
+      "generator": "comedi",
+      "mixed_play_weight": 0.4,
+      "network": {
+        "activation": "tanh",
+        "architecture": "mlp",
+        "hidden_dim": 64,
+        "policy_input_dim": null
+      },
+      "num_argmax_rollout_episodes": 20,
+      "num_checkpoints": 5,
+      "num_envs": 64,
+      "num_eval_episodes": 20,
+      "num_seeds": 1,
+      "population_size": 5,
+      "ppo": {
+        "anneal_lr": false,
+        "clip_eps": 0.05,
+        "entropy_coef": 0.001,
+        "gae_lambda": 0.95,
+        "gamma": 0.99,
+        "learning_rate": 0.0005,
+        "max_grad_norm": 1.0,
+        "num_minibatches": 8,
+        "update_epochs": 15,
+        "value_coef": 0.5
+      },
+      "total_timesteps_per_iteration": 192000000.0,
+      "train_seed": 20374
+    },
+    "job_type": "teammate_generation",
+    "label": "comedi_lbf_budget3__learning_rate=0.0005_total_timesteps_per_iteration=192000000.0",
+    "logging": {
+      "use_wandb": false,
+      "verbose": false,
+      "wandb_entity": null,
+      "wandb_project": null
+    },
+    "output_dir": "results",
+    "schema_version": 1,
+    "seed": 0
+  },
+  "schema_version": 1
+}

@@ -1,0 +1,27 @@
+{
+  "job": {
+    "env": {
+      "env_name": "lbf",
+      "fov": 2,
+      "grid_size": 20,
+      "name": "lbf_20x20",
+      "notes": "Partially observable LBF matching TAGET's cooperative setup (ICML 2025): 20x20 grid, 4 food, 2 agents, 5x5 view (fov=2). force_coop + shared reward make it fully cooperative like TAGET (both agents must co-locate to collect; team reward normalized to the food fraction). Added to test whether partial observability restores the offline teammate-modeling discrimination that full-obs lbf_12x12/mpe_spread lack. Episode horizon stays at Jumanji's 100 (TAGET uses 50; time_limit is not a config knob here).",
+      "num_food": 4,
+      "rollout_length": 128,
+      "tier": "tier1"
+    },
+    "generator": {
+      "cross_play_weight": 0.1,
+      "generator": "brdiv",
+      "num_envs": 256,
+      "ppo": {
+        "entropy_coef": 0.003,
+        "learning_rate": 0.0005
+      },
+      "total_timesteps": 720000000.0
+    },
+    "job_type": "teammate_generation",
+    "label": "brdiv_lbf_20x20"
+  },
+  "schema_version": 1
+}
