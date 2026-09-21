@@ -10,9 +10,11 @@ and reactive/non-discriminative ones.
 Everything reduces to one environment-agnostic object -- the predictability
 structure of the collected trajectories -- estimated by three quantities:
 
-  A  adversariality  (from the crossplay matrix): is the space *between* conventions
-     a minefield? Measured as how far cross-play sits below self-play, and how many
-     (ego, teammate) pairs land near the worst response for their teammate.
+  A  population structure  (deterministic, from the crossplay matrix), two orthogonal
+     scalars: **Diversity D** = headroom of per-teammate adaptation over the best fixed
+     ego (D->0 trivial, D->1 modelling essential; = ZSC-Eval's BR-Div), and **Sparseness
+     S** = how catastrophic a mismatch is (cross/self and dead-fraction). Good testbed =
+     high D + low S; high-D+high-S is adversarial, low-D is trivial.
 
   R(t)  recoverability = I(teammate_id ; history_t): can you tell *who* you're playing
      from t steps of the ego's own local history? A linear probe's held-out accuracy
@@ -58,6 +60,7 @@ import numpy as np
 #   *_norm quantities are in [0, 1] (fraction of the achievable headroom).
 _ADV_DEAD_FRAC = 0.5  # >half of off-BR responses near their teammate's worst -> minefield
 _ADV_RATIO = 0.3  # mean(cross)/mean(self) below this -> heavily specialised
+_LOW_DIVERSITY = 0.3  # D below this: best fixed ego captures >70% of the ceiling -> trivial
 _R_IDENTIFIABLE = 0.35  # recoverability headroom above chance to call it identifiable
 _R_UNIDENTIFIABLE = 0.12  # below this, effectively un-identifiable
 _V_MATTERS = 0.03  # accuracy gain from adding id to call identity "valuable"
@@ -154,11 +157,31 @@ def _load_windows(config_path, max_windows, dataset_override=None):
     return job, obs, act, mask, tid, action_dim
 
 
-def _adversariality(npz_path):
+def _crossplay_metrics(npz_path):
+    """The two orthogonal, *deterministic* population-quality scalars from the crossplay.
+
+    **Diversity D** = ``1 - best_generalist / oracle_ceiling`` -- the headroom a
+    per-teammate-adaptive ego has over the single best FIXED ego. D->0 means one policy
+    serves everyone (trivial: modelling can't help); D->1 means each teammate needs a
+    different best-response (modelling is essential). (This is ZSC-Eval's BR-Div read off
+    the matrix.)
+
+    **Sparseness S** (navigability) = how catastrophic a mismatch is: ``cross/self``
+    (low = mismatches collapse coordination) and ``dead_fraction`` (share of off-diagonal
+    pairs near the worst response for their teammate -> a minefield).
+
+    A population is a good AHT testbed iff D is HIGH (modelling needed) AND S is LOW
+    (mismatches survivable). High-D + high-S is the un-generalizable adversarial corner;
+    low-D is the trivial/non-discriminative corner.
+    """
     from oaht_bench.population.pooled_crossplay import normalise_per_teammate
 
-    d = np.load(npz_path, allow_pickle=True)
-    m = np.asarray(d["matrix"], float)
+    if str(npz_path).endswith(".csv"):
+        import pandas as pd
+
+        m = pd.read_csv(npz_path, index_col=0).values.astype(float)
+    else:
+        m = np.asarray(np.load(npz_path, allow_pickle=True)["matrix"], float)
     k = m.shape[0]
     diag = np.diag(m)
     off = m[~np.eye(k, dtype=bool)]
@@ -168,10 +191,16 @@ def _adversariality(npz_path):
     q = normalise_per_teammate(m)
     off_q = q[~np.eye(k, dtype=bool)]
     dead_frac = float((off_q < 0.1).mean())
+    best_generalist = float(m.mean(1).max())  # best single FIXED ego over all teammates
+    oracle_ceiling = float(m.max(0).mean())  # mean over teammates of the best ego for THAT teammate
+    diversity = 1 - best_generalist / oracle_ceiling if oracle_ceiling != 0 else float("nan")
     return {
         "roster_size": k,
         "self_mean": float(diag.mean()),
         "cross_mean": float(off.mean()),
+        "diversity": float(diversity),
+        "best_generalist": best_generalist,
+        "oracle_ceiling": oracle_ceiling,
         "cross_over_self": ratio,
         "dead_fraction": dead_frac,
     }
@@ -247,18 +276,19 @@ def main() -> None:
     print(f"  given current obs:      acc gain={v_obs_gain:+.3f}  CE drop={v_obs_ce:+.3f}")
     print(f"  given obs + history:    acc gain={v_hist_gain:+.3f}  CE drop={v_hist_ce:+.3f}")
 
-    # --- A: adversariality from the crossplay matrix ---
-    print("\n[A] adversariality  (crossplay structure)")
+    # --- A: population structure (diversity D + sparseness S) from the crossplay ---
+    print("\n[A] population structure  (crossplay -- deterministic)")
     xpath = args.crossplay or f"populations/{env_name}/pooled_crossplay.npz"
     adv = None
     try:
-        adv = _adversariality(xpath)
+        adv = _crossplay_metrics(xpath)
         print(
-            f"  roster={adv['roster_size']}  self-play mean={adv['self_mean']:.3f}  "
-            f"cross-play mean={adv['cross_mean']:.3f}  cross/self={adv['cross_over_self']:.2f}"
+            f"  roster={adv['roster_size']}  Diversity D={adv['diversity']:.2f}  "
+            f"(best-generalist {adv['best_generalist']:.3f} / oracle-ceiling {adv['oracle_ceiling']:.3f})"
         )
         print(
-            f"  dead-response fraction (off-BR near worst-for-teammate)={adv['dead_fraction']:.2f}"
+            f"  Sparseness S: cross/self={adv['cross_over_self']:.2f}  "
+            f"dead-fraction={adv['dead_fraction']:.2f}  (high = mismatches are a minefield)"
         )
     except FileNotFoundError:
         print(f"  crossplay matrix not found at {xpath} -- skipping (pass --crossplay).")
@@ -267,6 +297,7 @@ def main() -> None:
     adversarial = adv is not None and (
         adv["dead_fraction"] > _ADV_DEAD_FRAC or adv["cross_over_self"] < _ADV_RATIO
     )
+    low_diversity = adv is not None and adv["diversity"] < _LOW_DIVERSITY
     id_valuable = max(v_obs_gain, v_hist_gain) > _V_MATTERS
     hidden_convention = v_obs_gain <= _V_MATTERS < v_hist_gain
     identifiable = r_full > _R_IDENTIFIABLE
@@ -279,11 +310,17 @@ def main() -> None:
             "so no single offline ego can generalize. Fix the GENERATOR: lower cross_play_weight / "
             "raise the task-reward anchor, or select a representative (BR-Div) subset."
         )
-    elif not id_valuable:
+    elif low_diversity or not id_valuable:
+        reasons = []
+        if low_diversity:
+            reasons.append(f"population diversity is low (D={adv['diversity']:.2f} -- one fixed ego serves all)")
+        if not id_valuable:
+            reasons.append("teammate identity barely changes the ego's action")
         v = (
-            "REACTIVE / non-discriminative. Teammate identity barely changes the ego's action, so "
-            "BC ~= the teammate-id oracle. Coordination is readable from the observation; the population "
-            "is a useful CONTROL but will not discriminate teammate-modelling methods (spread-like)."
+            "REACTIVE / non-discriminative -- "
+            + "; ".join(reasons)
+            + ". BC ~= the teammate-id oracle, so teammate-modelling can't help. A useful CONTROL, "
+            "not a discriminative tier (spread-like)."
         )
     elif unidentifiable:
         v = (
@@ -320,10 +357,13 @@ def main() -> None:
             {
                 "env": env_name,
                 "teammates": n_teammates,
+                "diversity_D": round(adv["diversity"], 4) if adv else None,
+                "sparseness": {"cross_over_self": round(adv["cross_over_self"], 4),
+                               "dead_fraction": round(adv["dead_fraction"], 4)} if adv else None,
                 "R_norm": {str(k): round(v, 4) for k, v in r_curve.items()},
                 "V_obs_gain": round(v_obs_gain, 4),
                 "V_hist_gain": round(v_hist_gain, 4),
-                "adversariality": adv,
+                "crossplay": adv,
                 "verdict": v.split(".")[0].split("--")[0].strip(),
             }
         )
