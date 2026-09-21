@@ -193,7 +193,14 @@ class TaoAgent(ReturnConditionedAgent):
         )
 
     def act(self, params, rtg, obs, actions, *, timesteps, mask):
-        """Ego action logits, cross-attending to the baked deployment context."""
+        """Ego action logits, cross-attending to ``params["stage2"]["context"]``.
+
+        ``act`` itself is context-source-agnostic: it reads whatever context sits in
+        ``stage2``. Training bakes a static one (:mod:`oaht_bench.offline.tao`); the
+        in-context deployment eval (:mod:`oaht_bench.offline.incontext_eval`) swaps in
+        a *fresh* context each episode, encoded from the live Opponent Context Window
+        via :meth:`encode_ocw`, so the same forward path serves both.
+        """
         stage2 = params["stage2"]
         return self.network.apply(
             stage2["policy"],
@@ -206,3 +213,31 @@ class TaoAgent(ReturnConditionedAgent):
             context_mask=stage2["context_mask"],
             train=False,
         )
+
+    def encode_ocw(self, params, mate_next_obs, mate_actions, mate_rewards, mask, timesteps):
+        """Encode an Opponent Context Window into ``(context, context_mask)`` for act.
+
+        Runs the OPE (``M_θe``) over the ``C`` opponent trajectory fragments in the
+        OCW and reshapes to the single key/value sequence the ICD cross-attends to --
+        the online analog of training's baked ``stage2["context"]``, but computed from
+        the *current* teammate's observed trajectories rather than fixed training
+        windows. Inputs carry a leading ``(C, T, ...)`` trajectory axis; ``mask``
+        marks valid positions (all-zero rows are unfilled OCW slots, e.g. episode 1).
+
+        This is the reusable cross-episode encoding TAO needs now and OMIS's ``D_epi``
+        will reuse -- both encode the last ``C`` opponent trajectories the same way.
+        """
+        stage2 = params["stage2"]
+        tokens = self.encoder.apply(
+            stage2["encoder"],
+            jnp.asarray(mate_next_obs),
+            jnp.asarray(mate_actions),
+            jnp.asarray(mate_rewards),
+            mask=jnp.asarray(mask),
+            timesteps=jnp.asarray(timesteps),
+            train=False,
+        )
+        hidden = self.config.network.hidden_dim
+        context = tokens.reshape(1, -1, hidden)
+        context_mask = jnp.asarray(mask).reshape(1, -1)
+        return context, context_mask
