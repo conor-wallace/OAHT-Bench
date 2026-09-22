@@ -29,18 +29,21 @@ from diagnose_population_suitability import (  # noqa: E402
     _ADV_DEAD_FRAC,
     _ADV_RATIO,
     _LOW_DIVERSITY,
+    diversity_significance,
     ds_from_matrix,
     load_crossplay,
 )
 
 
-def _regime(a) -> str:
+def _regime(a, sig) -> str:
     if np.isnan(a["diversity"]):
         return "-"
     if a["dead_fraction"] > _ADV_DEAD_FRAC or a["cross_over_self"] < _ADV_RATIO:
         return "STOP (adversarial)"
     if a["diversity"] < _LOW_DIVERSITY:
         return "TRIVIAL (low-D)"
+    if sig is not None and not sig["significant"]:
+        return f"TRIVIAL (D not sig, z={sig['z_score']:+.1f})"
     return "candidate GO"
 
 
@@ -53,27 +56,33 @@ def _idx(n, gens, roles, gsel, roleset):
         mask &= np.array([g in gsel for g in gens])
     if roleset is not None:
         if roles is None:
-            raise SystemExit("--roles / --ego-roles / --teammate-roles need an .npz with roster labels")
+            raise SystemExit(
+                "--roles / --ego-roles / --teammate-roles need an .npz with roster labels"
+            )
         mask &= np.array([r in roleset for r in roles])
     return np.flatnonzero(mask)
 
 
-def _print_row(label, m, ego_idx, tm_idx, diag_selfplay):
+def _print_row(label, m, ego_idx, tm_idx, diag_selfplay, *, n_perm):
     if len(tm_idx) < 2 or len(ego_idx) < 1:
         print(f"  {label:46s} {len(tm_idx):>3d}   (need >=1 ego, >=2 teammates)")
         return
-    a = ds_from_matrix(m[np.ix_(ego_idx, tm_idx)], diagonal_is_selfplay=diag_selfplay)
+    sub = m[np.ix_(ego_idx, tm_idx)]
+    a = ds_from_matrix(sub, diagonal_is_selfplay=diag_selfplay)
+    sig = diversity_significance(sub, n_perm=n_perm) if n_perm else None
     xself = "     --" if np.isnan(a["cross_over_self"]) else f"{a['cross_over_self']:>7.2f}"
     print(
         f"  {label:46s} {a['roster_size']:>3d} {a['diversity']:>6.2f} "
-        f"{xself} {a['dead_fraction']:>6.2f}   {_regime(a)}"
+        f"{xself} {a['dead_fraction']:>6.2f}   {_regime(a, sig)}"
     )
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("crossplay", nargs="+", help="one or more pooled_crossplay .npz (or .csv)")
-    ap.add_argument("--generators", default=None, help="comma list to keep (e.g. brdiv or brdiv,lbrdiv)")
+    ap.add_argument(
+        "--generators", default=None, help="comma list to keep (e.g. brdiv or brdiv,lbrdiv)"
+    )
     ap.add_argument("--roles", default=None, help="symmetric role filter (conf,br,self)")
     ap.add_argument(
         "--ego-roles",
@@ -82,11 +91,24 @@ def main() -> None:
         "BR-egos x teammates block -- the correct view for BR-paired generators like BRDiv, where "
         "confederates alone are degenerate. cross/self is then undefined.",
     )
-    ap.add_argument("--teammate-roles", default=None, help="asymmetric: roles to use as TEAMMATEs (e.g. conf,self)")
+    ap.add_argument(
+        "--teammate-roles",
+        default=None,
+        help="asymmetric: roles to use as TEAMMATEs (e.g. conf,self)",
+    )
     ap.add_argument(
         "--per-generator",
         action="store_true",
         help="also print each generator's own block per file (reveals within- vs cross-generator structure)",
+    )
+    ap.add_argument(
+        "--n-perm",
+        type=int,
+        default=2000,
+        help="permutations for D's shuffled-teammate significance test (0 disables it -- see "
+        "diagnose_population_suitability.diversity_significance; D alone is not evidence of real "
+        "per-teammate structure without this, confirmed on lbf_20x20's crossplay where the raw D "
+        "reading (0.54, 'candidate GO') did not clear its own null, z=-4.3)",
     )
     args = ap.parse_args()
     gsel = set(args.generators.split(",")) if args.generators else None
@@ -99,10 +121,10 @@ def main() -> None:
         if asymmetric:
             e = _idx(m.shape[0], gens, roles, gfilter, ego_r)
             t = _idx(m.shape[0], gens, roles, gfilter, tm_r)
-            _print_row(label, m, e, t, diag_selfplay=False)
+            _print_row(label, m, e, t, diag_selfplay=False, n_perm=args.n_perm)
         else:
             i = _idx(m.shape[0], gens, roles, gfilter, rsel)
-            _print_row(label, m, i, i, diag_selfplay=True)
+            _print_row(label, m, i, i, diag_selfplay=True, n_perm=args.n_perm)
 
     tag = ""
     if asymmetric:
@@ -112,7 +134,13 @@ def main() -> None:
     print(f"  {'population':46s} {'n':>3s} {'D':>6s} {'x/self':>7s} {'dead':>6s}   regime")
     for path in args.crossplay:
         m, gens, roles = load_crossplay(path)
-        emit(path.split("/")[-1] + (f" [{args.generators}]" if gsel else "") + tag, m, gens, roles, gsel)
+        emit(
+            path.split("/")[-1] + (f" [{args.generators}]" if gsel else "") + tag,
+            m,
+            gens,
+            roles,
+            gsel,
+        )
         if args.per_generator and gens is not None:
             for g in sorted(set(gens)):
                 emit(f"  └ {g}{tag}", m, gens, roles, {g})

@@ -185,9 +185,16 @@ def ds_from_matrix(m, *, diagonal_is_selfplay=True):
     n_ego, n_tm = m.shape
     if n_ego < 1 or n_tm < 2:
         nan = float("nan")
-        return {"roster_size": n_tm, "diversity": nan, "cross_over_self": nan,
-                "dead_fraction": nan, "self_mean": nan, "cross_mean": nan,
-                "best_generalist": nan, "oracle_ceiling": nan}
+        return {
+            "roster_size": n_tm,
+            "diversity": nan,
+            "cross_over_self": nan,
+            "dead_fraction": nan,
+            "self_mean": nan,
+            "cross_mean": nan,
+            "best_generalist": nan,
+            "oracle_ceiling": nan,
+        }
     best_generalist = float(m.mean(1).max())  # best single FIXED ego over all teammates
     oracle_ceiling = float(m.max(0).mean())  # mean over teammates of the best ego for THAT teammate
     diversity = 1 - best_generalist / oracle_ceiling if oracle_ceiling != 0 else float("nan")
@@ -215,6 +222,54 @@ def ds_from_matrix(m, *, diagonal_is_selfplay=True):
     }
 
 
+def diversity_significance(m, *, n_perm: int = 2000, seed: int = 0) -> dict:
+    """Is D real structure, or the noise ``oracle_ceiling``'s max-over-columns invites?
+
+    ``oracle_ceiling = m.max(0).mean()`` is a max over ``n_ego`` noisy cells per
+    column -- the most upward-biased statistic available, and it inflates with
+    roster size and per-cell noise *even with zero real teammate-specific
+    structure*. Measured on lbf_20x20's crossplay (§ tuning_record.md): shuffling
+    each ego's row independently (breaking any true ego-teammate pairing while
+    preserving each ego's own marginal skill) gave a HIGHER D than the observed
+    matrix (z = -4.3) -- D was measuring the self-play/cross-play marginal gap
+    every population has by construction, not real diversity.
+
+    The permutation is the null: for each ego (row), independently shuffle which
+    teammate (column) each of its values is attributed to. This preserves every
+    ego's own set of returns (so a generically strong/weak ego stays generically
+    strong/weak) and every teammate's marginal difficulty in aggregate, but
+    destroys any *specific* ego-by-teammate interaction. If D does not exceed this
+    null, the matrix gives no evidence of exploitable per-teammate structure --
+    regardless of what the raw D number reads.
+    """
+    m = np.asarray(m, float)
+    n_ego, n_tm = m.shape
+    observed = ds_from_matrix(m)["diversity"]
+    if n_ego < 2 or n_tm < 2 or not np.isfinite(observed):
+        return {
+            "observed": observed,
+            "null_mean": float("nan"),
+            "null_std": float("nan"),
+            "z_score": float("nan"),
+            "significant": False,
+        }
+    rng = np.random.default_rng(seed)
+    null = np.empty(n_perm)
+    for p in range(n_perm):
+        shuffled = np.stack([rng.permutation(row) for row in m])
+        null[p] = ds_from_matrix(shuffled)["diversity"]
+    null_mean, null_std = float(null.mean()), float(null.std())
+    z = (observed - null_mean) / null_std if null_std > 1e-9 else float("nan")
+    return {
+        "observed": float(observed),
+        "null_mean": null_mean,
+        "null_std": null_std,
+        "z_score": float(z),
+        # one-sided: only "more diverse than a shuffled null" counts as evidence.
+        "significant": bool(np.isfinite(z) and z > 1.645),
+    }
+
+
 def load_crossplay(path):
     """Return ``(matrix, generators, roles)`` from a pooled_crossplay .npz (or bare .csv,
     which has no roster labels so cannot be sub-sliced)."""
@@ -229,9 +284,17 @@ def load_crossplay(path):
     return m, gens, roles
 
 
-def _crossplay_metrics(path):
-    """(D, S) for a whole crossplay file -- the probe's use. See :func:`ds_from_matrix`."""
-    return ds_from_matrix(load_crossplay(path)[0])
+def _crossplay_metrics(path, *, n_perm: int = 2000):
+    """(D, S) for a whole crossplay file, plus D's permutation significance.
+
+    See :func:`ds_from_matrix` and :func:`diversity_significance`. ``n_perm=0``
+    skips the permutation test (it's O(n_perm) crossplay-sized recomputations --
+    cheap per call, but skippable for callers that only want S).
+    """
+    m = load_crossplay(path)[0]
+    out = ds_from_matrix(m)
+    out["diversity_test"] = diversity_significance(m, n_perm=n_perm) if n_perm else None
+    return out
 
 
 def main() -> None:
@@ -246,11 +309,17 @@ def main() -> None:
     )
     ap.add_argument("--max-windows", type=int, default=60000, help="subsample cap for the probes")
     ap.add_argument("--probe-steps", type=int, default=400)
-    ap.add_argument("--dataset", default=None, help="override the config's dataset_path (a .vlt) -- "
-                    "run on any collection without editing a config; context_length/stride still come from the config")
+    ap.add_argument(
+        "--dataset",
+        default=None,
+        help="override the config's dataset_path (a .vlt) -- "
+        "run on any collection without editing a config; context_length/stride still come from the config",
+    )
     args = ap.parse_args()
 
-    job, obs, act, mask, tid, action_dim = _load_windows(args.config, args.max_windows, args.dataset)
+    job, obs, act, mask, tid, action_dim = _load_windows(
+        args.config, args.max_windows, args.dataset
+    )
     env_name = job.env.name
     T = obs.shape[1]
 
@@ -310,10 +379,22 @@ def main() -> None:
     adv = None
     try:
         adv = _crossplay_metrics(xpath)
+        dt = adv["diversity_test"]
+        sig_note = (
+            f"z={dt['z_score']:+.2f} vs shuffled-null {dt['null_mean']:.2f}+/-{dt['null_std']:.2f} "
+            + (
+                "(significant)"
+                if dt["significant"]
+                else "(NOT significant -- D may be noise, see docstring)"
+            )
+            if dt is not None
+            else "(permutation test skipped)"
+        )
         print(
             f"  roster={adv['roster_size']}  Diversity D={adv['diversity']:.2f}  "
             f"(best-generalist {adv['best_generalist']:.3f} / oracle-ceiling {adv['oracle_ceiling']:.3f})"
         )
+        print(f"    significance: {sig_note}")
         print(
             f"  Sparseness S: cross/self={adv['cross_over_self']:.2f}  "
             f"dead-fraction={adv['dead_fraction']:.2f}  (high = mismatches are a minefield)"
@@ -325,7 +406,12 @@ def main() -> None:
     adversarial = adv is not None and (
         adv["dead_fraction"] > _ADV_DEAD_FRAC or adv["cross_over_self"] < _ADV_RATIO
     )
-    low_diversity = adv is not None and adv["diversity"] < _LOW_DIVERSITY
+    diversity_unproven = (
+        adv is not None
+        and adv["diversity_test"] is not None
+        and not adv["diversity_test"]["significant"]
+    )
+    low_diversity = adv is not None and (adv["diversity"] < _LOW_DIVERSITY or diversity_unproven)
     id_valuable = max(v_obs_gain, v_hist_gain) > _V_MATTERS
     hidden_convention = v_obs_gain <= _V_MATTERS < v_hist_gain
     identifiable = r_full > _R_IDENTIFIABLE
@@ -340,8 +426,16 @@ def main() -> None:
         )
     elif low_diversity or not id_valuable:
         reasons = []
-        if low_diversity:
-            reasons.append(f"population diversity is low (D={adv['diversity']:.2f} -- one fixed ego serves all)")
+        if diversity_unproven:
+            reasons.append(
+                f"D={adv['diversity']:.2f} does not clear its shuffled-teammate null "
+                f"(z={adv['diversity_test']['z_score']:+.2f} -- not distinguishable from no "
+                f"real per-teammate structure, treated as low until re-measured with more episodes)"
+            )
+        elif low_diversity:
+            reasons.append(
+                f"population diversity is low (D={adv['diversity']:.2f} -- one fixed ego serves all)"
+            )
         if not id_valuable:
             reasons.append("teammate identity barely changes the ego's action")
         v = (
@@ -386,8 +480,12 @@ def main() -> None:
                 "env": env_name,
                 "teammates": n_teammates,
                 "diversity_D": round(adv["diversity"], 4) if adv else None,
-                "sparseness": {"cross_over_self": round(adv["cross_over_self"], 4),
-                               "dead_fraction": round(adv["dead_fraction"], 4)} if adv else None,
+                "sparseness": {
+                    "cross_over_self": round(adv["cross_over_self"], 4),
+                    "dead_fraction": round(adv["dead_fraction"], 4),
+                }
+                if adv
+                else None,
                 "R_norm": {str(k): round(v, 4) for k, v in r_curve.items()},
                 "V_obs_gain": round(v_obs_gain, 4),
                 "V_hist_gain": round(v_hist_gain, 4),
