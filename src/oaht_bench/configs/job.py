@@ -411,7 +411,16 @@ class EvaluationJob(JobBase):
     job_type: Literal["evaluation"] = "evaluation"
     env: EnvConfig
     checkpoint_paths: list[str] = Field(min_length=1)
-    heldout_population_path: str
+    dataset_path: list[str] = Field(
+        min_length=1,
+        description="Dataset COLLECTION directories (e.g. "
+        "results/dataset_collection/pooled_<env>_expert-<hash>, where teammate_split.json "
+        "lives), not a released populations/<env>/<generator> directory. Each dataset's own "
+        "recorded 'held_out' split -- the roster actually reserved at collection time, not "
+        "just any member outside training -- is unioned into one 'unseen' teammate set. "
+        "Often the checkpoint's own dataset (did held-out generalisation change); a "
+        "different one when the question is generalisation to a separate collection.",
+    )
     num_episodes: int = Field(
         default=1200,
         gt=0,

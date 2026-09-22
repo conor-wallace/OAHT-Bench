@@ -11,18 +11,27 @@ means the same thing as one from ``training_summary.json`` -- including
 ``mate_action_acc``, which needed no extra plumbing here: it comes for free
 from ``evaluate_agent_against`` once the agent is rebuilt.
 
-**Seen vs. unseen.** ``checkpoint_paths`` each carry their own training
-dataset, so "seen" (in-distribution) teammates are that dataset's own
-``train`` split (:func:`~oaht_bench.offline.runner._teammate_policies`).
-``heldout_population_path`` is a *separate* population -- released members
-never part of any checkpoint's collection -- so "unseen" is common across
-every checkpoint evaluated in one job, letting several baselines be compared
-against the identical distribution-shift target. ``seen_unseen_ratios``
-(OMIS's graded protocol, §8) picks how many of each to sample per point on
-the curve: ``"S:U"`` draws (up to) ``S`` seen + ``U`` unseen teammates,
-without replacement, and scores the union with one ``evaluate_agent_against``
-call -- a ratio of *teammate counts* in the evaluation roster, not of
-episodes within a rollout.
+**Seen vs. unseen.** Both come from the *same kind* of record: a dataset
+collection's ``teammate_split.json`` (mirrored into its vault's metadata),
+the authoritative record of which roster members were actually reserved as
+held-out at collection time -- not "any population member not in my
+training set," which says nothing about whether that member was a
+deliberate generalisation target. ``checkpoint_paths`` each carry their own
+training dataset, so "seen" is that dataset's own ``train`` split
+(:func:`~oaht_bench.offline.runner._teammate_policies`). ``dataset_path``
+is a list of *dataset collection directories* (e.g.
+``results/dataset_collection/pooled_lbf_20x20_expert-<hash>``, the directory
+``teammate_split.json`` lives in, not a released ``populations/<env>/<gen>``
+directory) whose ``held_out`` rosters are unioned into one "unseen" set,
+common across every checkpoint evaluated in one job -- often the checkpoint's
+own dataset, for "did held-out generalisation change" as its only question;
+a different dataset's split when the question is generalisation to a
+genuinely separate collection. ``seen_unseen_ratios`` (OMIS's graded
+protocol, §8) picks how many of each to sample per point on the curve:
+``"S:U"`` draws (up to) ``S`` seen + ``U`` unseen teammates, without
+replacement, and scores the union with one ``evaluate_agent_against`` call --
+a ratio of *teammate counts* in the evaluation roster, not of episodes
+within a rollout.
 """
 
 from __future__ import annotations
@@ -91,18 +100,31 @@ def load_trained_agent(run_dir: Path, *, dataset_path: str | None = None):
     return job, dataset, agent, all_params, cond_target
 
 
-def _unseen_roster(heldout_population_path: str, env) -> list:
-    """The ``self``/``conf`` policies of one released population, as a teammate
-    list -- the same restriction :func:`~oaht_bench.offline.runner._teammate_policies`
-    uses (a ``br`` is a designed ego, never a partner)."""
-    from oaht_bench.population.pooled_crossplay import build_roster
+def _unseen_roster(heldout_dataset_paths: list[str], env) -> list:
+    """The ``held_out`` roster each listed dataset's own collection split
+    recorded, unioned (deduped by label) into one "unseen" teammate list.
 
-    roster = build_roster([Path(heldout_population_path)], env)
-    return [
-        (f"{e.generator}:{e.member}:{e.role}", e.params, e.policy_cls)
-        for e in roster
-        if e.role in ("self", "conf")
-    ]
+    Reads only the vault's metadata (:class:`~oaht_bench.dataset.vault.VaultReader`),
+    not the full episode data -- the roster is all this needs, and a pooled
+    dataset's vault can be large. ``_teammate_policies`` reads ``batch.meta``
+    only, so a bare object exposing that attribute stands in for the
+    :class:`~oaht_bench.dataset.schema.EpisodeBatch` it normally takes.
+    """
+    import types
+
+    from oaht_bench.dataset.vault import VaultReader
+    from oaht_bench.offline.runner import _teammate_policies
+
+    seen_labels: set = set()
+    out = []
+    for p in heldout_dataset_paths:
+        reader = VaultReader(f"{p}/dataset.vlt")
+        batch = types.SimpleNamespace(meta=reader.meta)
+        for entry in _teammate_policies(batch, env, which="held_out"):
+            if entry[0] not in seen_labels:
+                seen_labels.add(entry[0])
+                out.append(entry)
+    return out
 
 
 def _score(agent, all_params, env, teammates, *, job, ns, cond_target, rng_base, incontext):
@@ -177,10 +199,10 @@ def run(job) -> Path:
     save_job(job, run_dir / "job.json", minimal=False)
 
     env = LogWrapper(make_env(job.env.env_name, job.env.env_kwargs()))
-    unseen_pool = _unseen_roster(job.heldout_population_path, env)
+    unseen_pool = _unseen_roster(job.dataset_path, env)
     if not unseen_pool:
         raise ValueError(
-            f"heldout_population_path={job.heldout_population_path!r} has no self/conf "
+            f"dataset_path={job.dataset_path!r} has no held_out self/conf "
             f"members -- nothing to seat as an unseen teammate."
         )
 
