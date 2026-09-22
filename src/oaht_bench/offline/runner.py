@@ -32,6 +32,30 @@ log = logging.getLogger(__name__)
 SUPPORTED = ("liam", "meliba", "omis", "tao", "bc")
 
 
+def agent_classes() -> dict:
+    """``network.architecture`` -> the :class:`ReturnConditionedAgent` subclass.
+
+    A function, not a module-level dict, so importing this module does not pull
+    in every agent module's jax-dependent imports -- matching the rest of this
+    file's lazy-import convention. Shared by :func:`_evaluate` and
+    :mod:`~oaht_bench.offline.evaluation` (an already-trained checkpoint,
+    evaluated standalone, needs to rebuild the same agent classes training does).
+    """
+    from oaht_bench.models.bc_agent import BcAgent
+    from oaht_bench.models.liam_agent import LiamAgent
+    from oaht_bench.models.meliba_agent import MelibaAgent
+    from oaht_bench.models.omis_agent import OmisAgent
+    from oaht_bench.models.tao_agent import TaoAgent
+
+    return {
+        "liam": LiamAgent,
+        "tao": TaoAgent,
+        "meliba": MelibaAgent,
+        "omis": OmisAgent,
+        "bc": BcAgent,
+    }
+
+
 def _resolve_dims(cfg, obs_dim: int, action_dim: int):
     """Return a copy of the offline config with dataset dims on the network config.
 
@@ -237,11 +261,6 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
 
     from oaht_bench.envs import make_env
     from oaht_bench.envs.log_wrapper import LogWrapper
-    from oaht_bench.models.bc_agent import BcAgent
-    from oaht_bench.models.liam_agent import LiamAgent
-    from oaht_bench.models.meliba_agent import MelibaAgent
-    from oaht_bench.models.omis_agent import OmisAgent
-    from oaht_bench.models.tao_agent import TaoAgent
     from oaht_bench.offline.evaluate import dataset_target_return, evaluate_agent_against
 
     cfg = job.offline
@@ -263,14 +282,7 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
     # bookkeeping lives in the agent, so all of them evaluate through the shared
     # vmapped run_episodes. The window transform and conditioning target are baked
     # into the agent, so evaluate_agent needs nothing baseline-specific.
-    agent_classes = {
-        "liam": LiamAgent,
-        "tao": TaoAgent,
-        "meliba": MelibaAgent,
-        "omis": OmisAgent,
-        "bc": BcAgent,
-    }
-    agent = agent_classes[resolved.network.architecture](
+    agent = agent_classes()[resolved.network.architecture](
         resolved,
         context_length=cfg.context_length,
         target_return=cond_target,
@@ -303,9 +315,10 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
         from oaht_bench.offline.incontext_eval import evaluate_incontext
 
         seed_pt, seed_curves, seed_means = [], [], []
+        seed_ancillary, seed_ancillary_floor = [], []
         for s in range(ns):
             p = all_params if ns == 1 else jax.tree.map(lambda x: x[s], all_params)  # noqa: B023
-            mean, curve = evaluate_incontext(
+            mean, curve, ancillary, ancillary_floor = evaluate_incontext(
                 agent,
                 p,
                 env,
@@ -319,6 +332,9 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
             seed_pt.append(mean)
             seed_curves.append(curve)
             seed_means.append(float(np.mean(list(mean.values()))))
+            if ancillary is not None:
+                seed_ancillary.append(ancillary)
+                seed_ancillary_floor.append(ancillary_floor)
         labels = list(seed_pt[0])
         per_teammate = {t: float(np.mean([m[t] for m in seed_pt])) for t in labels}
         n_eps = int(job.offline.eval_episodes)
@@ -336,6 +352,19 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
         }
         if ns > 1:
             out["per_seed_mean_return"] = [float(m) for m in seed_means]
+        # TAO's ancillary-decoder probe (docs/tuning_record.md) -- a DIFFERENT
+        # information set from mate_action_acc (LIAM/MeLIBA/OMIS): it predicts
+        # from the teammate's own observations plus the pooled OCW context, which
+        # TAO already assumes access to, so never compare the two numbers directly.
+        if seed_ancillary:
+            anc_labels = list(seed_ancillary[0])
+            out["per_teammate_ancillary_mate_action_acc"] = {
+                t: float(np.mean([a[t] for a in seed_ancillary])) for t in anc_labels
+            }
+            out["ancillary_mate_action_acc"] = float(
+                np.mean(list(out["per_teammate_ancillary_mate_action_acc"].values()))
+            )
+            out["ancillary_mate_action_floor"] = float(np.mean(seed_ancillary_floor))
         return out
 
     def score(teammates, *, rng_base):
@@ -371,6 +400,16 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
         }
         if ns > 1:
             out["per_seed_mean_return"] = [float(m) for m in seed_means]
+        # mate_action_acc is None for baselines with no mate_action_logits (BC);
+        # per_seed's entries agree on that (same agent, every seed), so any one
+        # of them says whether this teammate set has it.
+        if per_seed[0].mate_action_acc is not None:
+            mate_seed_means = [sc.mate_action_acc for sc in per_seed]
+            out["mate_action_acc"] = float(np.mean(mate_seed_means))
+            out["mate_action_floor"] = float(np.mean([sc.mate_action_floor for sc in per_seed]))
+            out["per_teammate_mate_acc"] = {
+                t: float(np.mean([sc.per_teammate_mate_acc[t] for sc in per_seed])) for t in labels
+            }
         return out
 
     # Held-out (test) is the primary metric; its rng_base is unchanged so existing
@@ -388,6 +427,18 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
     # as the OCW fills -- flat for a within-episode method, climbing if TAO adapts.
     for e, v in enumerate(result.get("adaptation_curve", [])):
         logger.log_item(f"Eval/AdaptationReturn_ep{e}", v)
+    # Online mate_action_acc (LIAM/MeLIBA/OMIS only -- BC has no mate model, TAO's
+    # is scored separately in incontext_eval.py against a different information
+    # set). Report against the floor: an accuracy number alone is not evidence of
+    # anything (docs/tuning_record.md).
+    if "mate_action_acc" in result:
+        logger.log_item("Eval/MateActionAcc", result["mate_action_acc"])
+        logger.log_item("Eval/MateActionFloor", result["mate_action_floor"])
+    # TAO's ancillary-decoder probe -- a different information set, never compare
+    # directly to MateActionAcc above (see the note where this is computed).
+    if "ancillary_mate_action_acc" in result:
+        logger.log_item("Eval/AncillaryMateActionAcc", result["ancillary_mate_action_acc"])
+        logger.log_item("Eval/AncillaryMateActionFloor", result["ancillary_mate_action_floor"])
 
     # In-distribution contrast: how well the ego coordinates with the *training*
     # teammates it learned from, so a held-out score is readable as generalisation
@@ -402,6 +453,14 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
         if ns > 1:
             logger.log_item("Eval/TrainMeanReturnStd", train["mean_return_std"])
         logger.log_item("Eval/GeneralizationGap", result["generalization_gap"])
+        if "mate_action_acc" in train:
+            logger.log_item("Eval/Train_MateActionAcc", train["mate_action_acc"])
+            logger.log_item("Eval/Train_MateActionFloor", train["mate_action_floor"])
+        if "ancillary_mate_action_acc" in train:
+            logger.log_item("Eval/Train_AncillaryMateActionAcc", train["ancillary_mate_action_acc"])
+            logger.log_item(
+                "Eval/Train_AncillaryMateActionFloor", train["ancillary_mate_action_floor"]
+            )
 
     logger.commit()
     if "train" in result:

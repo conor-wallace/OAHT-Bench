@@ -152,3 +152,22 @@ class LiamAgent(ReturnConditionedAgent):
             mask=mask,
             train=False,
         )
+
+    def mate_action_logits(self, params, hstate):
+        """Decode the teammate's predicted action from the frozen stage-1 encoder,
+        reading ``hstate`` exactly as :meth:`act` reads a window -- the mechanism
+        probe LIAM's decoder was trained for (``offline/liam.py``'s reconstruction
+        loss). Raw logits: the caller masks illegal actions with the teammate's
+        own ``avail_actions``, which this agent has no way to know.
+        """
+        z = self.encoder.apply(
+            params["stage1"]["encoder"],
+            hstate.ctx_rtg[None],
+            hstate.ctx_obs[None],
+            hstate.ctx_act[None],
+            timesteps=hstate.ctx_t[None],
+            mask=hstate.ctx_mask[None],
+            train=False,
+        )
+        _, mate_logits = self.decoder.apply(params["stage1"]["decoder"], z[:, -1])
+        return mate_logits[0]

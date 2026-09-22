@@ -83,6 +83,27 @@ class ReturnConditionedAgent(AgentPolicy):
     def build_model(self) -> None:
         """Construct the flax modules from ``self.config`` (with resolved dims)."""
 
+    def mate_action_logits(self, params, hstate: ContextWindow):
+        """Predict the teammate's action from the SAME window ``get_action`` just
+        conditioned on, for the mechanism-level ``mate_action_acc`` metric
+        (docs/tuning_record.md). ``None`` (the default) means this baseline has no
+        teammate-action decoder to probe -- BC has no teammate module at all; TAO's
+        decoder needs the teammate's own observation stream too (a different
+        information set), so it is scored separately in
+        :mod:`oaht_bench.offline.incontext_eval`, not through this hook.
+
+        Takes the ``ContextWindow`` :meth:`get_action` *returns* (post-roll, with
+        the ego's just-sampled action written into the last slot) rather than the
+        pre-write window it was computed from -- safe because the encoder's causal
+        mask never lets the hidden state at an ``o_t`` position attend to ``a_t``
+        (documented in ``liam_agent.py``), so the two windows decode identically.
+        This is what lets evaluation call this *after* ``get_action`` with no
+        window-bookkeeping duplicated here -- exactly the duplication that drifted
+        out of sync with production twice while building the diagnostic this hook
+        replaces (see the commit that added it).
+        """
+        return None
+
     @abc.abstractmethod
     def act(self, params, rtg, obs, actions, *, timesteps, mask):
         """Ego action logits for one ``(1, K)`` window, over the subclass's modules."""

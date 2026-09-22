@@ -145,3 +145,21 @@ class OmisAgent(ReturnConditionedAgent):
             mask=mask,
             train=False,
         )
+
+    def mate_action_logits(self, params, hstate):
+        """The imitator head (``μ_φ``) reading the frozen stage-1 representation --
+        the same signal ``omis_representation_loss`` (``offline/omis.py``) trains,
+        which is why OMIS trains an imitator at all even though the search-free
+        actor never reads it. Raw logits; the caller masks illegal actions.
+        """
+        z = self.encoder.apply(
+            params["stage1"]["encoder"],
+            hstate.ctx_rtg[None],
+            hstate.ctx_obs[None],
+            hstate.ctx_act[None],
+            timesteps=hstate.ctx_t[None],
+            mask=hstate.ctx_mask[None],
+            train=False,
+        )
+        mate_logits, _ = self.model.apply(params["stage1"]["model"], z[:, -1])
+        return mate_logits[0]

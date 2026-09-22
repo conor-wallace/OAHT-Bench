@@ -101,14 +101,18 @@ def _context_params(agent, params, ocw: OpponentContextWindow):
 def rollout_one_episode(
     rng, env, ego_agent, params_ep, mate_params, mate_policy, *, max_episode_steps, ego_index=0
 ):
-    """One episode, Python-orchestrated, returning ``(ego_return, teammate_stream)``.
+    """One episode, Python-orchestrated, returning ``(ego_return, teammate_stream, mate_avail)``.
 
     Mirrors :func:`~oaht_bench.common.run_episodes.run_single_episode`'s per-step
     contract (the ``aux_obs`` triple, ``hstate`` threading, turn-based action masking,
     ``LogWrapper``'s per-agent episode return) but runs in a Python loop so it can also
     collect the teammate's ``(o⁻¹, a⁻¹, r⁻¹)`` stream, which the scanned rollout does not
     expose. ``o⁻¹`` is the teammate's observation *after* the step, matching the OPE's
-    ``mate_next_obs`` convention. Un-jitted stepping is fine at eval scale.
+    ``mate_next_obs`` convention. Un-jitted stepping is fine at eval scale. ``mate_avail``
+    is the teammate's per-step ``avail_actions``, ``(L, action_dim)`` -- not part of
+    ``teammate_stream`` (which gets unpacked positionally into
+    :meth:`OpponentContextWindow.append`) because it is only for
+    :func:`evaluate_incontext`'s ancillary-decoder probe, not the OCW.
     """
     import jax
     import jax.numpy as jnp
@@ -116,15 +120,13 @@ def rollout_one_episode(
     rng, reset_rng = jax.random.split(rng)
     obs, env_state = env.reset(reset_rng)
     done = {k: jnp.zeros((1,), dtype=bool) for k in list(env.agents) + ["__all__"]}
-    act_onehot = {
-        k: jnp.zeros(env.action_space(env.agents[i]).n) for i, k in enumerate(env.agents)
-    }
+    act_onehot = {k: jnp.zeros(env.action_space(env.agents[i]).n) for i, k in enumerate(env.agents)}
     reward = {k: jnp.zeros(1) for k in env.agents}
     hstate_0 = ego_agent.init_hstate(1, aux_info={"agent_id": 0})
     hstate_1 = mate_policy.init_hstate(1, aux_info={"agent_id": 1})
 
     ego_return = 0.0
-    mate_no, mate_a, mate_r, mate_ts = [], [], [], []
+    mate_no, mate_a, mate_r, mate_ts, mate_avail = [], [], [], [], []
     for t in range(int(max_episode_steps)):
         if bool(done["__all__"]):
             break
@@ -163,14 +165,13 @@ def rollout_one_episode(
             test_mode=False,
         )
         env_act = {"agent_0": act_0.squeeze(), "agent_1": act_1.squeeze()}
-        act_onehot = {
-            k: jax.nn.one_hot(env_act[k], env.action_space(k).n) for k in env.agents
-        }
+        act_onehot = {k: jax.nn.one_hot(env_act[k], env.action_space(k).n) for k in env.agents}
         obs, env_state, reward, done, info = env.step(sr, env_state, env_act)
         mate_no.append(np.asarray(obs["agent_1"]).reshape(-1))
         mate_a.append(int(np.asarray(env_act["agent_1"])))
         mate_r.append(float(np.asarray(reward["agent_1"]).reshape(-1)[0]))
         mate_ts.append(t)
+        mate_avail.append(np.asarray(avail_1).reshape(-1))
         if bool(done["__all__"]):
             ego_return = float(np.asarray(info["returned_episode_returns"]).reshape(-1)[ego_index])
     teammate_stream = (
@@ -179,7 +180,35 @@ def rollout_one_episode(
         np.asarray(mate_r),
         np.asarray(mate_ts),
     )
-    return ego_return, teammate_stream
+    mate_avail_arr = np.stack(mate_avail) if mate_avail else np.zeros((0, 0))
+    return ego_return, teammate_stream, mate_avail_arr
+
+
+def _ancillary_mate_action_acc(agent, params, context, mate_obs, mate_actions, mate_avail):
+    """TAO's ancillary decoder, scored against this episode's REAL teammate actions.
+
+    A DIFFERENT information set from LIAM/MeLIBA/OMIS's ``mate_action_logits``
+    (docs/tuning_record.md): TAO already assumes access to the opponent's own
+    trajectory (its whole premise), so this checks whether the pooled OCW
+    summary ``z̄⁻¹`` -- built from episodes *before* this one, the same quantity
+    the ego's cross-attention conditions on -- captures enough of the teammate to
+    explain a NEW episode of its behaviour. That is exactly Stage 1's
+    cross-episode ``generative_accuracy`` task (``embedding_loss``,
+    ``offline/tao.py``), just measured online instead of on dataset windows.
+    Returns ``(pred, true)`` int arrays, or ``(None, None)`` for an empty episode.
+    """
+    import jax.numpy as jnp
+
+    from oaht_bench.models.masking import mask_logits
+    from oaht_bench.models.tao_agent import OpponentPolicyEncoder
+
+    if mate_obs.shape[0] == 0:
+        return None, None
+    z_bar = OpponentPolicyEncoder.pool(context)
+    logits = agent.decoder.apply(params["stage1"]["decoder"], jnp.asarray(mate_obs)[None], z_bar)
+    logits = mask_logits(logits, jnp.asarray(mate_avail)[None])
+    pred = np.asarray(jnp.argmax(logits[0], axis=-1))
+    return pred, mate_actions
 
 
 def evaluate_incontext(
@@ -199,20 +228,25 @@ def evaluate_incontext(
 
     For each teammate: reset the OCW, then for each episode re-encode the ego's context
     from the current OCW (swapped into ``stage2["context"]``), roll one episode, and
-    append the teammate's stream. Returns ``(per_teammate_mean, per_teammate_curve)`` --
-    the mean over episodes and the episode-indexed returns (the adaptation curve).
+    append the teammate's stream. Returns ``(per_teammate_mean, per_teammate_curve,
+    per_teammate_ancillary_acc, ancillary_floor)`` -- the last two ``None`` unless
+    ``agent`` has a decoder (TAO; see :func:`_ancillary_mate_action_acc`).
     """
     import jax
 
+    probe = hasattr(agent, "decoder")
     per_mean: dict[str, float] = {}
     per_curve: dict[str, list[float]] = {}
+    per_ancillary: dict[str, float] = {} if probe else None
+    pooled_true = []
     for label, mate_params, mate_policy in teammates:
         ocw = OpponentContextWindow(ocw_size, max_episode_steps, obs_dim)
         curve: list[float] = []
+        ep_pred, ep_true = [], []
         for _ in range(num_episodes):
             rng, ep_rng = jax.random.split(rng)
             params_ep = _context_params(agent, params, ocw)
-            ego_return, mate_stream = rollout_one_episode(
+            ego_return, mate_stream, mate_avail = rollout_one_episode(
                 ep_rng,
                 env,
                 agent,
@@ -223,7 +257,28 @@ def evaluate_incontext(
                 ego_index=ego_index,
             )
             curve.append(float(ego_return))
+            if probe:
+                pred, true = _ancillary_mate_action_acc(
+                    agent,
+                    params_ep,
+                    params_ep["stage2"]["context"],
+                    mate_stream[0],
+                    mate_stream[1],
+                    mate_avail,
+                )
+                if pred is not None:
+                    ep_pred.append(pred)
+                    ep_true.append(true)
             ocw.append(*mate_stream)
+        if probe and ep_pred:
+            p, t = np.concatenate(ep_pred), np.concatenate(ep_true)
+            per_ancillary[label] = float((p == t).mean())
+            pooled_true.append(t)
         per_curve[label] = curve
         per_mean[label] = float(np.mean(curve))
-    return per_mean, per_curve
+
+    ancillary_floor = None
+    if probe and pooled_true:
+        pooled = np.concatenate(pooled_true)
+        ancillary_floor = float(np.bincount(pooled, minlength=agent.action_dim).max() / pooled.size)
+    return per_mean, per_curve, per_ancillary, ancillary_floor

@@ -101,7 +101,11 @@ def _dispatch(job: AnyJob) -> int:
         print(f"\nwrote {run_dir}")
         return 0
     if job.job_type == "evaluation":
-        raise NotImplementedError("evaluation runner not yet implemented (§8).")
+        from oaht_bench.offline.evaluation import run as run_evaluation
+
+        run_dir = run_evaluation(job)
+        print(f"\nwrote {run_dir}")
+        return 0
     raise ValueError(f"Unroutable job_type: {job.job_type!r}")
 
 

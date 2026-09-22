@@ -41,6 +41,17 @@ class EvalScores:
     per_teammate_stderr: dict
     episodes_per_teammate: int
     target_return: float
+    #: teammate label -> online mate_action_acc, or None if the agent has no
+    #: mate_action_logits (BC) -- see docs/tuning_record.md. Decoded from the
+    #: SAME window get_action conditioned the policy on, at every step of the
+    #: SAME rollout the return above comes from, not a separate dataset pass.
+    per_teammate_mate_acc: dict | None = None
+    #: The modal-action floor, POOLED across every teammate's true actions (not
+    #: a per-teammate floor averaged after the fact -- that would silently use
+    #: teammate identity, which a floor is supposed to represent NOT having).
+    #: Report mate_action_acc against this, never alone -- an accuracy number
+    #: by itself is not evidence of anything (docs/tuning_record.md).
+    mate_action_floor: float | None = None
 
     @property
     def mean_return(self) -> float:
@@ -60,15 +71,28 @@ class EvalScores:
         """
         return float(min(self.per_teammate.values()))
 
+    @property
+    def mate_action_acc(self) -> float | None:
+        """Averaged over teammates -- None if this baseline has no mate model."""
+        if not self.per_teammate_mate_acc:
+            return None
+        return float(np.mean(list(self.per_teammate_mate_acc.values())))
+
     def describe(self) -> str:
         rows = "\n".join(
             f"    teammate {str(t):>14}   {v:7.4f} ± {self.per_teammate_stderr[t]:.4f}"
             for t, v in sorted(self.per_teammate.items(), key=lambda kv: str(kv[0]))
         )
+        mate = ""
+        if self.per_teammate_mate_acc:
+            mate = (
+                f"\n    mate_action_acc {self.mate_action_acc:.4f}"
+                f"  (modal floor {self.mate_action_floor:.4f})"
+            )
         return (
             f"target return {self.target_return:.4f}, "
             f"{self.episodes_per_teammate} episodes each\n{rows}\n"
-            f"    mean {self.mean_return:.4f}   worst {self.worst_teammate_return:.4f}"
+            f"    mean {self.mean_return:.4f}   worst {self.worst_teammate_return:.4f}{mate}"
         )
 
 
@@ -127,6 +151,137 @@ def evaluate_agent(
     )
 
 
+def _agent_probes_mate_action(agent, params) -> bool:
+    """Whether ``agent.mate_action_logits`` is implemented for this baseline.
+
+    Checked once against a dummy (zero) window, outside jit, so
+    :func:`evaluate_agent_against` can pick its rollout path at trace time
+    rather than branching every step. ``ReturnConditionedAgent``'s default
+    returns ``None``; every override returns an array.
+    """
+    return agent.mate_action_logits(params, agent.init_hstate(1)) is not None
+
+
+def _rollout_with_mate_probe(
+    rng,
+    env,
+    agent,
+    agent_params,
+    mate_params,
+    mate_policy,
+    *,
+    max_episode_steps,
+    num_eps,
+    ego_index=0,
+    greedy=False,
+):
+    """Like ``run_episodes``, plus the online mate-action probe.
+
+    The ego's action comes from ``agent.get_action`` -- unmodified, the exact
+    function every other rollout in this codebase uses -- so this never drifts
+    from production the way a hand-copied window replica can (it did, twice,
+    while building the diagnostic this replaces; see docs/tuning_record.md).
+    The probe calls ``agent.mate_action_logits`` on the ``ContextWindow``
+    ``get_action`` just returned; see that method's docstring for why decoding
+    from the post-action window is equivalent to decoding from the window
+    ``get_action`` actually conditioned on.
+
+    Mirrors ``run_episodes``'s ``_compiled_rollout`` freeze-on-done guard
+    (``jax.lax.cond(done, freeze, take_step)``) -- omitting it inflates the
+    return by continuing to step (and accrue reward) past episode end, and
+    masks the teammate's illegal actions before scoring the probe (both bugs
+    hit and fixed while building the diagnostic this replaces).
+    """
+    import jax
+    import jax.numpy as jnp
+
+    from oaht_bench.models.masking import mask_logits
+
+    def one(key):
+        k, rk = jax.random.split(key)
+        obs0, state0 = env.reset(rk)
+        h0 = agent.init_hstate(1, aux_info={"agent_id": 0})
+        h1 = mate_policy.init_hstate(1, aux_info={"agent_id": 1})
+        ao0 = jnp.zeros((1, 1, agent.action_dim))
+        ao1 = jnp.zeros((1, 1, agent.action_dim))
+        rw0 = jnp.zeros((1, 1, 1))
+        ego_ret0 = jnp.zeros(())
+        done0 = jnp.asarray(False)
+
+        def take_step(carry):
+            state, obs, h0, h1, ao0, ao1, rw0, k, ego_ret, _done = carry
+            k, k0, k1, ks = jax.random.split(k, 4)
+            av = jax.lax.stop_gradient(env.get_avail_actions(state))
+            joint = jnp.concatenate((ao0, ao1), axis=-1)
+
+            a0, h0n = agent.get_action(
+                params=agent_params,
+                obs=obs["agent_0"].reshape(1, 1, -1),
+                done=jnp.zeros((1, 1), bool),
+                avail_actions=av["agent_0"].astype(jnp.float32),
+                hstate=h0,
+                rng=k0,
+                aux_obs=(ao0, joint, rw0),
+                env_state=state,
+                test_mode=greedy,
+                reward=rw0,
+            )
+            avail1 = jnp.reshape(av["agent_1"], (-1)).astype(jnp.float32)
+            pred_mate = jnp.argmax(
+                mask_logits(agent.mate_action_logits(agent_params, h0n), avail1)
+            ).astype(jnp.int32)
+
+            a1, h1n = mate_policy.get_action(
+                params=mate_params,
+                obs=obs["agent_1"].reshape(1, 1, -1),
+                done=jnp.zeros((1, 1), bool),
+                avail_actions=av["agent_1"].astype(jnp.float32),
+                hstate=h1,
+                rng=k1,
+                aux_obs=None,
+                env_state=state,
+                test_mode=False,
+            )
+            a0s, a1s = a0.squeeze(), a1.squeeze()
+            act = {"agent_0": a0s, "agent_1": a1s}
+            obs2, state2, r2, done2, info2 = env.step(ks, state, act)
+            n0 = jax.nn.one_hot(a0s, agent.action_dim).reshape(1, 1, -1)
+            n1 = jax.nn.one_hot(a1s, agent.action_dim).reshape(1, 1, -1)
+            new_ego_ret = jax.lax.select(
+                done2["__all__"],
+                jnp.asarray(info2["returned_episode_returns"]).reshape(-1)[ego_index],
+                ego_ret,
+            )
+            new_carry = (
+                state2,
+                obs2,
+                h0n,
+                h1n,
+                n0,
+                n1,
+                r2["agent_0"].reshape(1, 1, 1),
+                k,
+                new_ego_ret,
+                done2["__all__"],
+            )
+            return new_carry, (pred_mate, a1s)
+
+        def step(carry, _):
+            *_, done = carry
+            new_carry, (pred, true) = jax.lax.cond(
+                done, lambda c: (c, (jnp.int32(0), jnp.int32(0))), take_step, carry
+            )
+            return new_carry, (pred, true, ~done)
+
+        init_carry = (state0, obs0, h0, h1, ao0, ao1, rw0, k, ego_ret0, done0)
+        final_carry, (pred, true, valid) = jax.lax.scan(
+            step, init_carry, None, length=max_episode_steps
+        )
+        return final_carry[-2], pred, true, valid
+
+    return jax.vmap(one)(jax.random.split(rng, num_eps))
+
+
 def evaluate_agent_against(
     agent,
     params,
@@ -154,34 +309,68 @@ def evaluate_agent_against(
     and is a diagnostic for whether a high-accuracy policy is being sunk by
     sampling noise rather than a train/deploy mismatch. Defaults False (sampled),
     so the benchmark metric is unchanged.
+
+    When ``agent.mate_action_logits`` is implemented (LIAM/MeLIBA/OMIS; not BC,
+    not TAO -- see that method's docstring), the same rollout also scores
+    ``mate_action_acc`` at no extra environment cost. Otherwise this is the
+    unmodified, shared-cache ``run_episodes`` path.
     """
     import jax
 
     from oaht_bench.common.run_episodes import run_episodes
 
+    probe = _agent_probes_mate_action(agent, params)
     per_teammate, stderr = {}, {}
+    mate_acc = {} if probe else None
+    pooled_true = []
     for label, mate_params, policy_cls in teammates:
         rng, ep_rng = jax.random.split(rng)
-        out = run_episodes(
-            ep_rng,
-            env,
-            agent_0_param=params,
-            agent_0_policy=agent,
-            agent_1_param=mate_params,
-            agent_1_policy=policy_cls,
-            max_episode_steps=max_episode_steps,
-            num_eps=num_episodes,
-            agent_0_test_mode=greedy,
-        )
-        returns = np.asarray(out["returned_episode_returns"])[:, ego_index]
+        if probe:
+            returns, pred, true, valid = _rollout_with_mate_probe(
+                ep_rng,
+                env,
+                agent,
+                params,
+                mate_params,
+                policy_cls,
+                max_episode_steps=max_episode_steps,
+                num_eps=num_episodes,
+                ego_index=ego_index,
+                greedy=greedy,
+            )
+            returns = np.asarray(returns)
+            v = np.asarray(valid).astype(bool)
+            pred, true = np.asarray(pred), np.asarray(true)
+            mate_acc[label] = float((pred == true)[v].mean())
+            pooled_true.append(true[v])
+        else:
+            out = run_episodes(
+                ep_rng,
+                env,
+                agent_0_param=params,
+                agent_0_policy=agent,
+                agent_1_param=mate_params,
+                agent_1_policy=policy_cls,
+                max_episode_steps=max_episode_steps,
+                num_eps=num_episodes,
+                agent_0_test_mode=greedy,
+            )
+            returns = np.asarray(out["returned_episode_returns"])[:, ego_index]
         per_teammate[label] = float(returns.mean())
         stderr[label] = (
             float(returns.std(ddof=1) / np.sqrt(len(returns))) if len(returns) > 1 else 0.0
         )
+
+    mate_floor = None
+    if probe and pooled_true:
+        pooled = np.concatenate(pooled_true)
+        mate_floor = float(np.bincount(pooled, minlength=agent.action_dim).max() / pooled.size)
 
     return EvalScores(
         per_teammate=per_teammate,
         per_teammate_stderr=stderr,
         episodes_per_teammate=num_episodes,
         target_return=float(target_return),
+        per_teammate_mate_acc=mate_acc,
+        mate_action_floor=mate_floor,
     )

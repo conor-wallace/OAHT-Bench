@@ -150,3 +150,26 @@ class MelibaAgent(ReturnConditionedAgent):
             mask=mask,
             train=False,
         )
+
+    def mate_action_logits(self, params, hstate):
+        """Decode the teammate's predicted action from the belief *means* --
+        stage-1 training decodes from a reparameterised sample of each latent
+        (``offline/meliba.py``), but a point estimate is the right thing for an
+        accuracy metric: it removes an rng dependency the metric shouldn't have,
+        and the means are the belief's best single guess. Raw logits; the caller
+        masks illegal actions.
+        """
+        char_mean, _, mental_mean, _ = self.encoder.apply(
+            params["stage1"]["encoder"],
+            hstate.ctx_rtg[None],
+            hstate.ctx_obs[None],
+            hstate.ctx_act[None],
+            timesteps=hstate.ctx_t[None],
+            mask=hstate.ctx_mask[None],
+            train=False,
+        )
+        mate_logits = self.decoder.apply(
+            params["stage1"]["decoder"],
+            jnp.concatenate([char_mean[:, -1], mental_mean[:, -1]], axis=-1),
+        )
+        return mate_logits[0]
