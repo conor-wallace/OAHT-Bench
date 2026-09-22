@@ -411,25 +411,21 @@ class EvaluationJob(JobBase):
     job_type: Literal["evaluation"] = "evaluation"
     env: EnvConfig
     checkpoint_paths: list[str] = Field(min_length=1)
-    dataset_path: list[str] = Field(
-        min_length=1,
-        description="Dataset COLLECTION directories (e.g. "
+    dataset_path: str = Field(
+        description="A dataset COLLECTION directory (e.g. "
         "results/dataset_collection/pooled_<env>_expert-<hash>, where teammate_split.json "
-        "lives), not a released populations/<env>/<generator> directory. Each dataset's own "
-        "recorded 'held_out' split -- the roster actually reserved at collection time, not "
-        "just any member outside training -- is unioned into one 'unseen' teammate set. "
-        "Often the checkpoint's own dataset (did held-out generalisation change); a "
-        "different one when the question is generalisation to a separate collection.",
+        "lives), not a released populations/<env>/<generator> directory. Its own recorded "
+        "'held_out' split -- the roster actually reserved at collection time, not just any "
+        "member outside training -- is the 'unseen' teammate set. Usually the checkpoint's "
+        "own dataset (did held-out generalisation change); a different one when the question "
+        "is generalisation to a separate collection -- run a separate EvaluationJob per "
+        "dataset rather than merging two held-out sets into one number.",
     )
     num_episodes: int = Field(
         default=1200,
         gt=0,
         description="Per teammate. The literature runs 50-2500; low budgets "
         "produce confidence intervals that overlap the baselines being beaten.",
-    )
-    seen_unseen_ratios: list[str] = Field(
-        default_factory=lambda: ["10:0", "10:5", "10:10", "5:10", "0:10"],
-        description="Graded distribution shift (§8), following OMIS.",
     )
 
 

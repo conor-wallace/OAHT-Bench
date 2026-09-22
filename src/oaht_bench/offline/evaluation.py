@@ -18,20 +18,24 @@ held-out at collection time -- not "any population member not in my
 training set," which says nothing about whether that member was a
 deliberate generalisation target. ``checkpoint_paths`` each carry their own
 training dataset, so "seen" is that dataset's own ``train`` split
-(:func:`~oaht_bench.offline.runner._teammate_policies`). ``dataset_path``
-is a list of *dataset collection directories* (e.g.
+(:func:`~oaht_bench.offline.runner._teammate_policies`). ``dataset_path`` is
+one *dataset collection directory* (e.g.
 ``results/dataset_collection/pooled_lbf_20x20_expert-<hash>``, the directory
 ``teammate_split.json`` lives in, not a released ``populations/<env>/<gen>``
-directory) whose ``held_out`` rosters are unioned into one "unseen" set,
-common across every checkpoint evaluated in one job -- often the checkpoint's
-own dataset, for "did held-out generalisation change" as its only question;
-a different dataset's split when the question is generalisation to a
-genuinely separate collection. ``seen_unseen_ratios`` (OMIS's graded
-protocol, §8) picks how many of each to sample per point on the curve:
-``"S:U"`` draws (up to) ``S`` seen + ``U`` unseen teammates, without
-replacement, and scores the union with one ``evaluate_agent_against`` call --
-a ratio of *teammate counts* in the evaluation roster, not of episodes
-within a rollout.
+directory) whose recorded ``held_out`` roster is the "unseen" set, common
+across every checkpoint evaluated in one job -- usually the checkpoint's own
+dataset, for "did held-out generalisation change" as its only question. A
+different dataset's split, for generalisation to a genuinely separate
+collection, is a separate ``EvaluationJob`` rather than a second entry here:
+merging two collections' held-out sets into one number would hide which
+teammate came from which.
+
+Every available seen and unseen teammate is scored, in one shot -- the same
+"held-out primary, train contrast" shape as training's own final evaluation
+(``offline.runner._evaluate``), not OMIS's graded seen:unseen ratio curve
+(§8): that needs its own sampling design (a ratio of teammate *counts* is a
+different question from a ratio of *episodes*, and either reading is a
+larger, separate feature) and was cut rather than half-built.
 """
 
 from __future__ import annotations
@@ -46,22 +50,9 @@ import numpy as np
 log = logging.getLogger(__name__)
 
 
-def _parse_ratio(spec: str) -> tuple[int, int]:
-    seen_s, unseen_s = spec.split(":")
-    return int(seen_s), int(unseen_s)
-
-
-def _select_teammates(rng, pool: list, n: int) -> list:
-    """Up to ``n`` teammates from ``pool``, without replacement -- fewer than
-    ``n`` available is not an error (a small held-out set is still worth
-    scoring), just fewer teammates than the ratio nominally asks for."""
-    if n <= 0 or not pool:
-        return []
-    idx = rng.choice(len(pool), size=min(n, len(pool)), replace=False)
-    return [pool[i] for i in idx]
-
-
-def load_trained_agent(run_dir: Path, *, dataset_path: str | None = None):
+def load_trained_agent(
+    run_dir: Path, *, dataset_path: str | None = None, dataset_cache: dict | None = None
+):
     """Rebuild ``(job, dataset, agent, all_params)`` from a finished training run.
 
     ``all_params`` keeps its full seed axis (num_seeds > 1) -- callers slice per
@@ -69,6 +60,12 @@ def load_trained_agent(run_dir: Path, *, dataset_path: str | None = None):
     evaluation here is seed-averaged the same way training's own final eval is.
     ``dataset_path`` overrides the config's recorded path, for a checkpoint moved
     between machines whose ``job.json`` no longer resolves where it was trained.
+
+    ``dataset_cache``, keyed by ``(path, context_length, stride, normalize)`` --
+    everything that actually determines the windowed result -- lets several
+    checkpoints trained on the same dataset (the common case: one dataset, one
+    baseline per architecture) share ONE load instead of re-reading and
+    re-windowing the same vault once per checkpoint.
     """
     from oaht_bench.configs import load_job
     from oaht_bench.dataset.dataset import Dataset
@@ -77,12 +74,18 @@ def load_trained_agent(run_dir: Path, *, dataset_path: str | None = None):
 
     job = load_job(run_dir / "job.json")
     cfg = job.offline
-    dataset = Dataset(
+    key = (
         dataset_path or job.dataset_path,
-        context_length=cfg.context_length,
-        stride=cfg.stride,
-        normalize=cfg.normalize_observations,
+        cfg.context_length,
+        cfg.stride,
+        cfg.normalize_observations,
     )
+    if dataset_cache is not None and key in dataset_cache:
+        dataset = dataset_cache[key]
+    else:
+        dataset = Dataset(key[0], context_length=key[1], stride=key[2], normalize=key[3])
+        if dataset_cache is not None:
+            dataset_cache[key] = dataset
     with (run_dir / "params.pkl").open("rb") as fh:
         raw = pickle.load(fh)
     all_params = {"stage1": raw["stage1"], "stage2": raw["stage2"]}
@@ -100,9 +103,9 @@ def load_trained_agent(run_dir: Path, *, dataset_path: str | None = None):
     return job, dataset, agent, all_params, cond_target
 
 
-def _unseen_roster(heldout_dataset_paths: list[str], env) -> list:
-    """The ``held_out`` roster each listed dataset's own collection split
-    recorded, unioned (deduped by label) into one "unseen" teammate list.
+def _unseen_roster(dataset_path: str, env) -> list:
+    """The "unseen" teammate list: the ``held_out`` roster ``dataset_path``'s
+    own collection split recorded.
 
     Reads only the vault's metadata (:class:`~oaht_bench.dataset.vault.VaultReader`),
     not the full episode data -- the roster is all this needs, and a pooled
@@ -115,16 +118,9 @@ def _unseen_roster(heldout_dataset_paths: list[str], env) -> list:
     from oaht_bench.dataset.vault import VaultReader
     from oaht_bench.offline.runner import _teammate_policies
 
-    seen_labels: set = set()
-    out = []
-    for p in heldout_dataset_paths:
-        reader = VaultReader(f"{p}/dataset.vlt")
-        batch = types.SimpleNamespace(meta=reader.meta)
-        for entry in _teammate_policies(batch, env, which="held_out"):
-            if entry[0] not in seen_labels:
-                seen_labels.add(entry[0])
-                out.append(entry)
-    return out
+    reader = VaultReader(f"{dataset_path}/dataset.vlt")
+    batch = types.SimpleNamespace(meta=reader.meta)
+    return _teammate_policies(batch, env, which="held_out")
 
 
 def _score(agent, all_params, env, teammates, *, job, ns, cond_target, rng_base, incontext):
@@ -187,8 +183,8 @@ def _score(agent, all_params, env, teammates, *, job, ns, cond_target, rng_base,
 
 
 def run(job) -> Path:
-    """Evaluate every ``checkpoint_paths`` entry against graded seen:unseen
-    teammate mixes and write one JSON report."""
+    """Evaluate every ``checkpoint_paths`` entry against its unseen (and, if
+    available, seen) teammate set and write one JSON report."""
     from oaht_bench.configs import save_job
     from oaht_bench.envs import make_env
     from oaht_bench.envs.log_wrapper import LogWrapper
@@ -206,48 +202,44 @@ def run(job) -> Path:
             f"members -- nothing to seat as an unseen teammate."
         )
 
-    rng = np.random.default_rng(job.seed)
+    dataset_cache: dict = {}
     report: dict = {"checkpoints": {}}
     for ckpt in job.checkpoint_paths:
         run_path = Path(ckpt)
         log.info("evaluating %s", run_path)
-        ckpt_job, dataset, agent, all_params, cond_target = load_trained_agent(run_path)
+        ckpt_job, dataset, agent, all_params, cond_target = load_trained_agent(
+            run_path, dataset_cache=dataset_cache
+        )
         seen_pool = _teammate_policies(dataset.batch, env, which="train")
         ns = int(ckpt_job.num_seeds)
         incontext = ckpt_job.offline.network.architecture == "tao"
+        score_kwargs = dict(
+            agent=agent,
+            all_params=all_params,
+            env=env,
+            job=job,
+            ns=ns,
+            cond_target=cond_target,
+            rng_base=job.seed,
+            incontext=incontext,
+        )
 
-        per_ratio = {}
-        for spec in job.seen_unseen_ratios:
-            n_seen, n_unseen = _parse_ratio(spec)
-            teammates = _select_teammates(rng, seen_pool, n_seen) + _select_teammates(
-                rng, unseen_pool, n_unseen
-            )
-            if not teammates:
-                log.warning(
-                    "ratio %s: no teammates available (seen=%d, unseen=%d) -- skipped",
-                    spec,
-                    len(seen_pool),
-                    len(unseen_pool),
-                )
-                continue
-            per_ratio[spec] = _score(
-                agent,
-                all_params,
-                env,
-                teammates,
-                job=job,
-                ns=ns,
-                cond_target=cond_target,
-                rng_base=job.seed,
-                incontext=incontext,
-            )
-        report["checkpoints"][str(run_path)] = {
+        # Unseen (primary) then seen (contrast), the same order and shape
+        # _evaluate reports: a held-out score is only readable as
+        # generalisation, not raw competence, next to the in-distribution one.
+        entry = {
             "baseline": ckpt_job.baseline,
             "num_seeds": ns,
             "seen_pool_size": len(seen_pool),
             "unseen_pool_size": len(unseen_pool),
-            "per_ratio": per_ratio,
+            "unseen": _score(teammates=unseen_pool, **score_kwargs),
         }
+        if seen_pool:
+            entry["seen"] = _score(teammates=seen_pool, **score_kwargs)
+            entry["generalization_gap"] = float(
+                entry["seen"]["mean_return"] - entry["unseen"]["mean_return"]
+            )
+        report["checkpoints"][str(run_path)] = entry
 
     out_path = run_dir / "evaluation_report.json"
     out_path.write_text(json.dumps(report, indent=2) + "\n")
