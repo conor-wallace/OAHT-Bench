@@ -237,9 +237,12 @@ class PooledCrossplayJob(JobBase):
     job_type: Literal["pooled_crossplay"] = "pooled_crossplay"
     env: EnvConfig
     population_path: list[str] = Field(
-        min_length=2,
+        min_length=1,
         description="Released teammate-generation run directories flattened into one "
-        "roster in list order. Must match the list a pooled dataset_collection uses.",
+        "roster in list order. Must match the list a pooled dataset_collection uses. "
+        "A single-element list is valid -- it isolates one generator's population "
+        "behind pooled mode's machinery (the ε sampler, `br_population_path`'s "
+        "trained-BR-ego seating) without pooling in any other generator's members.",
     )
     num_episodes: int = Field(
         default=20,
