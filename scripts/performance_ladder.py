@@ -54,6 +54,7 @@ import numpy as np
 from oaht_bench.common.run_episodes import run_episodes
 from oaht_bench.configs import load_job
 from oaht_bench.envs import make_env
+from oaht_bench.envs.log_wrapper import LogWrapper
 from oaht_bench.population.loading import load_br_egos
 from oaht_bench.population.pooled_crossplay import build_roster
 
@@ -71,7 +72,7 @@ def build_br_matrix(populations: list[Path], br_run: Path, *, episodes: int, see
     env without the wrapper reports a different, incompatible quantity).
     """
     job = load_job(populations[0] / "job.json")
-    env = make_env(job.env.env_name, job.env.env_kwargs())
+    env = LogWrapper(make_env(job.env.env_name, job.env.env_kwargs()))
     roster = build_roster(populations, env)
     br = load_br_egos(br_run, env)
 
