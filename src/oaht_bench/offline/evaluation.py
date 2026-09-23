@@ -142,10 +142,10 @@ def _score(
     if incontext:
         from oaht_bench.offline.incontext_eval import evaluate_incontext
 
-        seed_pt, seed_means = [], []
+        seed_pt, seed_means, seed_anc, seed_anc_floor = [], [], [], []
         for s in range(ns):
             p = all_params if ns == 1 else jax.tree.map(lambda x: x[s], all_params)  # noqa: B023
-            mean, _curve, _anc, _floor = evaluate_incontext(
+            mean, _curve, ancillary, ancillary_floor = evaluate_incontext(
                 agent,
                 p,
                 env,
@@ -158,9 +158,26 @@ def _score(
             )
             seed_pt.append(mean)
             seed_means.append(float(np.mean(list(mean.values()))))
+            if ancillary is not None:
+                seed_anc.append(ancillary)
+                seed_anc_floor.append(ancillary_floor)
         labels = list(seed_pt[0])
         per_teammate = {t: float(np.mean([m[t] for m in seed_pt])) for t in labels}
-        return {"mean_return": float(np.mean(seed_means)), "per_teammate": per_teammate}
+        out = {"mean_return": float(np.mean(seed_means)), "per_teammate": per_teammate}
+        # TAO's ancillary-decoder probe (docs/tuning_record.md) -- a DIFFERENT
+        # information set from mate_action_acc (predicts from the teammate's own
+        # observations + the pooled OCW context, which TAO already assumes
+        # access to), never compare the two numbers directly.
+        if seed_anc:
+            anc_labels = list(seed_anc[0])
+            out["per_teammate_ancillary_mate_action_acc"] = {
+                t: float(np.mean([a[t] for a in seed_anc])) for t in anc_labels
+            }
+            out["ancillary_mate_action_acc"] = float(
+                np.mean(list(out["per_teammate_ancillary_mate_action_acc"].values()))
+            )
+            out["ancillary_mate_action_floor"] = float(np.mean(seed_anc_floor))
+        return out
 
     from oaht_bench.offline.evaluate import evaluate_agent_against
 
