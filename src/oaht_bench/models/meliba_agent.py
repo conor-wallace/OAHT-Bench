@@ -19,7 +19,7 @@ from __future__ import annotations
 import flax.linen as nn
 import jax.numpy as jnp
 
-from oaht_bench.models.backbone import DecisionTransformer
+from oaht_bench.models.backbone import GPT2Model
 from oaht_bench.models.return_conditioned_agent import ReturnConditionedAgent
 
 
@@ -40,7 +40,7 @@ class MelibaEncoder(nn.Module):
 
     @nn.compact
     def __call__(self, rtg, obs, actions, *, timesteps, mask=None, train: bool = False):
-        _, obs_hidden = DecisionTransformer(
+        obs_hidden = GPT2Model(
             action_dim=self.action_dim,
             hidden_dim=self.hidden_dim,
             use_cross_attention=False,
@@ -89,7 +89,7 @@ class MelibaNetwork(nn.Module):
 
     @nn.compact
     def __call__(self, rtg, obs, actions, *, timesteps, belief, mask=None, train: bool = False):
-        logits, _ = DecisionTransformer(
+        hidden = GPT2Model(
             action_dim=self.action_dim,
             hidden_dim=self.hidden_dim,
             use_cross_attention=False,
@@ -102,7 +102,7 @@ class MelibaNetwork(nn.Module):
             mask=mask,
             train=train,
         )
-        return logits
+        return nn.Dense(self.action_dim)(hidden)
 
 
 class MelibaAgent(ReturnConditionedAgent):

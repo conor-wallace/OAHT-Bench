@@ -82,19 +82,18 @@ class Block(nn.Module):
         return nn.LayerNorm()(x + nn.Dropout(self.dropout, deterministic=not train)(ff))
 
 
-class DecisionTransformer(nn.Module):
-    """Return-conditioned causal transformer over ``(G_t, o_t, a_t)`` triples.
+class GPT2Model(nn.Module):
+    """Shared GPT-2 backbone over ``(G_t, o_t, a_t)`` triples (§3.1).
 
-    TAO calls this the "In-context Control Decoder", but *decoder* is already
-    taken in this package: LIAM and TAO both have an encoder that summarises
-    teammate behaviour and a decoder that reconstructs teammate trajectories.
-    This is neither -- it is the policy, and it is a Decision Transformer, which
-    is also the language §3.1 uses.
-
-    Returns both the action logits and the hidden states at the ``o_t``
-    positions, because LIAM's auxiliary decoder reconstructs the teammate from
-    exactly those embeddings — Appendix F is specific that they already contain
-    ``o_t`` and ``a_{t-1}``.
+    TAO calls this the "In-context Control Decoder"; OMIS's own reference code
+    names the equivalent trunk ``GPTModel``. It carries no action head of its
+    own -- every baseline reads the hidden states at the ``o_t`` positions off
+    this backbone and attaches whatever heads its role needs: an encoder role
+    (LIAM, MeLIBA, OMIS) uses them as-is to summarise teammate behaviour or
+    context; a decoder/actor role attaches its own ``nn.Dense(action_dim)`` (and,
+    for OMIS, imitator/critic heads) on top. Appendix F is specific that these
+    hidden states already contain ``o_t`` and ``a_{t-1}``, which is what makes
+    them enough for LIAM's auxiliary decoder to reconstruct the teammate from.
     """
 
     action_dim: int
@@ -167,7 +166,6 @@ class DecisionTransformer(nn.Module):
                 x, context=context, causal_mask=attn_mask, cross_mask=cross_mask, train=train
             )
 
-        # Actions are read off the o_t positions: index 1 of each triple.
+        # Hidden states are read off the o_t positions: index 1 of each triple.
         obs_hidden = x.reshape(B, T, 3, self.hidden_dim)[:, :, 1]
-        logits = nn.Dense(self.action_dim)(obs_hidden)
-        return logits, obs_hidden
+        return obs_hidden

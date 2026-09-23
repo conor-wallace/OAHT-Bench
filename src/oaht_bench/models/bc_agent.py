@@ -12,7 +12,7 @@ from __future__ import annotations
 import flax.linen as nn
 import jax.numpy as jnp
 
-from oaht_bench.models.backbone import DecisionTransformer
+from oaht_bench.models.backbone import GPT2Model
 from oaht_bench.models.return_conditioned_agent import ReturnConditionedAgent
 
 
@@ -34,14 +34,14 @@ class BcNetwork(nn.Module):
     def __call__(
         self, rtg, obs, actions, *, timesteps, mask=None, teammate_id=None, train: bool = False
     ):
-        logits, _ = DecisionTransformer(
+        hidden = GPT2Model(
             action_dim=self.action_dim,
             hidden_dim=self.hidden_dim,
             use_cross_attention=False,
             dropout=self.dropout,
             num_teammates=self.num_teammates,
         )(rtg, obs, actions, timesteps=timesteps, mask=mask, teammate_id=teammate_id, train=train)
-        return logits
+        return nn.Dense(self.action_dim)(hidden)
 
 
 class BcAgent(ReturnConditionedAgent):

@@ -19,7 +19,7 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 
-from oaht_bench.models.backbone import DecisionTransformer
+from oaht_bench.models.backbone import GPT2Model
 from oaht_bench.models.return_conditioned_agent import ReturnConditionedAgent
 
 
@@ -143,7 +143,7 @@ class TaoNetwork(nn.Module):
         context_mask=None,
         train: bool = False,
     ):
-        logits, _ = DecisionTransformer(
+        hidden = GPT2Model(
             action_dim=self.action_dim,
             hidden_dim=self.hidden_dim,
             use_cross_attention=True,  # Appendix F: z^-1 enters as key/value.
@@ -158,7 +158,7 @@ class TaoNetwork(nn.Module):
             context_mask=context_mask,
             train=train,
         )
-        return logits
+        return nn.Dense(self.action_dim)(hidden)
 
 
 class TaoAgent(ReturnConditionedAgent):

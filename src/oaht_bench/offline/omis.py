@@ -9,6 +9,12 @@ Sources, in the priority this port was written against:
      heads** — an **actor** cloning the best-response self-action, an **opponent
      imitator** cloning the teammate action, and a **critic** regressing the
      best-response return-to-go;
+   - ``pretraining/nn_trainer.py``'s ``train_step`` trains all three **jointly**:
+     one combined loss, ``act_loss + vf_coef * value_loss + oppo_pi_coef *
+     oppo_pi_loss``, one backward pass through the shared backbone. There is no
+     frozen boundary anywhere in the reference, and the paper never claims one
+     (§4.1 describes one input sequence through one shared backbone producing
+     all three outputs);
    - ``testing/search.py`` runs decision-time search over a ``fake_env`` using all
      three heads. That search is deliberately **not** implemented here (see
      :func:`omis_search`); only the actor is deployed, which is the paper's
@@ -16,24 +22,27 @@ Sources, in the priority this port was written against:
 2. **The paper** (Jing et al., NeurIPS 2024; ``omis.pdf``): actor ``π_θ``, imitator
    ``μ_φ``, critic ``V_ω`` over shared in-context data ``D`` (Eqs. 3–5); search is
    the ``|A|×M×L`` rollout of Eqs. 6–10.
-3. **The shared offline protocol** (:mod:`oaht_bench.offline.liam`,
-   :mod:`oaht_bench.offline.tao`): the DT backbone is the encoder read at ``o_t``,
-   training is two-stage (representation, then a frozen-encoder policy), and losses
-   are masked over valid timesteps.
 
-**What the offline adaptation changes, and why it is honest.** OMIS shares one
-backbone across the three heads; this pipeline separates a *representation*
-backbone from a *policy* backbone (LIAM does the same). So here the imitator and
-critic ride the **stage-1 encoder** — they *are* the teammate representation, the
-analogue of LIAM's reconstruction decoder — and the **actor** is the stage-2
-policy conditioned on that frozen representation, exactly like
-:class:`liam.LiamTrainer`. The actor therefore conditions on the ego history only,
-not on live teammate actions: OMIS's perfect-information opponent-action input is
-dropped so the baseline is evaluated on the **same information set** as LIAM and
-MeLIBA (the shared rollout in :mod:`oaht_bench.offline.evaluate` is ego-stream
-only, and fairness requires OMIS not see what the others cannot). The
-opponent-conditioning survives through the representation, which is trained to
-imitate the teammate and value the best response.
+**What the offline adaptation changes, and why it is honest.** The actor
+therefore conditions on the ego history only, not on live teammate actions:
+OMIS's perfect-information opponent-action input is dropped so the baseline is
+evaluated on the **same information set** as LIAM and MeLIBA (the shared
+rollout in :mod:`oaht_bench.offline.evaluate` is ego-stream only, and fairness
+requires OMIS not see what the others cannot). The opponent-conditioning
+survives through the shared representation, which is trained -- jointly with
+the actor, matching the reference -- to imitate the teammate and value the
+best response.
+
+**Two calls, one joint optimization.** :class:`BaseAhtTrainer`'s
+``train_stage_1() -> train_stage_2(stage1_params)`` contract is shared with
+LIAM/MeLIBA/TAO, whose stage 2 trains a policy against a *frozen* stage-1
+representation. OMIS has no such freeze: both calls optimise the *same*
+``{backbone, heads}`` parameter tree against the *same* joint loss, stage 2
+simply continuing from stage 1's checkpoint at a different learning
+rate/step budget (``stage1_learning_rate``/``steps`` vs.
+``stage2_learning_rate``/``steps``) -- a two-phase schedule within one
+training run, not two stages with different objectives. :meth:`OmisAgent.act`
+reads the final, most-trained parameters from ``stage2``.
 
 **Search is left open.** Both search components are trained and saved — the
 imitator (opponent rollouts) and the critic (leaf values). Adding search later is
@@ -60,19 +69,22 @@ def _masked_accuracy(logits, labels, mask) -> jnp.ndarray:
     return (correct * m).sum() / jnp.maximum(m.sum(), 1.0)
 
 
-def omis_representation_loss(
-    params, encoder, model, batch, *, value_coef=1.0, rngs=None, train: bool = True
+def omis_joint_loss(
+    params, backbone, heads, batch, *, vf_coef=0.5, oppo_pi_coef=0.8, rngs=None, train: bool = True
 ):
-    """Stage 1: train the two search components on the shared representation.
+    """One backbone pass, three heads, one combined loss -- mirrors the
+    reference's ``nn_trainer.py``: ``act_loss + vf_coef * value_loss +
+    oppo_pi_coef * oppo_pi_loss``. All three heads read the *same* embedding
+    and are differentiated together; nothing here is ``stop_gradient``-ed.
 
-    ``imitator_ce + value_coef · critic_mse``. The imitator is the categorical
-    negative log-likelihood of the teammate action (``μ_φ``); the critic is the
-    mean-squared error to the ego return-to-go (``V_ω`` regressed to ``G^1``, which
-    is the best response's RTG on best-response data). Both are masked to valid
+    ``act_loss``/``oppo_pi_loss`` are the categorical negative log-likelihood
+    of the ego action and the teammate action respectively; ``value_loss`` is
+    the mean-squared error of the critic to the ego return-to-go (the best
+    response's RTG on best-response data). All three are masked to valid
     timesteps and reported with an accuracy so a falling loss is interpretable.
     """
-    z = encoder.apply(
-        params["encoder"],
+    embedding = backbone.apply(
+        params["backbone"],
         batch["ego_rtg"],
         batch["ego_obs"],
         batch["ego_actions"],
@@ -81,73 +93,43 @@ def omis_representation_loss(
         train=train,
         rngs=rngs,
     )
-    mate_logits, value = model.apply(params["model"], z)
+    action_logits, mate_logits, value = heads.apply(params["heads"], embedding)
+    action_logits = mask_logits(action_logits, batch["ego_avail"])
     mate_logits = mask_logits(mate_logits, batch["mate_avail"])
 
     mask = batch["mask"].astype(jnp.float32)
     denom = jnp.maximum(mask.sum(), 1.0)
 
-    imitator = optax.softmax_cross_entropy_with_integer_labels(mate_logits, batch["mate_actions"])
-    imitator = (imitator * mask).sum() / denom
+    act_loss = optax.softmax_cross_entropy_with_integer_labels(action_logits, batch["ego_actions"])
+    act_loss = (act_loss * mask).sum() / denom
+    action_acc = _masked_accuracy(action_logits, batch["ego_actions"], mask)
+
+    oppo_pi_loss = optax.softmax_cross_entropy_with_integer_labels(
+        mate_logits, batch["mate_actions"]
+    )
+    oppo_pi_loss = (oppo_pi_loss * mask).sum() / denom
     imitator_acc = _masked_accuracy(mate_logits, batch["mate_actions"], mask)
 
-    critic = (value - batch["ego_rtg"]) ** 2
-    critic = (critic * mask).sum() / denom
+    value_loss = (value - batch["ego_rtg"]) ** 2
+    value_loss = (value_loss * mask).sum() / denom
 
-    total = imitator + value_coef * critic
+    total = act_loss + vf_coef * value_loss + oppo_pi_coef * oppo_pi_loss
     return total, {
         "loss": total,
-        "imitator": imitator,
+        "bc": act_loss,
+        "action_accuracy": action_acc,
+        "imitator": oppo_pi_loss,
         "imitator_accuracy": imitator_acc,
-        "critic": critic,
+        "critic": value_loss,
     }
-
-
-def omis_actor_loss(
-    params, actor, encoder, encoder_params, batch, *, rngs=None, train: bool = True
-):
-    """Stage 2: behaviour cloning of the ego (best-response) action.
-
-    Conditioned on the frozen representation; ``encoder_params`` are stage-1
-    outputs and are never differentiated, so no ``stop_gradient`` is needed.
-    Mirrors :func:`liam.liam_policy_loss`.
-    """
-    z = encoder.apply(
-        encoder_params,
-        batch["ego_rtg"],
-        batch["ego_obs"],
-        batch["ego_actions"],
-        timesteps=batch["timesteps"],
-        mask=batch["mask"],
-        train=False,
-    )
-    logits = mask_logits(
-        actor.apply(
-            params,
-            batch["ego_rtg"],
-            batch["ego_obs"],
-            batch["ego_actions"],
-            timesteps=batch["timesteps"],
-            embedding=z,
-            mask=batch["mask"],
-            train=train,
-            rngs=rngs,
-        ),
-        batch["ego_avail"],
-    )
-    mask = batch["mask"].astype(jnp.float32)
-    bc = optax.softmax_cross_entropy_with_integer_labels(logits, batch["ego_actions"])
-    acc = _masked_accuracy(logits, batch["ego_actions"], mask)
-    bc = (bc * mask).sum() / jnp.maximum(mask.sum(), 1.0)
-    return bc, {"loss": bc, "bc": bc, "action_accuracy": acc}
 
 
 def omis_search(*args, **kwargs):
     """Decision-time search over the environment model — **not implemented**.
 
     The seam is deliberately left open. Everything search needs is trained and
-    saved: stage-1 params carry ``encoder`` and ``model`` (the opponent imitator
-    ``μ_φ`` and critic ``V_ω``); stage-2 params carry the actor ``π_θ``.
+    saved: ``params["stage2"]`` carries ``backbone`` and ``heads`` -- the actor
+    ``π_θ``, opponent imitator ``μ_φ``, and critic ``V_ω`` together.
 
     A search module (cf. ``OMIS/testing/search.py``) would, at each timestep,
     enumerate the legal ego actions and roll ``M`` trajectories of length ``L``
@@ -159,32 +141,43 @@ def omis_search(*args, **kwargs):
     be reported as a distinct *test-time-simulator-access* entry rather than
     compared against the forward-only baselines.
 
-    Deploying ``OMIS w/o S`` today uses the actor alone (see :meth:`OmisTrainer.act`).
+    Deploying ``OMIS w/o S`` today uses the actor alone (see :meth:`OmisAgent.act`).
     """
     raise NotImplementedError(omis_search.__doc__)
 
 
 class OmisTrainer(BaseAhtTrainer):
-    """OMIS (without search) on the two-stage contract.
+    """OMIS (without search), trained jointly across the two-call contract.
 
-    Same shape as :class:`~oaht_bench.offline.liam.model.LiamTrainer`, but stage 1
-    trains an opponent imitator and a best-response critic off the shared
-    representation (rather than a reconstruction decoder), and stage 2 clones the
-    ego best-response action. The imitator and critic are trained and saved for a
-    future :func:`omis_search`; the deployed actor is search-free. ``value_coef``
-    is OMIS-specific and read from the top-level config.
+    One ``{backbone, heads}`` parameter tree, one combined loss
+    (:func:`omis_joint_loss`) -- unlike LIAM/MeLIBA/TAO's staged,
+    frozen-representation training. ``train_stage_1`` initialises and runs the
+    first optimisation phase; ``train_stage_2`` continues optimising the *same*
+    parameters, not a fresh policy against a frozen encoder. ``vf_coef``/
+    ``oppo_pi_coef`` are OMIS-specific and read from the top-level config.
     """
 
     name = "omis"
 
     def build_model(self) -> None:
         # Inference is the composed OmisAgent's; training reads its
-        # encoder/model/actor.
+        # backbone/heads.
         self.agent = OmisAgent(self.config)
         self.agent.build_model()
 
     def _sample_batch(self, _step):
         return sample_window_batch(self.dataset.windows, self.np_rng, self.config.batch_size)
+
+    def _loss(self, p, b, rngs, frozen):
+        return omis_joint_loss(
+            p,
+            self.agent.backbone,
+            self.agent.heads,
+            b,
+            vf_coef=self.config.vf_coef,
+            oppo_pi_coef=self.config.oppo_pi_coef,
+            rngs=rngs,
+        )
 
     def train_stage_1(self):
         init_batch = self._sample_batch(0)
@@ -192,7 +185,7 @@ class OmisTrainer(BaseAhtTrainer):
 
         def init_one(key):
             k1, k2 = jax.random.split(key)
-            encoder_params = self.agent.encoder.init(
+            backbone_params = self.agent.backbone.init(
                 k1,
                 init_batch["ego_rtg"],
                 init_batch["ego_obs"],
@@ -200,31 +193,21 @@ class OmisTrainer(BaseAhtTrainer):
                 timesteps=init_batch["timesteps"],
                 mask=init_batch["mask"],
             )
-            init_z = self.agent.encoder.apply(
-                encoder_params,
+            embedding = self.agent.backbone.apply(
+                backbone_params,
                 init_batch["ego_rtg"],
                 init_batch["ego_obs"],
                 init_batch["ego_actions"],
                 timesteps=init_batch["timesteps"],
                 mask=init_batch["mask"],
             )
-            model_params = self.agent.model.init(k2, init_z)
-            return {"encoder": encoder_params, "model": model_params}
+            heads_params = self.agent.heads.init(k2, embedding)
+            return {"backbone": backbone_params, "heads": heads_params}
 
         params = self._init_params(init_one, k)
 
-        def loss(p, b, rngs, frozen):
-            return omis_representation_loss(
-                p,
-                self.agent.encoder,
-                self.agent.model,
-                b,
-                value_coef=self.config.value_coef,
-                rngs=rngs,
-            )
-
         return self._run_stage(
-            loss,
+            self._loss,
             params,
             self._sample_batch,
             learning_rate=self.config.stage1_learning_rate,
@@ -233,46 +216,11 @@ class OmisTrainer(BaseAhtTrainer):
         )
 
     def train_stage_2(self, stage1_params):
-        init_batch = self._sample_batch(0)
-        self.rng, k = jax.random.split(self.rng)
-        enc_for_shape = (
-            jax.tree.map(lambda x: x[0], stage1_params["encoder"])
-            if self.num_seeds > 1
-            else stage1_params["encoder"]
-        )
-        init_z = self.agent.encoder.apply(
-            enc_for_shape,
-            init_batch["ego_rtg"],
-            init_batch["ego_obs"],
-            init_batch["ego_actions"],
-            timesteps=init_batch["timesteps"],
-            mask=init_batch["mask"],
-        )
-
-        def init_one(key):
-            return self.agent.actor.init(
-                key,
-                init_batch["ego_rtg"],
-                init_batch["ego_obs"],
-                init_batch["ego_actions"],
-                timesteps=init_batch["timesteps"],
-                embedding=init_z,
-                mask=init_batch["mask"],
-            )
-
-        actor_params = self._init_params(init_one, k)
-
-        def loss(p, b, rngs, frozen):
-            return omis_actor_loss(
-                p, self.agent.actor, self.agent.encoder, frozen["encoder"], b, rngs=rngs
-            )
-
         return self._run_stage(
-            loss,
-            actor_params,
+            self._loss,
+            stage1_params,
             self._sample_batch,
             learning_rate=self.config.stage2_learning_rate,
             steps=self.config.stage2_steps,
             prefix="Stage2",
-            frozen=stage1_params,
         )

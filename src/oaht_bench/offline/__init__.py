@@ -24,7 +24,7 @@ confederate (``final_params_br``), so for those two the data exists; FCP and
 CoMeDi have no best response and would need one trained.
 """
 
-from oaht_bench.models.backbone import DecisionTransformer
+from oaht_bench.models.backbone import GPT2Model
 from oaht_bench.offline.bc import BcTrainer, bc_loss
 from oaht_bench.offline.liam import (
     LiamTrainer,
@@ -39,8 +39,7 @@ from oaht_bench.offline.meliba import (
 )
 from oaht_bench.offline.omis import (
     OmisTrainer,
-    omis_actor_loss,
-    omis_representation_loss,
+    omis_joint_loss,
     omis_search,
 )
 from oaht_bench.offline.registry import BaseAhtTrainer, get_trainer
@@ -53,7 +52,7 @@ from oaht_bench.offline.tao import (
 
 __all__ = [
     "BaseAhtTrainer",
-    "DecisionTransformer",
+    "GPT2Model",
     "LiamTrainer",
     "get_trainer",
     "MelibaTrainer",
@@ -69,7 +68,6 @@ __all__ = [
     "meliba_belief",
     "meliba_policy_loss",
     "meliba_reconstruction_loss",
-    "omis_actor_loss",
-    "omis_representation_loss",
+    "omis_joint_loss",
     "omis_search",
 ]

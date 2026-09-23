@@ -1,34 +1,37 @@
 """OMIS's model — architecture and inference only (Jing et al., NeurIPS 2024, adapted).
 
-The shared representation encoder, the two search components (opponent imitator and
-critic), the search-free actor policy, and :class:`OmisAgent`, the inference wrapper.
-Given trained parameters, ``OmisAgent`` acts identically no matter how they were
-produced, so it is model-layer and carries no dataset or training dependency. The
-offline two-stage training, the losses, and the (unimplemented) search seam live in
+The shared representation backbone, the three in-context heads (actor, opponent
+imitator, critic), and :class:`OmisAgent`, the inference wrapper. Given trained
+parameters, ``OmisAgent`` acts identically no matter how they were produced, so
+it is model-layer and carries no dataset or training dependency. The offline
+joint training, the loss, and the (unimplemented) search seam live in
 :mod:`oaht_bench.offline.omis`.
 
-Structurally OMIS is LIAM: a representation backbone read at the ``o_t`` positions and
-an actor conditioned on it. What differs is the stage-1 objective (teammate imitation
-and best-response value rather than reconstruction) and the two extra heads it trains
-for a future decision-time search. Deployed today this is ``OMIS w/o S`` -- the actor
-alone, on the same ego-only information set as the other forward baselines.
+**One backbone, three heads, no frozen boundary.** OMIS's own reference
+(``pretraining/nets.py::GPTModel``) runs one GPT-2 trunk and reads its final
+hidden state through three separately-owned linear heads --
+``predict_action``, ``predict_value``, ``predict_oppo_action`` -- trained
+end-to-end off one combined loss. That is what :class:`OmisBackbone` and
+:class:`OmisHeads` reproduce here, unlike LIAM/MeLIBA/TAO's genuinely staged,
+frozen-representation training. Deployed today this is ``OMIS w/o S`` -- the
+actor head alone, on the same ego-only information set as the other forward
+baselines.
 """
 
 from __future__ import annotations
 
 import flax.linen as nn
-import jax.numpy as jnp
 
-from oaht_bench.models.backbone import DecisionTransformer
+from oaht_bench.models.backbone import GPT2Model
 from oaht_bench.models.return_conditioned_agent import ReturnConditionedAgent
 
 
-class OmisEncoder(nn.Module):
+class OmisBackbone(nn.Module):
     """Shared representation backbone, read at the ``o_t`` positions.
 
     Identical in form to :class:`~oaht_bench.models.liam_agent.LiamEncoder`; what
-    differs is the stage-1 objective that trains it — teammate imitation and
-    best-response value rather than teammate reconstruction.
+    differs is that every head reading it -- including the actor -- is trained
+    jointly, with no frozen boundary anywhere.
     """
 
     action_dim: int
@@ -37,24 +40,27 @@ class OmisEncoder(nn.Module):
 
     @nn.compact
     def __call__(self, rtg, obs, actions, *, timesteps, mask=None, train: bool = False):
-        _, obs_hidden = DecisionTransformer(
+        return GPT2Model(
             action_dim=self.action_dim,
             hidden_dim=self.hidden_dim,
             use_cross_attention=False,
             dropout=self.dropout,
         )(rtg, obs, actions, timesteps=timesteps, mask=mask, train=train)
-        return obs_hidden
 
 
-class OmisModel(nn.Module):
-    """The two search components: opponent imitator and critic.
+class OmisHeads(nn.Module):
+    """The three heads off the shared representation: actor, opponent imitator, critic.
 
-    Two heads off the representation, each two hidden layers with ReLU
-    (mirroring :class:`~oaht_bench.models.liam_agent.LiamDecoder`). The imitator
-    returns teammate-action logits (``μ_φ``); the critic returns a scalar value
-    (``V_ω``) regressed to the ego return-to-go — the best response's RTG when the
-    dataset carries best responses. Neither is used by the search-free actor; both
-    are trained so a future search can be added without retraining.
+    The actor head is a single dense layer, matching every other baseline's
+    Network/Actor role and the reference's own ``predict_action`` (a single
+    ``nn.Linear``). The imitator and critic keep the two-hidden-layer heads
+    already established here (mirroring
+    :class:`~oaht_bench.models.liam_agent.LiamDecoder`); the reference is
+    single-layer for these too, but the extra depth is an existing,
+    orthogonal choice this refactor does not revisit. The imitator returns
+    teammate-action logits (``μ_φ``); the critic returns a scalar value
+    (``V_ω``) regressed to the ego return-to-go — the best response's RTG
+    when the dataset carries best responses.
     """
 
     action_dim: int
@@ -62,6 +68,8 @@ class OmisModel(nn.Module):
 
     @nn.compact
     def __call__(self, embedding):
+        action_logits = nn.Dense(self.action_dim)(embedding)
+
         h = nn.relu(nn.Dense(self.hidden_dim)(embedding))
         h = nn.relu(nn.Dense(self.hidden_dim)(h))
         mate_action_logits = nn.Dense(self.action_dim)(h)
@@ -69,48 +77,18 @@ class OmisModel(nn.Module):
         g = nn.relu(nn.Dense(self.hidden_dim)(embedding))
         g = nn.relu(nn.Dense(self.hidden_dim)(g))
         value = nn.Dense(1)(g)[..., 0]
-        return mate_action_logits, value
-
-
-class OmisActor(nn.Module):
-    """Stage 2: the actor policy, conditioned on the frozen representation.
-
-    Structurally :class:`~oaht_bench.models.liam_agent.LiamNetwork` — a DT over the
-    ego stream with the representation concatenated to the observation. This is OMIS's
-    ``π_θ`` deployed feed-forward (``OMIS w/o S``); search would wrap it, not replace it.
-    """
-
-    action_dim: int
-    hidden_dim: int = 32
-    dropout: float = 0.1
-
-    @nn.compact
-    def __call__(self, rtg, obs, actions, *, timesteps, embedding, mask=None, train: bool = False):
-        logits, _ = DecisionTransformer(
-            action_dim=self.action_dim,
-            hidden_dim=self.hidden_dim,
-            use_cross_attention=False,
-            dropout=self.dropout,
-        )(
-            rtg,
-            jnp.concatenate([obs, embedding], axis=-1),
-            actions,
-            timesteps=timesteps,
-            mask=mask,
-            train=train,
-        )
-        return logits
+        return action_logits, mate_action_logits, value
 
 
 class OmisAgent(ReturnConditionedAgent):
     """OMIS's architecture and inference as a :class:`ReturnConditionedAgent`.
 
-    The base owns the rolling ego-window / return-to-go deployment; OMIS (without
-    search) supplies its modules and the forward: encode the representation, condition
-    the actor on it. The imitator and critic (:class:`OmisModel`) are trained and saved
-    for a future search but are not read at inference. The offline two-stage training,
-    the losses, and the search seam live in :mod:`oaht_bench.offline.omis`, which
-    composes one of these.
+    The base owns the rolling ego-window / return-to-go deployment; OMIS
+    (without search) supplies its modules and the forward: one backbone pass,
+    then the actor head. The imitator and critic (:class:`OmisHeads`) are
+    trained alongside it for a future search but are not read by :meth:`act`.
+    The offline joint training, the loss, and the search seam live in
+    :mod:`oaht_bench.offline.omis`, which composes one of these.
     """
 
     def build_model(self) -> None:
@@ -120,14 +98,14 @@ class OmisAgent(ReturnConditionedAgent):
                 "obs_dim/action_dim are unresolved on the network config; the "
                 "runner must resolve them from the dataset before build_model()."
             )
-        common = dict(hidden_dim=net.hidden_dim, dropout=net.dropout)
-        self.encoder = OmisEncoder(action_dim=net.action_dim, **common)
-        self.model = OmisModel(action_dim=net.action_dim, hidden_dim=net.hidden_dim)
-        self.actor = OmisActor(action_dim=net.action_dim, **common)
+        self.backbone = OmisBackbone(
+            action_dim=net.action_dim, hidden_dim=net.hidden_dim, dropout=net.dropout
+        )
+        self.heads = OmisHeads(action_dim=net.action_dim, hidden_dim=net.hidden_dim)
 
     def act(self, params, rtg, obs, actions, *, timesteps, mask):
-        z = self.encoder.apply(
-            params["stage1"]["encoder"],
+        embedding = self.backbone.apply(
+            params["stage2"]["backbone"],
             rtg,
             obs,
             actions,
@@ -135,25 +113,17 @@ class OmisAgent(ReturnConditionedAgent):
             mask=mask,
             train=False,
         )
-        return self.actor.apply(
-            params["stage2"],
-            rtg,
-            obs,
-            actions,
-            timesteps=timesteps,
-            embedding=z,
-            mask=mask,
-            train=False,
-        )
+        action_logits, _, _ = self.heads.apply(params["stage2"]["heads"], embedding)
+        return action_logits
 
     def mate_action_logits(self, params, hstate):
-        """The imitator head (``μ_φ``) reading the frozen stage-1 representation --
-        the same signal ``omis_representation_loss`` (``offline/omis.py``) trains,
-        which is why OMIS trains an imitator at all even though the search-free
-        actor never reads it. Raw logits; the caller masks illegal actions.
+        """The imitator head (``μ_φ``) reading the shared representation -- the
+        same signal ``omis_joint_loss`` (``offline/omis.py``) trains, which is
+        why OMIS trains an imitator at all even though the search-free actor
+        never reads it. Raw logits; the caller masks illegal actions.
         """
-        z = self.encoder.apply(
-            params["stage1"]["encoder"],
+        embedding = self.backbone.apply(
+            params["stage2"]["backbone"],
             hstate.ctx_rtg[None],
             hstate.ctx_obs[None],
             hstate.ctx_act[None],
@@ -161,5 +131,5 @@ class OmisAgent(ReturnConditionedAgent):
             mask=hstate.ctx_mask[None],
             train=False,
         )
-        mate_logits, _ = self.model.apply(params["stage1"]["model"], z[:, -1])
+        _, mate_logits, _ = self.heads.apply(params["stage2"]["heads"], embedding[:, -1])
         return mate_logits[0]

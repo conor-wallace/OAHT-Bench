@@ -17,7 +17,7 @@ from oaht_bench.dataset.dataset import _build_windows, return_to_go
 from oaht_bench.models.liam_agent import LiamDecoder, LiamEncoder, LiamNetwork
 from oaht_bench.models.tao_agent import AncillaryActionDecoder, OpponentPolicyEncoder, TaoNetwork
 from oaht_bench.offline import (
-    DecisionTransformer,
+    GPT2Model,
     liam_reconstruction_loss,
     supervised_contrastive,
 )
@@ -93,7 +93,7 @@ def test_liam_conditions_by_concatenation_and_tao_by_cross_attention():
     # A cross-attending backbone must be given a context; omitting it is an error
     # rather than a silent no-op.
     with pytest.raises(ValueError, match="no context was passed"):
-        DecisionTransformer(action_dim=6, use_cross_attention=True).init(rng, *args, **kw)
+        GPT2Model(action_dim=6, use_cross_attention=True).init(rng, *args, **kw)
 
 
 def test_supervised_contrastive_matches_the_reference_aggregation():
@@ -488,6 +488,89 @@ def test_available_actions_are_enforced_everywhere_the_data_enforces_them():
 
     # and the shared deployment loop masks before sampling the ego
     assert "mask_logits" in inspect.getsource(ReturnConditionedAgent.get_action)
+
+
+def test_omis_all_three_heads_reach_the_shared_backbone():
+    """The property this refactor exists for: no head is cut off from the
+    backbone by a frozen boundary, unlike LIAM/MeLIBA/TAO's staged training.
+
+    Differentiates each head's own loss term in isolation and checks it reaches
+    :class:`~oaht_bench.models.omis_agent.OmisBackbone` -- the direct,
+    per-head version of what ``omis_joint_loss``'s combined gradient does.
+    """
+    import optax as _optax
+
+    from oaht_bench.models.omis_agent import OmisBackbone, OmisHeads
+    from oaht_bench.offline.utils import mask_logits
+
+    w = _windows()
+    rng = jax.random.PRNGKey(0)
+    batch = {
+        k: jnp.asarray(getattr(w, k))
+        for k in (
+            "ego_rtg",
+            "ego_obs",
+            "ego_actions",
+            "mate_actions",
+            "ego_avail",
+            "mate_avail",
+            "timesteps",
+            "mask",
+        )
+    }
+
+    backbone = OmisBackbone(action_dim=6, hidden_dim=32)
+    heads = OmisHeads(action_dim=6, hidden_dim=32)
+
+    bp = backbone.init(
+        rng,
+        batch["ego_rtg"],
+        batch["ego_obs"],
+        batch["ego_actions"],
+        timesteps=batch["timesteps"],
+        mask=batch["mask"],
+    )
+    z = backbone.apply(
+        bp,
+        batch["ego_rtg"],
+        batch["ego_obs"],
+        batch["ego_actions"],
+        timesteps=batch["timesteps"],
+        mask=batch["mask"],
+    )
+    params = {"backbone": bp, "heads": heads.init(rng, z)}
+
+    def head_loss(which):
+        def loss_fn(p):
+            embedding = backbone.apply(
+                p["backbone"],
+                batch["ego_rtg"],
+                batch["ego_obs"],
+                batch["ego_actions"],
+                timesteps=batch["timesteps"],
+                mask=batch["mask"],
+            )
+            action_logits, mate_logits, value = heads.apply(p["heads"], embedding)
+            m = batch["mask"].astype(jnp.float32)
+            denom = jnp.maximum(m.sum(), 1.0)
+            if which == "actor":
+                logits = mask_logits(action_logits, batch["ego_avail"])
+                ce = optax.softmax_cross_entropy_with_integer_labels(logits, batch["ego_actions"])
+                return (ce * m).sum() / denom
+            if which == "imitator":
+                logits = mask_logits(mate_logits, batch["mate_avail"])
+                ce = optax.softmax_cross_entropy_with_integer_labels(logits, batch["mate_actions"])
+                return (ce * m).sum() / denom
+            mse = (value - batch["ego_rtg"]) ** 2
+            return (mse * m).sum() / denom
+
+        return loss_fn
+
+    for which in ("actor", "imitator", "critic"):
+        grads = jax.grad(head_loss(which))(params)
+        assert float(_optax.global_norm(grads["backbone"])) > 0.0, (
+            f"{which} head's loss should reach the shared backbone"
+        )
 
 
 def test_mask_logits_matches_the_absorbed_convention():

@@ -1385,6 +1385,52 @@ manipulator meta-gradient) is pinned by `tests/test_rpg.py` on CPU-sized inputs;
 what those tests do **not** establish is that training converges to a good LBF
 population, which only a real run can show.
 
+### Recurrent-actor support added: RPG now covers all five wired environments
+
+RPG was originally hardcoded to `MLPActorCriticPolicy` — no `actor_type`
+dispatch at all, unlike every other generator — so it could only run on
+plain-MLP environments (LBF, MPE). Adding Hanabi (`"rnn"`) and Overcooked-v2
+(`"cnn_rnn"`) support meant more than a policy-class swap: `_rollout`,
+`_actor_dice_loss`, `_diversity_surrogate`, and `_base_loss`'s critic term all
+called `network.apply(params, (obs, avail))` directly -- the MLP network's
+stateless, no-hstate signature, incompatible with a recurrent actor's hidden
+state. Every one of those call sites now routes through
+`policy.get_action_value_policy(params, obs, done, avail_actions, hstate, rng)`,
+the same uniform interface `MLPActorCriticPolicy`/`RNNActorCriticPolicy`/
+`CNNRNNActorCriticPolicy` all implement identically -- `RpgConfig`/`RpgRuntime`
+gained an `actor_type` field, and `make_rpg_train`/`get_rpg_population` now go
+through `initialize_agent`'s dispatch, matching FCP/MEP.
+
+The one design fact that made this tractable: `_rollout` always starts with a
+fresh `env.reset()` and is never carried across outer `_update` iterations, so
+hidden state is always freshly zero-initialized both for the online rollout
+*and* for the later whole-trajectory replay calls (`_actor_dice_loss` etc.) --
+no initial hstate needed saving into the trajectory dict. Done/hstate semantics
+were mirrored from `marl/ippo.py`'s already-proven convention verbatim rather
+than re-derived, specifically to avoid an off-by-one that would silently
+corrupt the higher-order (manipulator) gradient rather than crash.
+
+**Verification, in order of how likely each was to catch a real bug:**
+1. A new pinned test (`test_actor_dice_loss_replay_reproduces_rollout_log_probs_{mlp,rnn}`)
+   asserts that recomputing log-probs via `_actor_dice_loss`'s own network call,
+   at the *same* params used to collect, reproduces the trajectory's own
+   `lp0`/`lp1` bit-for-bit -- RPG's DiCE objective has no importance-sampling
+   ratio against a stored old policy, so this has no reason to differ unless
+   the hstate/done threading between the online and replay call sites
+   disagrees. Passes for both actor types.
+2. Full `tests/` suite (275 tests) passes -- no regression in the mlp path.
+3. Live smoke runs on both new actor types (`population_size=2`, tiny budget)
+   -- Hanabi (`actor_type="rnn"`) and Overcooked-v2 (`actor_type="cnn_rnn"`) --
+   confirm `initialize_agent`/`get_rpg_population`'s dispatch wires correctly
+   end-to-end, not just the loss functions in isolation.
+
+Configs for `hanabi`/`overcooked_v2_counter_circuit`/`lbf_20x20`/
+`mpe_reference`/`mpe_spread` are now generated (`scripts/gen_teammate_configs.py`),
+all still the same **deliberately modest, untuned** budgets as LBF 12×12 --
+this only removes the structural blocker, it does not tune anything. The two
+open adoption gates above (scale past `n=2`, held-out usability) are
+unaffected and still stand for every environment, not just LBF.
+
 ## MEP × LBF 12×12 / Hanabi / Overcooked-v2 (wired, untuned; not yet run at scale)
 
 MEP (Zhao et al., AAAI-23 — the teammate-generation method OMIS uses) is now a
@@ -1437,3 +1483,106 @@ whether the population-entropy bonus produces a genuinely diverse,
 non-collapsed LBF population (self-play ≈ cross-play expected, since MEP is
 non-adversarial — see the cross-play sanity check AD-RPG's own paper runs,
 `papers/rpg.pdf` Fig. 5/6) before anything past LBF is worth attempting.
+
+## Backbone cleanup, and fixing OMIS's training to match its reference
+
+An investigation into why the offline baselines (LIAM, MeLIBA, TAO, OMIS)
+cluster near BC on lbf_20x20 (see the section on the identification bottleneck
+above) had a second, narrower thread: whether each baseline's *training
+procedure* — staged vs. joint, frozen vs. not — actually matches its paper and
+its reference code, since that would explain why OMIS/TAO don't show the
+relative edge over LIAM/MeLIBA their papers claim, independent of the
+identification-bottleneck story. Reading all four papers plus TAO's and OMIS's
+released code (`papers/{liam,meliba,tao,omis}.pdf`,
+`/Users/conorwallace/Documents/Personal/Projects/{TAO,OMIS}`) found:
+
+- **LIAM, MeLIBA: correct as-is.** Both papers' online training uses a single
+  combined loss differentiated w.r.t. policy and encoder/decoder together, but
+  both apply `jax.lax.stop_gradient` on the embedding/latent right before it
+  reaches the policy (`liam_agent.py:536`, `meliba_agent.py:941` in
+  `LARG/jax-aht`) — mathematically identical to our offline two-stage,
+  frozen-representation split. No change.
+- **TAO: our implementation matches the paper; the released code does not.**
+  TAO's Appendix C, Algorithm 1 is unambiguous that stage 2 backpropagates to
+  the decoder only, encoder frozen — what we do. But
+  `offline_stage_2/{train,nn_trainer}.py` never loads
+  `ENCODER_PARAM_PATH` (defined, unused) and trains a *fresh* encoder jointly
+  with the decoder — contradicting its own paper and Algorithm 1. Likely a
+  release bug (missing `encoder.load_model(...)` call), not an intentional
+  design change. Left alone: our TAO is the paper's TAO, which is what we want
+  to claim, and `freeze_encoder=False` already exists as an explicit opt-out
+  reproducing the released code's joint training if that's ever needed for
+  comparison (`offline/tao.py`, pinned by
+  `test_tao_stage_two_freezes_the_encoder_by_default`).
+- **OMIS: our implementation genuinely diverges from its reference.**
+  `pretraining/nets.py::GPTModel` is one GPT-2 backbone with three
+  *separately-owned* linear heads (`predict_action`, `predict_value`,
+  `predict_oppo_action`); `pretraining/nn_trainer.py`'s `train_step` sums them
+  into one loss (`act_loss + vf_coef*value_loss + oppo_pi_coef*oppo_pi_loss`)
+  and backpropagates through the whole thing in one pass — confirmed by ONNX
+  inspection of a released checkpoint (one graph, three outputs, one trunk).
+  The paper's §4.1 is consistent with this (one sequence through one shared
+  backbone) and never claims a staged/frozen split. Our prior implementation
+  split OMIS into a frozen-representation stage (imitator + critic) and a
+  policy stage (actor) conditioned on the frozen output — LIAM/MeLIBA's
+  pattern, not OMIS's. Fixed this session; see below.
+
+**Fix, part 1 — the shared backbone loses its baked-in head.**
+`models/backbone.py`'s `DecisionTransformer` returned `(logits, obs_hidden)`
+unconditionally; every encoder role (`LiamEncoder`, `MelibaEncoder`,
+`OmisEncoder`) discarded `logits`, every network/actor role discarded
+`obs_hidden` and just forwarded the baked-in head — none of them owned an
+action head of their own, unlike either reference (TAO's separate
+`GPTEncoder`/`GPTDecoder`; OMIS's one trunk with owned heads). The backbone now
+returns `obs_hidden` alone and is renamed `GPT2Model` (the "Decision
+Transformer" framing was only true while it baked in the action head); LIAM,
+MeLIBA, TAO, and BC's network/actor classes each now attach their own
+`nn.Dense(action_dim)`. Behavior-preserving for all four — pinned by
+`test_liam_stage_two_does_not_differentiate_the_encoder` and
+`test_tao_stage_two_freezes_the_encoder_by_default` passing unchanged, plus the
+full suite.
+
+**Fix, part 2 — OMIS: one backbone, three heads, trained jointly.**
+`models/omis_agent.py`'s `OmisEncoder` + `OmisActor` (two separate backbone
+calls, one feeding the other, output frozen between them) is now
+`OmisBackbone` + `OmisHeads` (one backbone call; three sibling heads — actor,
+opponent imitator, critic — all reading the same `obs_hidden`, matching
+`nets.py::GPTModel` structurally). `offline/omis.py`'s
+`omis_representation_loss` + `omis_actor_loss` collapsed into one
+`omis_joint_loss` (`act_loss + vf_coef*value_loss + oppo_pi_coef*oppo_pi_loss`,
+naming and defaulting the coefficients to the reference's own
+`args.vf_coef=0.5`/`args.oppo_pi_coef=0.8`, replacing the old
+single-purpose `value_coef=1.0` field on `OfflineTrainingConfig`). No
+`stop_gradient` anywhere in the loss.
+
+`BaseAhtTrainer`'s `train_stage_1() -> train_stage_2(stage1_params)` contract
+is shared with LIAM/MeLIBA/TAO and stayed untouched at the interface level,
+but for OMIS both calls now optimise the *same* `{backbone, heads}` parameter
+tree against the *same* joint loss — `train_stage_2` continues from
+`train_stage_1`'s checkpoint at `stage2_learning_rate`/`stage2_steps` rather
+than training a fresh policy against a frozen encoder. This was chosen over a
+literal "stage 2 is a no-op pass-through" so that the generic runner tests
+(`test_runner_trains_and_writes_parameters`,
+`test_runner_logs_accuracies_and_evaluation_returns`, parametrized across all
+four baselines) keep seeing real `Stage1/`/`Stage2/` metrics without special-
+casing OMIS — and it is arguably more faithful to "one continuous joint
+optimization" than an empty second call would have been. `OmisAgent.act` and
+`mate_action_logits` read the final, most-trained parameters from `stage2`
+exclusively.
+
+**Verification.** A new targeted test,
+`test_omis_all_three_heads_reach_the_shared_backbone`, differentiates each
+head's own loss term in isolation and confirms all three reach
+`OmisBackbone`'s parameters — the direct check for the property this fix
+exists for, not just an end-to-end smoke test that could pass even if a head
+were accidentally cut off. Full suite (276 tests) passes. A live smoke run
+(20+20 steps on the real `pooled_expert_lbf_12x12` dataset) trains,
+checkpoints, and evaluates end-to-end, and its `metrics.jsonl` shows
+`Stage1/{action_accuracy,imitator,imitator_accuracy,critic,loss}` and the same
+under `Stage2/` — all three heads' losses present and moving at every logged
+step of both calls, not just the first.
+
+**Still open, unchanged by this fix:** decision-time search
+(`omis_search`, `testing/search.py`'s `fake_env` rollout) remains
+unimplemented; deployed OMIS is still `OMIS w/o S`. This fix makes that
+ablation's *training* match the reference exactly — it does not add search.

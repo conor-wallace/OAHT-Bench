@@ -365,13 +365,21 @@ class OfflineTrainingConfig(BaseConfig):
         ge=0.0,
         description="MeLIBA's beta on the sequential belief KL (DECODER_KL_WEIGHT).",
     )
-    # OMIS only. Weight on the critic (value) regression in the representation
-    # stage; the imitator cross-entropy has weight 1. Search is not deployed, so
-    # this only shapes the saved critic head.
-    value_coef: float = Field(
-        default=1.0,
+    # OMIS only. Weights on the critic and opponent-imitator terms in the joint
+    # actor/critic/imitator loss (offline.omis.omis_joint_loss); the actor
+    # cross-entropy has weight 1. Names and defaults match the reference's own
+    # ``args.vf_coef``/``args.oppo_pi_coef`` (``pretraining/pretrain.py``).
+    # Search is not deployed, so ``oppo_pi_coef`` and ``vf_coef`` only shape the
+    # saved imitator/critic heads, not the deployed actor's own gradient share.
+    vf_coef: float = Field(
+        default=0.5,
         ge=0.0,
-        description="OMIS's weight on the critic MSE relative to the imitator CE.",
+        description="OMIS's weight on the critic MSE in the joint loss.",
+    )
+    oppo_pi_coef: float = Field(
+        default=0.8,
+        ge=0.0,
+        description="OMIS's weight on the opponent-imitator CE in the joint loss.",
     )
     eval_episodes: int = Field(
         default=20,
