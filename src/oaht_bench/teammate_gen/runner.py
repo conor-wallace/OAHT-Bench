@@ -27,6 +27,7 @@ def _generators() -> dict[str, Callable[..., Any]]:
     from oaht_bench.teammate_gen.comedi import run_comedi
     from oaht_bench.teammate_gen.fcp import run_fcp
     from oaht_bench.teammate_gen.lbrdiv import run_lbrdiv
+    from oaht_bench.teammate_gen.mep import run_mep
     from oaht_bench.teammate_gen.ppo_br import run_ppo_br
     from oaht_bench.teammate_gen.rpg import run_rpg
 
@@ -36,6 +37,7 @@ def _generators() -> dict[str, Callable[..., Any]]:
         "brdiv": run_brdiv,
         "lbrdiv": run_lbrdiv,
         "rpg": run_rpg,
+        "mep": run_mep,
         "ppo_br": run_ppo_br,
     }
 

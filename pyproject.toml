@@ -101,6 +101,7 @@ include = [
     "src/oaht_bench/population/pooled_crossplay.py",
     "src/oaht_bench/teammate_gen/marl/lr_schedule.py",
     "src/oaht_bench/teammate_gen/marl/reward_shaping.py",
+    "src/oaht_bench/teammate_gen/mep.py",
     "src/oaht_bench/teammate_gen/rpg.py",
     "src/oaht_bench/teammate_gen/crossplay.py",
     "src/oaht_bench/teammate_gen/plan.py",

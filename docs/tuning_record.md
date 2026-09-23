@@ -1384,3 +1384,56 @@ The correctness of the algorithm itself (the DiCE surrogate and the higher-order
 manipulator meta-gradient) is pinned by `tests/test_rpg.py` on CPU-sized inputs;
 what those tests do **not** establish is that training converges to a good LBF
 population, which only a real run can show.
+
+## MEP × LBF 12×12 / Hanabi / Overcooked-v2 (wired, untuned; not yet run at scale)
+
+MEP (Zhao et al., AAAI-23 — the teammate-generation method OMIS uses) is now a
+fifth generator (`src/oaht_bench/teammate_gen/mep.py`, clean-room from the
+paper, `MepConfig`). Stage 1 only: self-play PPO per member plus a
+population-entropy reward bonus, `-alpha * log(mean_k pi_k(a_t|s_t))`. MEP's
+own Stage 2 (a shared robust-generalist ego via prioritized sampling) is not
+built — every other generator here only releases a population, and ego
+training stays `ppo_br.py`'s job.
+
+Architecturally distinct from every other generator here: computing the
+entropy bonus needs every population member's *current* policy visible at
+every rollout step, which neither FCP's fully-independent per-member vmap nor
+BRDiv/L-BRDiv's dual-role gather/scatter machinery provide cleanly. The
+population vmap axis is *named* (`axis_name="population"`), and
+`jax.lax.all_gather` is used as a collective to gather every lane's current
+params into every lane for a forward-pass-only cross-member log-prob query —
+no shared environment interaction, unlike BRDiv/CoMeDi's cross-play rollouts.
+The reduction itself must be `logsumexp(log_probs) - log(N)` (`log(mean(p))`),
+not `mean(log(p))` — those differ by Jensen's inequality whenever members
+disagree, and the wrong one silently trains a different objective. Pinned by
+`tests/unit/teammate_gen/test_mep.py`'s isolated reduction test, plus an
+end-to-end smoke test and a behavioral ablation (Question 2 from the paper: a
+large `population_entropy_coef` measurably raises trained population entropy
+relative to a `coef=0` control on the same tiny CPU-sized job — confirmed).
+
+**Open, named assumption: the hstate reset for Hanabi/Overcooked-v2.** MEP's
+objective is written as `pi(a|s)` — state-conditioned, no history in its
+formalism, because the paper's own environment (Overcooked) is fully
+observed. Hanabi ("rnn") and Overcooked-v2 ("cnn_rnn") need recurrent actors,
+which the paper's math doesn't address. For the cross-member forward pass
+*only* (never each member's own rollout), hstate is reset to
+`policy.init_hstate(...)` rather than reusing each member's own
+trajectory-hstate against another lane's observation — the closest reading of
+the paper's literal state-only conditioning, but an extension the paper
+doesn't specify. Doesn't affect LBF ("mlp": `init_hstate` is already the
+no-op hstate ippo.py's own rollout uses there), so LBF's first sweep is
+unaffected by this open question; revisit once a Hanabi/Overcooked-v2 run
+exists to check whether the assumption produces sensible entropy curves.
+
+Configs are **untuned starting points** on all three families (see
+`scripts/gen_teammate_configs.py`'s `PPO["mep"]`/`SCALE["mep"]`): LBF starts
+at `PpoHyperparams`' bare defaults (a blank slate, deliberately not inheriting
+any other generator's tuned numbers) with a modest budget matching RPG's own
+first-LBF-budget precedent (`total_timesteps=1e7`, `num_envs=64`); Hanabi and
+Overcooked-v2 copy the shared recurrent-actor backbone every other generator
+already inherits on those families verbatim (not MEP-specific tuning). Not
+yet run at LBF's real budget — the first thing a real run should check is
+whether the population-entropy bonus produces a genuinely diverse,
+non-collapsed LBF population (self-play ≈ cross-play expected, since MEP is
+non-adversarial — see the cross-play sanity check AD-RPG's own paper runs,
+`papers/rpg.pdf` Fig. 5/6) before anything past LBF is worth attempting.

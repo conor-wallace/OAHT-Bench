@@ -141,6 +141,55 @@ def get_fcp_population(
     return flattened_partner_params, partner_population
 
 
+def get_mep_population(
+    job: TeammateGenerationJob, out: TrainOutput, env: TrainingEnv
+) -> MepPopulation:
+    '''Build the population from a completed MEP run.
+
+    Stage 1 only (see ``teammate_gen/mep.py``): unlike FCP, MEP does not
+    diversify via checkpoints, so this reads ``final_params`` directly rather
+    than flattening ``checkpoints`` -- the same shape ``get_comedi_population``
+    produces. MEP does not condition on population index, so its actor-type
+    dispatch mirrors ``get_fcp_population``'s (rnn/cnn_rnn/mlp), not the
+    conditional-critic policies CoMeDi/BRDiv/L-BRDiv use.
+    '''
+    gen = job.generator
+    mep_pop_size = gen.population_size
+
+    # partner_params has shape (num_seeds, mep_pop_size, ...)
+    partner_params = out['final_params']
+
+    if gen.actor_type == "rnn":
+        partner_policy = RNNActorCriticPolicy(
+            action_dim=env.action_space(env.agents[1]).n,
+            obs_dim=env.observation_space(env.agents[1]).shape[0],
+            activation=gen.network.activation,
+            gru_hidden_dim=64,
+        )
+    elif gen.actor_type == "cnn_rnn":
+        partner_policy = CNNRNNActorCriticPolicy(
+            action_dim=env.action_space(env.agents[1]).n,
+            obs_dim=env.observation_space(env.agents[1]).shape[0],
+            obs_shape=_unwrap_obs_shape(env),
+            activation=gen.network.activation,
+            fc_hidden_dim=gen.network.hidden_dim,
+            gru_hidden_dim=128,
+        )
+    else:
+        partner_policy = MLPActorCriticPolicy(
+            action_dim=env.action_space(env.agents[1]).n,
+            obs_dim=env.observation_space(env.agents[1]).shape[0],
+            activation=gen.network.activation,
+        )
+
+    partner_population = AgentPopulation(
+        pop_size=mep_pop_size,
+        policy_cls=partner_policy
+    )
+
+    return partner_params, partner_population
+
+
 def _conditional_critic_policy(job: TeammateGenerationJob, env: TrainingEnv, pop_size: int):
     """Reconstruct the conditional-critic policy a CoMeDi/BRDiv/L-BRDiv checkpoint
     was trained with, for scoring. Mirrors the construction each generator and
@@ -301,6 +350,7 @@ _BUILDERS = {
     "comedi": get_comedi_population,
     "brdiv": get_brdiv_population,
     "lbrdiv": get_lbrdiv_population,
+    "mep": get_mep_population,
 }
 
 

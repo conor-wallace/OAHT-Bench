@@ -288,6 +288,41 @@ class RpgConfig(GeneratorBase):
     manipulator_entropy_coef: float = Field(default=0.0, ge=0)
 
 
+class MepConfig(GeneratorBase):
+    """Maximum Entropy Population-based training (Zhao et al., AAAI-23) -- the
+    teammate-generation method OMIS uses. Stage 1 only (see the module's own
+    reasoning in ``teammate_gen/mep.py``): N members train ordinary self-play
+    PPO, each paired with itself, while every rollout step's reward is
+    augmented by the population-entropy bonus (Eq. 6/9) -- the log-probability
+    of the already-sampled action under the *population's mean* policy. This
+    is a non-adversarial diversity mechanism: unlike BRDiv/L-BRDiv/CoMeDi/RPG,
+    nothing here optimizes to minimize another member's reward or cross-play
+    score, so it is structurally immune to the self-sabotage failure mode
+    those methods must be engineered around (see ``papers/rpg.pdf``). MEP's
+    own Stage 2 (a shared robust-generalist ego trained via prioritized
+    sampling) is out of scope here, matching every other generator: ego
+    training is ``ppo_br.py``'s job, not the diversity generator's.
+
+    ``actor_type`` follows FCP's per-env choices (``"mlp"`` on LBF, ``"rnn"``
+    on Hanabi, ``"cnn_rnn"`` on Overcooked-v2) since MEP, like FCP, does not
+    condition on population index -- unlike BRDiv/CoMeDi's conditional-critic
+    variants.
+    """
+
+    generator: Literal["mep"] = "mep"
+    actor_type: ActorType = "mlp"
+    total_timesteps: float = Field(default=1e6, gt=0, description="Per member trained.")
+    population_entropy_coef: float = Field(
+        default=0.010,
+        ge=0,
+        description="MEP's alpha (Eq. 9): weight on the population-entropy reward "
+        "bonus, computed from the *population's mean* policy. Distinct from "
+        "`ppo.entropy_coef`, which regularizes each member's own policy entropy -- "
+        "these are two different terms and both apply. Untuned; starts at the "
+        "paper's own middle-of-sweep value (their Table 1).",
+    )
+
+
 class PpoBrConfig(GeneratorBase):
     """Train a dedicated best-response ego against each fixed teammate in a released
     population, warm-started from an already-competent policy.
@@ -326,6 +361,6 @@ class PpoBrConfig(GeneratorBase):
 
 #: Discriminated union, selected by ``generator``.
 GeneratorConfig = Annotated[
-    FcpConfig | CoMeDiConfig | BrDivConfig | LBrDivConfig | RpgConfig | PpoBrConfig,
+    FcpConfig | CoMeDiConfig | BrDivConfig | LBrDivConfig | RpgConfig | MepConfig | PpoBrConfig,
     Field(discriminator="generator"),
 ]

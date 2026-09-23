@@ -32,6 +32,7 @@ from oaht_bench.configs.teammate_gen import (
     CoMeDiConfig,
     FcpConfig,
     LBrDivConfig,
+    MepConfig,
     PpoBrConfig,
     PpoHyperparams,
     RpgConfig,
@@ -233,6 +234,33 @@ PPO: dict[str, dict[str, dict[str, Any]]] = {
             learning_rate=2.5e-4,
             entropy_coef=0.01,
         ),
+    },
+    "mep": {
+        # UNTUNED. MEP is non-adversarial and non-conditional (self-play + a
+        # population-entropy reward bonus -- see MepConfig/teammate_gen/mep.py),
+        # so LBF starts at PpoHyperparams' own bare defaults rather than
+        # inheriting any other generator's tuned values -- MEP's dynamics
+        # (population-entropy bonus, log-mean-exp reduction) differ enough that
+        # borrowing a tuned number here would be false precision.
+        "lbf": dict(),
+        # hanabi/overcooked_v2 below are NOT MEP-specific tuning -- they're the
+        # shared recurrent-actor backbone all four other generators already
+        # inherit (see docs/tuning_record.md and CLAUDE.md's "Hanabi now shares
+        # the recurrent-actor backbone" note), copied verbatim so MEP starts
+        # from the same validated architecture/budget rather than reinventing
+        # Hanabi/Overcooked-v2 PPO settings from scratch.
+        "hanabi": dict(
+            learning_rate=5e-4,
+            update_epochs=4,
+            num_minibatches=4,
+            clip_eps=0.2,
+            entropy_coef=0.01,
+            anneal_lr=True,
+            gamma=0.999,
+            gae_lambda=0.95,
+            max_grad_norm=0.5,
+        ),
+        "overcooked_v2": dict(**_OVERCOOKED_V2_PPO),
     },
 }
 
@@ -452,6 +480,20 @@ SCALE: dict[str, dict[str, dict[str, Any]]] = {
         # the paper's N=2?). Tune on GPU before trusting the population.
         "lbf": dict(total_timesteps=1e7, num_envs=64, pop=POPULATION_SIZE),
     },
+    "mep": {
+        # UNTUNED starting budget, modest like RPG's -- MEP's per-step cost is
+        # dominated by the all_gather + one extra forward pass per member
+        # (cheap relative to RPG's N**2 cross-play rollouts), but the budget
+        # itself is unvalidated until an LBF sweep says otherwise.
+        "lbf": dict(total_timesteps=1e7, num_envs=64, pop=POPULATION_SIZE),
+        # hanabi/overcooked_v2: the shared recurrent-actor backbone (see the
+        # matching PPO["mep"] note) -- same num_envs/total_timesteps/actor_type
+        # every other generator already uses on these families.
+        "hanabi": dict(total_timesteps=3e9, num_envs=1024, pop=POPULATION_SIZE, actor_type="rnn"),
+        "overcooked_v2": dict(
+            total_timesteps=2.4e8, num_envs=256, pop=POPULATION_SIZE, actor_type="cnn_rnn"
+        ),
+    },
 }
 
 #: Diversity weights that differ per environment.
@@ -640,6 +682,11 @@ def build(generator: str, preset_name: str, num_checkpoints: int = 5):
         # off_diag_factor=0.25, dice_lambda=0.99, n_lookahead=1, manipulator_lr).
         # At pop=5 the base self-play weight is 1 - 5*0.1 = 0.5 (stays positive).
         return RpgConfig(total_timesteps=scale["total_timesteps"], **common)
+    if generator == "mep":
+        # population_entropy_coef uses MepConfig's default (the paper's own
+        # middle-of-sweep alpha=0.010) -- no per-family evidence yet to differ
+        # from it, so it isn't overridden here.
+        return MepConfig(total_timesteps=scale["total_timesteps"], **common)
     raise ValueError(f"unknown generator {generator!r}")
 
 
@@ -704,9 +751,13 @@ def main() -> int:
     written = []
     for env_name in envs:
         env = get_preset(env_name)
-        for generator in ("fcp", "comedi", "brdiv", "lbrdiv", "rpg"):
+        for generator in ("fcp", "comedi", "brdiv", "lbrdiv", "rpg", "mep"):
             # RPG is only tuned/supported on LBF so far (see SCALE/PPO tables).
             if generator == "rpg" and _family(env_name) != "lbf":
+                continue
+            # MEP is wired for lbf/hanabi/overcooked_v2 (see SCALE/PPO tables);
+            # untuned everywhere but lbf, but structurally supported on all three.
+            if generator == "mep" and _family(env_name) not in {"lbf", "hanabi", "overcooked_v2"}:
                 continue
             gen = build(generator, env_name)
             kwargs: dict[str, Any] = {}
