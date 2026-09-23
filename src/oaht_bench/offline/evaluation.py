@@ -210,6 +210,8 @@ def _score(
 def run(job) -> Path:
     """Evaluate every ``checkpoint_paths`` entry against its unseen (and, if
     available, seen) teammate set and write one JSON report."""
+    from tqdm import tqdm
+
     from oaht_bench.configs import save_job
     from oaht_bench.envs import make_env
     from oaht_bench.envs.log_wrapper import LogWrapper
@@ -229,8 +231,13 @@ def run(job) -> Path:
 
     dataset_cache: dict = {}
     report: dict = {"checkpoints": {}}
+    # Two phases (unseen, seen) per checkpoint is the finest granularity visible
+    # here without instrumenting evaluate_agent_against/evaluate_incontext's own
+    # per-teammate loops, which are shared with training's own evaluation.
+    bar = tqdm(total=2 * len(job.checkpoint_paths), desc="evaluating", unit="phase")
     for ckpt in job.checkpoint_paths:
         run_path = Path(ckpt)
+        bar.set_description(f"{run_path.name}: loading")
         log.info("evaluating %s", run_path)
         ckpt_job, dataset, agent, all_params, cond_target = load_trained_agent(
             run_path, dataset_cache=dataset_cache
@@ -253,6 +260,7 @@ def run(job) -> Path:
         # Unseen (primary) then seen (contrast), the same order and shape
         # _evaluate reports: a held-out score is only readable as
         # generalisation, not raw competence, next to the in-distribution one.
+        bar.set_description(f"{run_path.name}: unseen")
         entry = {
             "baseline": ckpt_job.baseline,
             "num_seeds": ns,
@@ -260,12 +268,16 @@ def run(job) -> Path:
             "unseen_pool_size": len(unseen_pool),
             "unseen": _score(teammates=unseen_pool, **score_kwargs),
         }
+        bar.update(1)
         if seen_pool:
+            bar.set_description(f"{run_path.name}: seen")
             entry["seen"] = _score(teammates=seen_pool, **score_kwargs)
             entry["generalization_gap"] = float(
                 entry["seen"]["mean_return"] - entry["unseen"]["mean_return"]
             )
+        bar.update(1)
         report["checkpoints"][str(run_path)] = entry
+    bar.close()
 
     out_path = run_dir / "evaluation_report.json"
     out_path.write_text(json.dumps(report, indent=2) + "\n")
