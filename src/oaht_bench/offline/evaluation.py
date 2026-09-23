@@ -123,11 +123,19 @@ def _unseen_roster(dataset_path: str, env) -> list:
     return _teammate_policies(batch, env, which="held_out")
 
 
-def _score(agent, all_params, env, teammates, *, job, ns, cond_target, rng_base, incontext):
+def _score(
+    agent, all_params, env, teammates, *, job, ns, cond_target, rng_base, incontext, ocw_size=None
+):
     """Across-seed mean return (+ mate_action_acc where available), against one
     fixed teammate set -- the same aggregation ``offline.runner._evaluate``'s
     ``score``/``_score_incontext`` closures do, kept as a free function here so
     an :class:`EvaluationJob` can call it without importing training internals.
+
+    ``job`` is the :class:`EvaluationJob` (has ``.env``/``.num_episodes``, no
+    ``.offline``) -- ``ocw_size`` (TAO's OCW capacity) is a property of how the
+    *checkpoint* was trained, not of this evaluation, so the caller passes it
+    explicitly from that checkpoint's own training config rather than this
+    function reaching for ``job.offline``, which doesn't exist here.
     """
     import jax
 
@@ -144,7 +152,7 @@ def _score(agent, all_params, env, teammates, *, job, ns, cond_target, rng_base,
                 teammates,
                 max_episode_steps=job.env.rollout_length,
                 num_episodes=job.num_episodes,
-                ocw_size=job.offline.context_trajectories,
+                ocw_size=ocw_size,
                 obs_dim=agent.obs_dim,
                 rng=jax.random.PRNGKey(rng_base + s),
             )
@@ -222,6 +230,7 @@ def run(job) -> Path:
             cond_target=cond_target,
             rng_base=job.seed,
             incontext=incontext,
+            ocw_size=ckpt_job.offline.context_trajectories if incontext else None,
         )
 
         # Unseen (primary) then seen (contrast), the same order and shape
