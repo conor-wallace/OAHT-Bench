@@ -16,11 +16,12 @@
         "populations/lbf_12x12/fcp",
         "populations/lbf_12x12/lbrdiv"
     ],
-    "pooled_matrix_path": "populations/lbf_12x12/pooled_crossplay.npz",
-    "variant": "mixed",
+    "pooled_matrix_path": "populations/lbf_12x12/new_pooled_crossplay.npz",
+    "br_population_path": "TODO_FILL_IN: results/teammate_generation/ppo_br_lbf_12x12-<hash>, the run directory from configs/lbf_12x12/ppo_br.json once trained -- must match crossplay/pooled.json's br_population_path",
+    "variant": "expert",
     "num_episodes": 25000,
     "mirror_trajectories": false,
-    "label": "pooled_lbf_12x12",
+    "label": "pooled_expert_lbf_12x12",
     "logging": {"use_wandb": false}
   }
 }

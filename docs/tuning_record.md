@@ -1586,3 +1586,70 @@ step of both calls, not just the first.
 (`omis_search`, `testing/search.py`'s `fake_env` rollout) remains
 unimplemented; deployed OMIS is still `OMIS w/o S`. This fix makes that
 ablation's *training* match the reference exactly — it does not add search.
+
+## Pooled crossplay redefined: `ppo_br` is now the only ego axis, plus a `weighted` variant
+
+Follow-on from the training-procedure investigation above: OMIS/TAO's own
+reference pipelines build a cross-play corpus (every ego against every
+opponent) specifically so their in-context encoder learns to identify a
+teammate independent of who it's paired with. Our pooled dataset-collection
+variants didn't — `expert` seated each teammate against one fixed ego (its
+best *existing* roster responder, or a separately-loaded dedicated best
+response via a collection-time override), `mixed` against exactly two fixed
+egos, both picked deterministically off a matrix whose ego axis was the
+*original*, not-specifically-trained population policies — capping realistic
+competence at ~45% (see the FCP× / BRDiv× sections above) and giving zero
+cross-partner exposure per teammate.
+
+**Redefinition, not an addition.** Per review direction, the pooled crossplay
+matrix's ego axis is now *exclusively* the trained `ppo_br` population — the
+original population's `self`/`conf`/`br` policies are never egos again, only
+teammates (`self`/`conf`; a paired generator's own `br` role is now unused
+entirely). Since `ppo_br` trains exactly one dedicated best response per
+teammate identity, ego and teammate share one `K`-sized index space and the
+matrix is a genuine square `K x K`, every cell measured (row `i`= teammate
+`i`'s best response, column `j` = teammate `j`) — real cross-play data, not
+just a diagonal. `expert`/`mixed`/`br_vs_worst` read off this matrix through
+the *same* unmodified `plan_seatings` machinery as before (it was always
+roster-index-oblivious to what a position means); the old collection-time BR
+override (`_collect_pooled`'s `br_egos is not None` branch) is deleted as
+dead weight — `expert`'s argmax now lands on the diagonal through the same
+code path as everything else, not a special case.
+
+**New `weighted` variant**: draws the ego *per episode*, i.i.d., from
+`softmax(matrix[egos, j] / temperature)` over raw returns, instead of a fixed
+discrete-band argmin pick. `temperature -> 0` recovers `expert`'s argmax;
+`temperature -> large` approaches a uniform draw over every teammate's
+dedicated best response. This is what actually gives a teammate broad,
+continuous ego exposure across its episodes, closer to what OMIS/TAO's own
+prompt corpus does — `expert`/`mixed` still only ever put a teammate in front
+of one or two fixed egos even after this redefinition, since the *matrix* is
+richer now but their sampling was never designed to spread across it.
+`br_population_path` narrowed from `list[str]` to `str`: one `ppo_br` run
+already covers the whole released roster (`load_br_egos`'s own docstring
+already said so), so the list type and its per-path merge loop were solving
+a problem that didn't exist.
+
+**Migration cost, not yet paid.** `configs/lbf_12x12/{crossplay/pooled,
+data_collection/pooled_{expert,mixed,worst,weighted}}.json` all now require
+`br_population_path`, filled in with a `TODO_FILL_IN` placeholder pointing at
+`configs/lbf_12x12/ppo_br.json`'s run directory — that `ppo_br` job has not
+been run yet (no `results/teammate_generation/ppo_br_lbf_12x12-*` exists),
+so neither has a matrix recomputation under the new schema. The existing
+`populations/lbf_12x12/pooled_crossplay.npz` (the old, roster-as-ego, 30-wide
+matrix behind the already-collected `pooled_expert_lbf_12x12-6a931eee466c`
+dataset OMIS/LIAM/MeLIBA/TAO were trained on above) is untouched and still
+loadable by old code paths, but is incompatible with the new schema's
+required `br_egos`/square-roster invariant — the four configs above point at
+a fresh `new_pooled_crossplay.npz` instead rather than colliding with it.
+Unrun: training `ppo_br` for lbf_12x12, recomputing the matrix, and picking a
+first real `temperature` for `weighted` (default `0.2`, unvalidated — pick a
+value via the realised per-teammate ego-diversity spread once real data
+exists, not asserted here).
+
+Verification so far is unit-only: `plan_weighted_seatings`'s temperature
+limits (`temperature to 0` concentrates on the argmax, `temperature` large
+approaches uniform), `evaluate_pooled`'s new square-1:1 invariant (raises on
+a `br_egos`/teammate mismatch), and `teammate_roster`'s role filter, plus the
+full suite (283 tests). No live rollout has exercised this yet — that's the
+next thing to run, not a claim being made here.

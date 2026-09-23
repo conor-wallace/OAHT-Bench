@@ -14,6 +14,7 @@ from oaht_bench.dataset.construction.epsilon_sampler import (
     load_pooled,
     plan_for_variant,
     plan_seatings,
+    plan_weighted_seatings,
 )
 from oaht_bench.population.pooled_crossplay import normalise_per_teammate
 
@@ -147,6 +148,71 @@ def test_check_roster_catches_drift():
         pooled.check_roster([E("g", 0, "self"), E("g", 9, "self")])
     with pytest.raises(ValueError, match="recompute"):
         pooled.check_roster([E("g", 0, "self")])  # wrong length
+
+
+def test_weighted_covers_teammates_exactly_and_equally():
+    matrix = np.eye(4) + 0.1
+    g, m, r = _uniform_roles(4)
+    pooled = _pooled(matrix, g, m, r)
+    plan = plan_weighted_seatings(pooled, 8, temperature=1.0, rng=np.random.default_rng(0))
+    seated = np.bincount([s.teammate for s in plan], minlength=4)
+    assert list(seated) == [2, 2, 2, 2]
+
+
+def test_weighted_low_temperature_concentrates_on_the_argmax():
+    # A sharply-separated column: one clear best response per teammate. The
+    # matrix is square -- ego and teammate share one identity space, per the
+    # BR-only redefinition (teammate 2's own best response is a three-way tie,
+    # left out of the assertion below).
+    matrix = np.array([[10.0, 0.0, 1.0], [0.0, 10.0, 1.0], [1.0, 1.0, 1.0]])
+    g, m, r = _uniform_roles(3)
+    pooled = _pooled(matrix, g, m, r)
+    plan = plan_weighted_seatings(pooled, 200, temperature=0.01, rng=np.random.default_rng(1))
+    best_ego = {j: int(np.argmax(matrix[:, j])) for j in range(3)}
+    for s in plan:
+        if s.teammate == 2:
+            continue  # flat column, argmax is arbitrary -- not what this pins
+        assert s.ego == best_ego[s.teammate]
+
+
+def test_weighted_high_temperature_approaches_uniform():
+    matrix = np.array([[10.0, 0.0, 1.0], [0.0, 10.0, 1.0], [1.0, 1.0, 1.0]])
+    g, m, r = _uniform_roles(3)
+    pooled = _pooled(matrix, g, m, r)
+    plan = plan_weighted_seatings(pooled, 3000, temperature=1000.0, rng=np.random.default_rng(2))
+    drawn_for_0 = np.bincount([s.ego for s in plan if s.teammate == 0], minlength=3)
+    freqs = drawn_for_0 / drawn_for_0.sum()
+    # Nowhere near collapsed onto one ego -- roughly a third each.
+    np.testing.assert_allclose(freqs, [1 / 3, 1 / 3, 1 / 3], atol=0.05)
+
+
+def test_weighted_records_the_realised_quality_not_a_fixed_target():
+    matrix = np.array([[0.4, 0.1], [0.2, 0.6]])
+    g, m, r = _uniform_roles(2)
+    pooled = _pooled(matrix, g, m, r)
+    plan = plan_weighted_seatings(pooled, 10, temperature=0.5, rng=np.random.default_rng(3))
+    for s in plan:
+        assert isinstance(s, Seating)
+        assert s.epsilon == pytest.approx(pooled.quality[s.ego, s.teammate])
+        assert s.target == pytest.approx(s.epsilon)
+
+
+def test_weighted_respects_allow_self_pairing():
+    matrix = np.array([[10.0, 0.2], [0.7, 0.9]])
+    g, m, r = _uniform_roles(2)
+    pooled = _pooled(matrix, g, m, r)
+    without_self = plan_weighted_seatings(
+        pooled,
+        20,
+        temperature=0.01,
+        rng=np.random.default_rng(4),
+        allow_self_pairing=False,
+    )
+    # teammate 0's own best response (ego 0) is excluded; every draw for
+    # teammate 0 must fall back to ego 1.
+    for s in without_self:
+        if s.teammate == 0:
+            assert s.ego == 1
 
 
 def test_load_pooled_round_trip(tmp_path):

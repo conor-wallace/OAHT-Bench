@@ -26,13 +26,15 @@ from oaht_bench.dataset.construction.epsilon_sampler import (
     EPSILON_TARGETS,
     load_pooled,
     plan_for_variant,
+    plan_weighted_seatings,
 )
 from oaht_bench.dataset.construction.split import derive_split
 from oaht_bench.dataset.vault import VaultWriter
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper
 from oaht_bench.population import artifact_dir, population_from_run, released_members
-from oaht_bench.population.pooled_crossplay import build_roster
+from oaht_bench.population.loading import load_br_egos
+from oaht_bench.population.pooled_crossplay import teammate_roster
 
 log = logging.getLogger(__name__)
 
@@ -318,12 +320,15 @@ def _pooled_matrix_hash(path: Path) -> str:
 def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
     """Pooled mode: seat the ε sampler's cross-population plan (§3, dataset_design).
 
-    The released members of every ``population_path`` are flattened into one
-    roster (:func:`~oaht_bench.population.pooled_crossplay.build_roster`, the same
-    flattening the matrix was built with), and the ε sampler turns the variant's
-    target quality distribution into concrete ``(ego, teammate)`` roster indices
-    read off ``pooled_matrix_path``. Each episode seats ``roster[ego]`` in seat 0
-    against ``roster[teammate]`` in the rest.
+    The designed teammates of every ``population_path`` are flattened into one
+    roster (:func:`~oaht_bench.population.pooled_crossplay.teammate_roster`, the
+    same flattening the matrix was built with), and the ε sampler turns the
+    variant's target quality distribution into concrete ``(ego, teammate)``
+    roster indices read off ``pooled_matrix_path``. Ego and teammate share this
+    same roster: an "ego" index is always that identity's own trained
+    ``ppo_br`` best response (:mod:`oaht_bench.population.loading`'s
+    ``load_br_egos``), never a reused population policy. Each episode seats
+    that best response in seat 0 against ``roster[teammate]`` in the rest.
 
     ``member_ids`` here are *roster* indices, not per-population member indices;
     the roster manifest in ``meta`` maps each back to ``(generator, member,
@@ -332,15 +337,23 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
     as well as keeping in ``meta`` (the stable descriptor the trajectory-view
     baselines read, ``dataset_design.md`` §2).
     """
-    if job.variant not in EPSILON_TARGETS:
+    if job.variant not in EPSILON_TARGETS and job.variant != "weighted":
         raise NotImplementedError(
             f"variant={job.variant!r} has no ε target; pooled mode implements "
-            f"{sorted(EPSILON_TARGETS)}. τ variants need the competence ladder (§4)."
+            f"{sorted({*EPSILON_TARGETS, 'weighted'})}. τ variants need the "
+            f"competence ladder (§4)."
         )
     if job.pooled_matrix_path is None:
         raise ValueError(
             "pooled mode (population_path is a list) needs pooled_matrix_path, "
             "the populations/<env>/pooled_crossplay.npz for these populations."
+        )
+    if job.br_population_path is None:
+        raise ValueError(
+            "pooled mode needs br_population_path -- the ppo_br run the "
+            "pooled_matrix_path matrix's ego axis was computed with. Every ego "
+            "seated is that teammate's own dedicated best response, never a "
+            "reused population policy."
         )
     if job.mismatch_fraction:
         # Pairing correctness is orthogonal to ε and not yet layered onto the
@@ -351,7 +364,8 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
         )
 
     pop_dirs = [Path(p) for p in job.population_path]
-    roster = build_roster(pop_dirs, env)
+    roster = teammate_roster(pop_dirs, env)
+    br_egos = load_br_egos(job.br_population_path, env)
     pooled = load_pooled(job.pooled_matrix_path)
     # Guard the emitted indices against a matrix computed for a different or
     # reordered roster -- otherwise a stale matrix silently seats the wrong pair.
@@ -372,34 +386,25 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
     manifest_path = Path(job.run_dir()) / "teammate_split.json"
     manifest_path.write_text(json.dumps(split.to_dict(), indent=2) + "\n")
 
-    plan = plan_for_variant(
-        pooled,
-        job.variant,
-        job.num_episodes,
-        rng=np.random.default_rng(job.seed),
-        allow_self_pairing=job.allow_self_pairing,
-        allowed=split.train_indices,
-    )
+    if job.variant == "weighted":
+        plan = plan_weighted_seatings(
+            pooled,
+            job.num_episodes,
+            temperature=job.temperature,
+            rng=np.random.default_rng(job.seed),
+            allow_self_pairing=job.allow_self_pairing,
+            allowed=split.train_indices,
+        )
+    else:
+        plan = plan_for_variant(
+            pooled,
+            job.variant,
+            job.num_episodes,
+            rng=np.random.default_rng(job.seed),
+            allow_self_pairing=job.allow_self_pairing,
+            allowed=split.train_indices,
+        )
     num_seats = len(env.agents)
-
-    # Best-response egos: for the 'expert' variant, seat the *trained* BR for each
-    # teammate (seat 0) instead of the ε-matrix's best existing roster partner. The BR
-    # is 1:1 with its teammate, so its recorded ego id is the teammate's roster index;
-    # the ego stream the offline baselines clone is then a dedicated best-response
-    # (docs/tuning_record.md), not a reused population policy.
-    br_egos = None
-    if job.br_population_path:
-        if job.variant != "expert":
-            raise NotImplementedError(
-                f"br_population_path seats the trained best-response as the expert ego; "
-                f"variant={job.variant!r} needs an ego competence ladder (BR checkpoints), "
-                f"not yet built. Use variant='expert'."
-            )
-        from oaht_bench.population.loading import load_br_egos
-
-        br_egos = {}
-        for p in job.br_population_path:
-            br_egos.update(load_br_egos(p, env))
 
     def stream():
         # Group the plan by (ego, teammate) so each pairing's episodes collect in one
@@ -416,15 +421,14 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
         with tqdm(total=len(plan), desc="Generating pooled dataset", unit="ep") as bar:
             for gi, ((ego_i, mate_i), idxs) in enumerate(by_pairing.items()):
                 mate = roster[mate_i]
-                if br_egos is not None:
-                    # Seat the trained best-response for this teammate; its ego id is
-                    # the teammate's roster index (BR is 1:1 with the teammate).
-                    ego_params, ego_cls = br_egos[(mate.generator, int(mate.member), mate.role)]
-                    ego_row_id = mate_i
-                else:
-                    ego = roster[ego_i]
-                    ego_params, ego_cls = ego.params, ego.policy_cls
-                    ego_row_id = ego_i
+                # The ego is always ego_i's own trained best response -- ego and
+                # teammate share one identity space, so this is a plain lookup,
+                # never a reused roster policy.
+                ego_identity = roster[ego_i]
+                ego_params, ego_cls = br_egos[
+                    (ego_identity.generator, int(ego_identity.member), ego_identity.role)
+                ]
+                ego_row_id = ego_i
                 seats = [(ego_params, ego_cls)] + [
                     (mate.params, mate.policy_cls) for _ in range(num_seats - 1)
                 ]
@@ -441,9 +445,7 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
                     )
                     for k, idx in enumerate(sub):
                         seating = plan[idx]
-                        member_row = np.asarray(
-                            [ego_row_id] + [seating.teammate] * (num_seats - 1)
-                        )
+                        member_row = np.asarray([ego_row_id] + [seating.teammate] * (num_seats - 1))
                         yield eps[k], member_row, seating.epsilon, seating.target
                     bar.update(len(sub))
 
@@ -456,8 +458,10 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
         "pooled_matrix_path": str(job.pooled_matrix_path),
         "pooled_matrix_hash": _pooled_matrix_hash(job.pooled_matrix_path),
         "allow_self_pairing": job.allow_self_pairing,
-        # When set, seat 0 is the trained best-response per teammate, not a roster policy.
+        # Seat 0 is always the trained best-response for whichever teammate identity
+        # the ε sampler drew as "ego", never a reused population policy.
         "br_population_path": job.br_population_path,
+        "temperature": job.temperature if job.variant == "weighted" else None,
         # Train/test teammate split (§8). test_teammates are the held-out policies
         # online evaluation rolls the trained ego against; they never appear below.
         "split_seed": job.split_seed,

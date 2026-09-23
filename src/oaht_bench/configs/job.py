@@ -147,11 +147,15 @@ class DatasetCollectionJob(JobBase):
         "matrix was computed with. A single string keeps the original "
         "single-population path (designed pairing within one generator)."
     )
-    variant: Literal["random", "medium", "expert", "replay_full", "mixed", "br_vs_worst"] = Field(
+    variant: Literal[
+        "random", "medium", "expert", "replay_full", "mixed", "br_vs_worst", "weighted"
+    ] = Field(
         description="D4RL-style data regime (§4.3). 'replay_full' is deliberately "
         "not D4RL's 'medium-replay', which stops at medium performance. The ε "
-        "variants ('expert', 'mixed', 'br_vs_worst') are target distributions over "
-        "the pooled ego-response-quality spectrum and need pooled mode."
+        "variants ('expert', 'mixed', 'br_vs_worst') are discrete target bands over "
+        "the pooled ego-response-quality spectrum; 'weighted' draws the ego per "
+        "episode from a softmax over the matrix's raw returns (`temperature`) "
+        "instead of a fixed band. All need pooled mode."
     )
     pooled_matrix_path: str | None = Field(
         default=None,
@@ -159,22 +163,31 @@ class DatasetCollectionJob(JobBase):
         "(populations/<env>/pooled_crossplay.npz) that the ε sampler reads in "
         "pooled mode. Required when population_path is a list; ignored otherwise.",
     )
-    br_population_path: list[str] | None = Field(
+    br_population_path: str | None = Field(
         default=None,
-        description="Pooled 'expert' mode only. Run dirs of `ppo_br` best-response "
-        "populations (one per source population). When set, the 'expert' ego is the "
-        "*trained* best-response for each teammate (seat 0), instead of the ε-matrix's "
-        "best existing roster partner -- the dedicated ego the offline baselines should "
-        "clone (docs/tuning_record.md). The reused-policy ego caps the dataset at ~45% "
-        "of competence; the BR ego is meant to lift that ceiling.",
+        description="Required in pooled mode. A `ppo_br` run directory training one "
+        "dedicated best response per teammate, matching the one `pooled_matrix_path` "
+        "was computed with -- the matrix's ego axis is already exclusively this "
+        "population (see PooledCrossplayJob), so this rebuilds the live roster that "
+        "reproduces it rather than overriding anything at collection time.",
+    )
+    temperature: float = Field(
+        default=0.2,
+        gt=0,
+        description="'weighted' only: softmax temperature over the crossplay "
+        "matrix's raw returns for the per-episode ego draw. Low = concentrates near "
+        "each teammate's own dedicated best response (approaches 'expert'); high = "
+        "approaches a uniform draw over every teammate's best response. Ignored by "
+        "every other variant.",
     )
     allow_self_pairing: bool = Field(
         default=True,
-        description="Pooled mode only. Whether the ego may be the same roster "
-        "entry as the teammate (only possible for homogeneous self-play policies). "
-        "True makes 'expert' the genuine top of the spectrum for FCP/CoMeDi, whose "
-        "best response to a member is usually itself; False forces a "
-        "cross-population responder. The §4 self-pairing decision, as a knob.",
+        description="Pooled mode only. Whether a teammate's own dedicated best "
+        "response may be drawn as its ego (as opposed to another teammate's best "
+        "response, which was trained for a different teammate and is rarely as "
+        "good a fit). True makes 'expert' the genuine top of the spectrum -- a "
+        "teammate's own best response should win its own column; False forces a "
+        "cross-teammate responder instead. The §4 self-pairing decision, as a knob.",
     )
     mismatch_fraction: float = Field(
         default=0.0,
@@ -221,17 +234,22 @@ class DatasetCollectionJob(JobBase):
 class PooledCrossplayJob(JobBase):
     """Compute the pooled cross-population coordination-return matrix (§4, step 2).
 
-    Pools the released members of every listed generator into one roster of
-    individual policies (:func:`~oaht_bench.population.pooled_crossplay.build_roster`)
-    and scores every ordered ``(ego, teammate)`` pair. The matrix is what the ε
-    sampler reads to place each episode on the best-worst response spectrum, so a
-    pooled ``dataset_collection`` job points its ``pooled_matrix_path`` at this job's
+    Builds the designed-teammate roster from every listed generator
+    (:func:`~oaht_bench.population.pooled_crossplay.teammate_roster` -- ``self``/
+    ``conf`` roles only) and scores every ordered ``(dedicated best response,
+    teammate)`` pair. The ego axis is always ``br_population_path``'s trained
+    ``ppo_br`` population, never the teammates' own generators' policies -- a
+    reused population policy caps realistic competence at ~45%
+    (``docs/tuning_record.md``). The matrix is what the ε sampler reads to place
+    each episode on the best-worst response spectrum, so a pooled
+    ``dataset_collection`` job points its ``pooled_matrix_path`` at this job's
     output.
 
     ``population_path`` is the same list, in the same order, a pooled
-    ``dataset_collection`` uses: ``build_roster`` preserves list order and the sampler
-    indexes the matrix by roster position, so a reordered list would silently mis-seat
-    (the collection runner's ``check_roster`` guards against exactly that).
+    ``dataset_collection`` uses: ``teammate_roster`` preserves list order and the
+    sampler indexes the matrix by roster position, so a reordered list would
+    silently mis-seat (the collection runner's ``check_roster`` guards against
+    exactly that).
     """
 
     job_type: Literal["pooled_crossplay"] = "pooled_crossplay"
@@ -239,17 +257,24 @@ class PooledCrossplayJob(JobBase):
     population_path: list[str] = Field(
         min_length=1,
         description="Released teammate-generation run directories flattened into one "
-        "roster in list order. Must match the list a pooled dataset_collection uses. "
-        "A single-element list is valid -- it isolates one generator's population "
-        "behind pooled mode's machinery (the ε sampler, `br_population_path`'s "
-        "trained-BR-ego seating) without pooling in any other generator's members.",
+        "designed-teammate roster in list order. Must match the list a pooled "
+        "dataset_collection uses. A single-element list is valid -- it isolates one "
+        "generator's population behind pooled mode's machinery without pooling in "
+        "any other generator's members.",
+    )
+    br_population_path: str = Field(
+        description="A `ppo_br` run directory training one dedicated best response "
+        "per teammate across every population in `population_path` -- the matrix's "
+        "entire ego axis. Must cover the teammate roster exactly 1:1 "
+        "(`evaluate_pooled` raises otherwise); one `ppo_br` run trained with every "
+        "source population listed already covers the whole roster.",
     )
     num_episodes: int = Field(
         default=20,
         gt=0,
-        description="Episodes per ordered (ego, teammate) pair. Only has to rank egos "
-        "per teammate for the ε bands, so modest counts suffice; raise it to break "
-        "near-ties. Cost is K^2 x this, with K the roster size.",
+        description="Episodes per ordered (best response, teammate) pair. Only has "
+        "to rank egos per teammate for the ε bands, so modest counts suffice; raise "
+        "it to break near-ties. Cost is K^2 x this, with K the teammate count.",
     )
     output_path: str | None = Field(
         default=None,

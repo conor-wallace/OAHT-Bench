@@ -4,10 +4,13 @@ concrete ``(ego, teammate)`` seatings, read off the pooled cross-play matrix.
 This is the dataset-side consumer of
 :mod:`~oaht_bench.population.pooled_crossplay` (``docs/dataset_design.md`` §3,
 piece 3). The pooled matrix gives, for every teammate ``j``, an ε spectrum over
-egos -- ``ε(i|j) ∈ [0,1]``, best-response = 1, worst = 0. A dataset *variant* is
-a target distribution over that spectrum (``expert`` = top only; ``br_vs_worst``
-= bimodal top/bottom; ``mixed`` = top and middle), and this module realises it as
-an exact list of seatings.
+egos -- ``ε(i|j) ∈ [0,1]``, best-response = 1, worst = 0. Egos on that axis are
+always dedicated best responses (``ppo_br``, one per teammate), never a reused
+population policy. A dataset *variant* is either a discrete target distribution
+over that spectrum (``expert`` = top only; ``br_vs_worst`` = bimodal top/bottom;
+``mixed`` = top and middle -- :func:`plan_seatings`, one deterministic pick per
+band) or a continuous one (``weighted`` -- :func:`plan_weighted_seatings`, a
+softmax draw per episode).
 
 It generalises :func:`oaht_bench.dataset.construction.runner._seat_plan` along one axis. That
 function splits episodes into matched/mismatched **by count** (not a per-episode
@@ -21,9 +24,11 @@ stays orthogonal and is layered by the caller, not baked in here.
 
 The sampler works on the matrix + roster *manifest* (generator/member/role), not
 live policies -- it emits roster indices and the ε value per episode. The caller
-rebuilds the live roster (:func:`~oaht_bench.population.pooled_crossplay.build_roster`,
+rebuilds the live roster (:func:`~oaht_bench.population.pooled_crossplay.teammate_roster`,
 deterministic in the same population order) and seats index ``ego`` against index
-``teammate``; :meth:`PooledMatrix.check_roster` guards the two against drift.
+``teammate`` -- both index into the *same* teammate identity space, since every
+ego is that identity's own dedicated best response. :meth:`PooledMatrix.check_roster`
+guards the roster and the matrix against drift.
 """
 
 from __future__ import annotations
@@ -76,11 +81,11 @@ class Seating:
 class PooledMatrix:
     """A loaded pooled cross-play matrix with its roster manifest.
 
-    ``matrix[i, j]`` is ego ``i``'s mean coordination return with teammate ``j``;
-    ``quality`` is the per-teammate [0,1] normalisation the sampler bands on.
-    ``generator``/``member``/``role`` address any row or column back to its
-    provenance and are index-aligned with a live
-    :func:`~oaht_bench.population.pooled_crossplay.build_roster` roster.
+    ``matrix[i, j]`` is teammate ``i``'s dedicated best response's mean
+    coordination return with teammate ``j``; ``quality`` is the per-teammate
+    [0,1] normalisation the sampler bands on. ``generator``/``member``/``role``
+    address any row or column back to its provenance and are index-aligned
+    with a live :func:`~oaht_bench.population.pooled_crossplay.teammate_roster`.
     """
 
     matrix: np.ndarray
@@ -211,9 +216,7 @@ def plan_seatings(
             f"no roster policy has a teammate role in {teammate_roles}"
             f"{' within the train split' if allowed_set is not None else ''}."
         )
-    ego_pool = np.array(
-        sorted(allowed_set) if allowed_set is not None else range(pooled.size)
-    )
+    ego_pool = np.array(sorted(allowed_set) if allowed_set is not None else range(pooled.size))
 
     plan: list[Seating] = []
     for level, count in _band_counts(targets, num_episodes):
@@ -227,6 +230,58 @@ def plan_seatings(
                 egos = egos[egos != j]
             ego = int(egos[np.argmin(np.abs(col[egos] - level))])
             plan.append(Seating(ego=ego, teammate=j, epsilon=float(col[ego]), target=float(level)))
+
+    return [plan[i] for i in rng.permutation(len(plan))]
+
+
+def plan_weighted_seatings(
+    pooled: PooledMatrix,
+    num_episodes: int,
+    *,
+    temperature: float,
+    rng: np.random.Generator,
+    teammate_roles: tuple[str, ...] = DEFAULT_TEAMMATE_ROLES,
+    allow_self_pairing: bool = True,
+    allowed: Sequence[int] | None = None,
+) -> list[Seating]:
+    """Draw the ego per episode from a softmax over the matrix's raw returns.
+
+    Unlike :func:`plan_seatings`'s discrete bands (one deterministic argmin pick
+    per band), every episode for a teammate is an independent draw from
+    ``softmax(matrix[egos, j] / temperature)`` -- raw returns, not the
+    ``[0,1]``-normalised ``quality`` (softmax needs the actual scale the
+    temperature acts on). ``temperature -> 0`` concentrates on the argmax
+    (recovering ``expert``'s pick); ``temperature -> inf`` approaches a uniform
+    draw. Teammate coverage is still exact and equal, via the same
+    :func:`_cycle` every other variant uses -- only the ego draw is stochastic.
+
+    ``teammate_roles``/``allow_self_pairing``/``allowed`` match
+    :func:`plan_seatings` exactly.
+    """
+    allowed_set = None if allowed is None else set(int(i) for i in allowed)
+
+    teammates = pooled.teammate_pool(teammate_roles)
+    if allowed_set is not None:
+        teammates = [j for j in teammates if j in allowed_set]
+    if not teammates:
+        raise ValueError(
+            f"no roster policy has a teammate role in {teammate_roles}"
+            f"{' within the train split' if allowed_set is not None else ''}."
+        )
+    ego_pool = np.array(sorted(allowed_set) if allowed_set is not None else range(pooled.size))
+
+    plan: list[Seating] = []
+    for j in _cycle(teammates, num_episodes, rng):
+        egos = ego_pool
+        if not allow_self_pairing:
+            egos = egos[egos != j]
+        returns = pooled.matrix[egos, j]
+        logits = returns / temperature
+        probs = np.exp(logits - logits.max())
+        probs /= probs.sum()
+        ego = int(rng.choice(egos, p=probs))
+        eps = float(pooled.quality[ego, j])
+        plan.append(Seating(ego=ego, teammate=j, epsilon=eps, target=eps))
 
     return [plan[i] for i in rng.permutation(len(plan))]
 

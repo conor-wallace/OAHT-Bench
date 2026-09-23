@@ -1,6 +1,6 @@
 {
   "job": {
-    "job_type": "pooled_crossplay",
+    "job_type": "dataset_collection",
     "env": {
         "env_name": "lbf",
         "grid_size": 12,
@@ -16,10 +16,12 @@
         "populations/lbf_12x12/fcp",
         "populations/lbf_12x12/lbrdiv"
     ],
-    "br_population_path": "TODO_FILL_IN: results/teammate_generation/ppo_br_lbf_12x12-<hash>, the run directory from configs/lbf_12x12/ppo_br.json once trained",
-    "num_episodes": 3,
-    "output_path": "populations/lbf_12x12/new_pooled_crossplay.npz",
-    "label": "new_pooled_lbf_12x12",
+    "pooled_matrix_path": "populations/lbf_12x12/new_pooled_crossplay.npz",
+    "br_population_path": "TODO_FILL_IN: results/teammate_generation/ppo_br_lbf_12x12-<hash>, the run directory from configs/lbf_12x12/ppo_br.json once trained -- must match crossplay/pooled.json's br_population_path",
+    "variant": "mixed",
+    "num_episodes": 25000,
+    "mirror_trajectories": false,
+    "label": "pooled_mixed_lbf_12x12",
     "logging": {"use_wandb": false}
   }
 }
