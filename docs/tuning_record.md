@@ -1755,17 +1755,39 @@ worst-out loop (`RESAMPLE_PROB`, `MUTATION_FACTORS`, `HYPERPARAMS_TO_MUTATE`,
 parallel-population PPO run per member with the population-entropy bonus,
 no iterative resampling cycle at all, so none of these have a field to map
 onto. Also not imported: the reference's Overcooked-specific CNN network
-settings (LBF's flat observation uses `MlpNetwork`) and `sim_threads` (->
-`num_envs`, left at our own default 64 as a rollout-parallelism knob, not a
-property of the trained policy the way LR/entropy/GAE are).
+settings (LBF's flat observation uses `MlpNetwork`) and `sim_threads`/
+`MINIBATCHES` (-> `num_envs`/`ppo.num_minibatches`, left at our own defaults
+rather than force-matched — see the correction below for why `MINIBATCHES`
+specifically could not be ported as a raw number).
 
-**Verified**: the config round-trips through `load_job` with every intended
-value (checked directly, not just by inspection), and a smoke run (pop=2,
-1600 timesteps, num_envs=8) confirms the `lbf_9x9` environment actually
-constructs (`env_kwargs={'grid_size': 9, 'num_food': 5, 'different_levels':
-True, 'num_agents': 2}`, no `fov` key — full observability, as intended) and
-MEP trains without error (`Train/Member_percent_eaten`,
-`Train/Member_returned_episode_returns` both present in the metrics
-stream). **Not verified**: the real run — population_size=20 at
+**Bug found on the real run, fixed.** The first version of this config set
+`ppo.num_minibatches=5` (the reference's `MINIBATCHES`), which crashed
+immediately on the user's GPU machine:
+`cannot reshape array of shape (50, 128) ... [50, 5, -1]` —
+`marl/ppo_utils.py::_create_minibatches` requires `num_actors (= num_agents x
+num_envs = 2 x 64 = 128)` to divide evenly by `num_minibatches`, and 128 is
+not divisible by 5. `num_minibatches` is not an independently-portable
+optimization hyperparameter like LR/entropy/GAE — it's a batch-structure
+knob mechanically coupled to `num_envs`, and the reference's value of 5 was
+sized against *their* batch structure (`TOTAL_BATCH_SIZE=20000`,
+`sim_threads=50`), never a number that could transfer to ours. Same category
+as `sim_threads`/`num_envs`, which were already correctly left unmatched —
+this one should have been too, and wasn't. Fixed by leaving
+`num_minibatches` at `PpoHyperparams`' own default (4), which divides 128
+evenly.
+
+**The smoke test that shipped with the first version didn't catch this.**
+It used a hand-simplified config (`num_envs=8, num_minibatches=2`, its own
+divisibility accidentally fine: `16 % 2 == 0`) rather than the real
+generated config's own values (`num_envs=64, num_minibatches=5`) — so it
+verified "the environment constructs and MEP trains" but not "this exact
+config's hyperparameters are mutually compatible." Re-verified properly this
+time: a smoke run using the *actual* `num_envs=64`/`num_minibatches=4` the
+real config now has (population_size and total_timesteps trimmed for speed,
+nothing else) completes cleanly. Lesson for next time: a smoke test's
+purpose is to exercise the values that will actually ship, not a
+structurally-different stand-in that happens to avoid the same reshape.
+
+**Still not verified**: the real run — population_size=20 at
 total_timesteps=1.5e7 each is a real budget decision, left for later, not
 run here.

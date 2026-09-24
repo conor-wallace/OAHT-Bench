@@ -43,9 +43,18 @@ one continuous vmap'd parallel-population PPO run with the population-entropy
 bonus, no iterative resampling cycle, so there is no field to map these onto.
 Also not imported: the reference's Overcooked-specific CNN network settings
 (LBF's flat observation uses `MlpNetwork`, already `hidden_dim=64` by
-default, matching the reference's `SIZE_HIDDEN_LAYERS`) and `sim_threads`
-(-> our `num_envs`, a rollout-parallelism knob left at our own default rather
-than force-matched -- see the module docstring above for why).
+default, matching the reference's `SIZE_HIDDEN_LAYERS`) and `sim_threads`/
+`MINIBATCHES` (-> our `num_envs`/`ppo.num_minibatches`, left at our own
+defaults rather than force-matched). Both are batch-structure knobs, not
+independent optimization hyperparameters: `num_minibatches` must evenly
+divide `num_actors = num_agents * num_envs` (`marl/ppo_utils.py`'s
+`_create_minibatches` reshapes on it), and the reference's own value of 5 was
+sized against *their* batch structure (`TOTAL_BATCH_SIZE=20000`,
+`sim_threads=50`), not ours -- copying the raw number crashed at
+`num_actors=128 % num_minibatches=5 != 0` on a real run (caught after the
+first version of this script shipped; see `docs/tuning_record.md`). Left at
+`PpoHyperparams`' own default (4), which does divide 128 evenly, rather than
+picked ad hoc to "look similar" to 5.
 
 ``population_size=20`` is OMIS's own reported population count (not the
 reference repo's own default of 4), and deliberately breaks this project's
@@ -103,7 +112,9 @@ def build() -> TeammateGenerationJob:
         gae_lambda=0.98,  # reference LAM
         max_grad_norm=0.1,  # reference MAX_GRAD_NORM
         update_epochs=8,  # reference STEPS_PER_UPDATE
-        num_minibatches=5,  # reference MINIBATCHES
+        # num_minibatches: NOT the reference's MINIBATCHES=5 -- see module
+        # docstring. Left at PpoHyperparams' own default (4), which divides
+        # num_actors=128 (num_envs=64 x num_agents=2) evenly; 5 does not.
         # gamma=0.99, clip_eps=0.05 already match PpoHyperparams' own defaults.
     )
 
