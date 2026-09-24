@@ -1791,3 +1791,50 @@ structurally-different stand-in that happens to avoid the same reshape.
 **Still not verified**: the real run — population_size=20 at
 total_timesteps=1.5e7 each is a real budget decision, left for later, not
 run here.
+
+### Second bug: `rollout_length=50` never set the episode horizon at all
+
+After the `num_minibatches` fix, the user ran real training and reported
+`percent_eaten`/`returns` stagnant around 0.07–0.09 with
+`Train/returned_episode_lengths` reading exactly `100.0` on every non-zero
+log line — despite the config's `rollout_length=50`, meant to reproduce
+OMIS's `horizon_per_ep_dict["lbf"]=50`. The logs showed a clean pattern:
+alternating `train_step`s with all-zero completion metrics, then all-100.0
+completions.
+
+Root cause: `rollout_length` on `EnvConfigBase` only sizes the PPO
+rollout-collection scan for one training update
+(`teammate_gen/mep.py`/`runtime.py`) — it is never passed into
+`LbfConfig.env_kwargs()`, so it never reaches the environment constructor at
+all. Jumanji's `LevelBasedForaging` therefore always ran its own default,
+`time_limit=100`, regardless of what `rollout_length` said. `lbf_20x20`'s own
+preset notes already flagged this ("Episode horizon stays at Jumanji's 100
+... time_limit is not a config knob here") from an earlier session, but that
+was read as a Jumanji limitation rather than double-checked — it wasn't:
+`LevelBasedForaging.__init__` accepts `time_limit` directly
+(`jumanji/environments/routing/lbf/env.py:117`), and it isn't blocked by
+`make_env`'s own kwarg filtering (`env_kwargs.py`'s `process_default_args`
+only intercepts generator/viewer keys, and `time_limit` is neither) — it was
+simply never wired up on our side. Since the real horizon (100) was exactly
+2x the configured `rollout_length` (50), every other PPO rollout window fell
+entirely inside one ongoing episode (no `done`, all-zero logged metrics) and
+the other half straddled the episode boundary (`done` for every env at once,
+`returned_episode_lengths=100.0` uniformly) — exactly the alternating
+pattern reported. Not a training failure; a logging/config-plumbing artifact
+on top of a config that silently wasn't doing what its own comment claimed.
+
+Fixed by adding `LbfConfig.time_limit: int | None = None` (`configs/env.py`),
+forwarded to Jumanji's constructor only when set — `None` preserves the
+previous default exactly, so `lbf_12x12`/`lbf_20x20` are unaffected (verified
+live: both still resolve to `time_limit=100`). `lbf_9x9`'s config now sets
+`time_limit=50` explicitly; `rollout_length=50` is left as-is (a reasonable
+PPO scan size on its own terms, not because it ever controlled episode
+length). Verified live end-to-end: `make_env(..., {'time_limit': 50, ...})`
+constructs an env whose episodes actually terminate at step 50, not 100.
+
+**Separately, on "barely 0.07 returns after 2000 steps" being evidence of a
+learning failure**: at `rollout_length=50`/`num_envs=64`, 2000 raw env steps
+is ~40 PPO updates against a `total_timesteps=1.5e7` budget (~4,700 updates
+per member) — under 1% of the run. Too early to read as non-learning on its
+own; worth re-checking once a run at the corrected `time_limit=50` has
+progressed substantially further, separately from the horizon bug above.

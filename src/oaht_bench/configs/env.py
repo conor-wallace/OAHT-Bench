@@ -70,7 +70,10 @@ class EnvConfigBase(VersionedConfig):
     )
     rollout_length: int = Field(
         gt=0,
-        description="Episode length used by jax-aht's runners. Shapes every "
+        description="Length of the PPO rollout-collection scan for one training "
+        "update (jax-aht's runners). NOT the environment's own episode-"
+        "termination horizon -- those are decoupled unless a given env family "
+        "exposes its own way to set one (see LbfConfig.time_limit). Shapes every "
         "collected dataset, so it belongs in the config rather than a default.",
     )
     notes: str = Field(default="", description="Why this configuration is in the benchmark.")
@@ -116,6 +119,16 @@ class LbfConfig(EnvConfigBase):
         description="Field of view. None means full observability (jax-aht "
         "defaults fov to grid_size).",
     )
+    time_limit: int | None = Field(
+        default=None,
+        description="Episode-termination horizon, forwarded to Jumanji's own "
+        "LevelBasedForaging(time_limit=...) constructor kwarg (its own default "
+        "is 100). None preserves that default -- existing presets (lbf_12x12, "
+        "lbf_20x20) were tuned against it and should not set this "
+        "retroactively without treating it as a real behavior change, not a "
+        "doc fix. Distinct from rollout_length, which only sizes the PPO scan "
+        "window and never reaches the environment constructor.",
+    )
 
     @property
     def turn_based(self) -> bool:
@@ -155,6 +168,8 @@ class LbfConfig(EnvConfigBase):
         }
         if self.fov is not None:
             kwargs["fov"] = self.fov
+        if self.time_limit is not None:
+            kwargs["time_limit"] = self.time_limit
         return kwargs
 
 

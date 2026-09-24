@@ -21,8 +21,26 @@ Environment: OMIS's paper (Sec. 4, `papers/omis.pdf`) states LBF is "a mixed
 environment in a 9x9 grid world containing two players... along with five
 apples" -- no sight/view restriction is mentioned anywhere, so full
 observability. Horizon comes from their own code
-(`OMIS/pretraining/utils.py::horizon_per_ep_dict["lbf"] = 50`), not either of
-our existing LBF families' `rollout_length=128`.
+(`OMIS/pretraining/utils.py::horizon_per_ep_dict["lbf"] = 50`), set via
+`LbfConfig.time_limit` (forwarded straight to Jumanji's own
+`LevelBasedForaging(time_limit=...)`), NOT `rollout_length` -- the first
+version of this script set `rollout_length=50` believing that controlled
+episode length, which is wrong: `rollout_length` only sizes the PPO
+rollout-collection scan window per training update and never reaches the
+environment constructor at all (`configs/env.py`'s own `LBF_20X20` preset
+notes already said as much -- "time_limit is not a config knob here" -- but
+that referred to our wrapper never plumbing it through, not a real Jumanji
+limitation; `LevelBasedForaging.__init__` accepts `time_limit` directly,
+defaulting to 100). Left unfixed, every episode silently ran Jumanji's
+default 100 steps instead of 50, and because 100 is exactly 2x the
+`rollout_length=50` PPO scan window, every other rollout-collection window
+straddled zero episode completions while the other half completed a full
+100-step episode -- the alternating all-zero / all-100-length pattern seen
+in a real training log is that artifact, not a training failure. Fixed by
+adding `LbfConfig.time_limit` (new field, default `None` = Jumanji's
+unchanged default, so `lbf_12x12`/`lbf_20x20` are untouched) and setting it
+here explicitly. `rollout_length` is left at 50 too since it's a reasonable
+PPO scan size on its own, not because it does anything to episode length.
 
 Caveat, stated once rather than repeated: our LBF is Jumanji's implementation
 (via jax-aht), not the original `lb-foraging` gym package OMIS actually uses.
@@ -89,7 +107,8 @@ def build() -> TeammateGenerationJob:
         num_agents=2,
         different_levels=True,
         fov=None,  # full observability -- the paper mentions no sight restriction
-        rollout_length=50,  # OMIS's own horizon_per_ep_dict["lbf"]
+        rollout_length=50,  # PPO scan window size -- does NOT set episode length, see module docstring
+        time_limit=50,  # OMIS's own horizon_per_ep_dict["lbf"] -- this is what actually sets it
         tier="debug",  # one-off replication target, not part of the tiered benchmark matrix
         notes=(
             "Approximately replicates OMIS's (Jing et al., NeurIPS 2024) own LBF "
