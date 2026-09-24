@@ -1,0 +1,31 @@
+{
+  "job": {
+    "env": {
+      "env_name": "lbf",
+      "grid_size": 9,
+      "name": "lbf_9x9",
+      "notes": "Approximately replicates OMIS's (Jing et al., NeurIPS 2024) own LBF setup for a population-replication experiment: 9x9 grid, 2 agents, 5 food, full observability, horizon=50 (their own horizon_per_ep_dict['lbf']). Our LBF is Jumanji's implementation (via jax-aht), not the lb-foraging gym package OMIS actually uses -- no force_coop-style knob exists here to match the solo-vs-cooperative eating rule exactly, so this matches every configurable parameter, not necessarily the underlying game mechanics bit-for-bit. Not a registered preset (see scripts/gen_omis_lbf_mep_config.py); not part of the tiered benchmark matrix.",
+      "num_food": 5,
+      "rollout_length": 50,
+      "tier": "debug"
+    },
+    "generator": {
+      "generator": "mep",
+      "population_entropy_coef": 0.1,
+      "population_size": 20,
+      "ppo": {
+        "entropy_coef": 0.5,
+        "gae_lambda": 0.98,
+        "learning_rate": 0.005,
+        "max_grad_norm": 0.1,
+        "num_minibatches": 5,
+        "update_epochs": 8,
+        "value_coef": 0.1
+      },
+      "total_timesteps": 15000000.0
+    },
+    "job_type": "teammate_generation",
+    "label": "mep_lbf_9x9_omis_replication"
+  },
+  "schema_version": 1
+}
