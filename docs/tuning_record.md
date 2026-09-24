@@ -1653,3 +1653,47 @@ approaches uniform), `evaluate_pooled`'s new square-1:1 invariant (raises on
 a `br_egos`/teammate mismatch), and `teammate_roster`'s role filter, plus the
 full suite (283 tests). No live rollout has exercised this yet — that's the
 next thing to run, not a claim being made here.
+
+## Evaluation targets are now per teammate, from the crossplay matrix — every baseline, same mechanism
+
+Follow-on from the same investigation. Every baseline (BC, LIAM, MeLIBA, OMIS,
+TAO) conditioned on one dataset-wide return-to-go target
+(`dataset_target_return`'s single best per-episode return, identical for
+every teammate a policy was rolled against) — TAO's own reference computes
+something more specific, `OPPO_TARGET[i] = max over egos of that ego's mean
+return against teammate i`, a per-teammate value. That's exactly a
+column-max over a crossplay-style matrix, and the pooled crossplay matrix
+above already computes one for a different reason (dataset collection) —
+its ego axis is now the trained `ppo_br` population, so a teammate's column
+max there already *is* `OPPO_TARGET` for that teammate. Nothing new to
+compute.
+
+Resolved per direction from review: apply this uniformly to every baseline
+(no TAO-specific branch) rather than trading faithfulness against
+cross-baseline comparability. `offline.evaluate.resolve_target_returns` reads
+a per-teammate target off `pooled_matrix_path` when a dataset was collected
+in pooled mode, falling back to today's single `dataset_target_return` value
+(broadcast to every teammate) for legacy/single-population datasets with no
+matrix. `ReturnConditionedAgent.set_target_return` lets the eval loop change
+the conditioning target between teammates (previously baked in once at
+construction); `evaluate_agent_against`/`evaluate_incontext` call it right
+before each teammate's rollout, so BC/LIAM/MeLIBA/OMIS/TAO all go through the
+identical mechanism — TAO's `evaluate_incontext` path needed the exact same
+one-line addition as the parallel path, no special-casing.
+
+**Verified live** (not just unit tests): reran a small OMIS training job
+against `pooled_expert_lbf_12x12-6a931eee466c` (whose meta already carries
+`pooled_matrix_path`, from before this session's redefinition — an older,
+reused-policy-ego matrix, not yet the `ppo_br` one) and confirmed
+`training_summary.json`'s `eval.target_returns` now holds twenty *different*
+values, one per teammate (range ~2.29–3.07 in normalised units), where every
+prior run recorded one shared number. Full suite: 290 tests (283 + 7 new
+covering `crossplay_target_returns`/`resolve_target_returns`'s two branches
+and `set_target_return`).
+
+**Still stale**: this ran against the *old* matrix (reused-policy egos,
+~45%-competence-capped), since `ppo_br` for lbf_12x12 hasn't been trained yet
+(see the section above). The per-teammate targets are real and distinct, but
+their absolute values will shift once the matrix is recomputed with dedicated
+best-response egos — expected to rise, since `OPPO_TARGET` is a ceiling that
+mechanism is specifically meant to lift.

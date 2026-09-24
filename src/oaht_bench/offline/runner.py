@@ -258,10 +258,11 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
     :func:`_teammate_policies`.
     """
     import jax
+    import numpy as np
 
     from oaht_bench.envs import make_env
     from oaht_bench.envs.log_wrapper import LogWrapper
-    from oaht_bench.offline.evaluate import dataset_target_return, evaluate_agent_against
+    from oaht_bench.offline.evaluate import evaluate_agent_against, resolve_target_returns
 
     cfg = job.offline
     env = LogWrapper(make_env(job.env.env_name, job.env.env_kwargs()))
@@ -275,17 +276,25 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
 
     resolved = _resolve_dims(cfg, windows.obs_dim, action_dim)
     all_params = {"stage1": stage1_params, "stage2": stage2_params}
-    target = dataset_target_return(batch)
-    cond_target = target if windows.norm is None else windows.norm.apply_rtg(target)
+    # Per teammate, not one dataset-wide number: the crossplay matrix's column
+    # max when this dataset was collected in pooled mode (TAO's own OPPO_TARGET
+    # convention -- see resolve_target_returns), else today's single value.
+    target_returns = resolve_target_returns(
+        batch.meta,
+        heldout_teammates + train_teammates,
+        norm=windows.norm,
+        fallback_batch=batch,
+    )
 
     # Every offline baseline is a ReturnConditionedAgent: the rolling window / RTG
     # bookkeeping lives in the agent, so all of them evaluate through the shared
-    # vmapped run_episodes. The window transform and conditioning target are baked
-    # into the agent, so evaluate_agent needs nothing baseline-specific.
+    # vmapped run_episodes. The per-teammate conditioning target is set on the
+    # agent right before each teammate's rollout (evaluate_agent_against /
+    # evaluate_incontext); construction only needs a harmless initial value.
     agent = agent_classes()[resolved.network.architecture](
         resolved,
         context_length=cfg.context_length,
-        target_return=cond_target,
+        target_return=float(np.mean(list(target_returns.values()))),
         normalization=windows.norm,
     )
     agent.build_model()
@@ -296,7 +305,6 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
     # seed cannot give -- teammate-to-teammate variance already swamps the ~0.03
     # gaps between baselines, so seeds are what make an ordering trustworthy.
     ns = int(job.num_seeds)
-    import numpy as np
 
     # TAO (and OMIS later) adapt across episodes via an Opponent Context Window, so
     # they evaluate through the sequential in-context path; the within-episode
@@ -328,6 +336,7 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
                 ocw_size=job.offline.context_trajectories,
                 obs_dim=windows.obs_dim,
                 rng=jax.random.PRNGKey(rng_base + s),
+                target_returns=target_returns,
             )
             seed_pt.append(mean)
             seed_curves.append(curve)
@@ -382,7 +391,7 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
                 env,
                 teammates,
                 rng=jax.random.PRNGKey(rng_base + s),
-                target_return=cond_target,
+                target_returns=target_returns,
                 max_episode_steps=job.env.rollout_length,
                 num_episodes=job.offline.eval_episodes,
             )
@@ -415,7 +424,8 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
     # Held-out (test) is the primary metric; its rng_base is unchanged so existing
     # runs reproduce byte-for-byte.
     result = score(heldout_teammates, rng_base=job.seed + 1)
-    result["target_return"] = float(cond_target)
+    result["target_return"] = float(np.mean(list(target_returns.values())))
+    result["target_returns"] = dict(target_returns)
 
     for label, v in result["per_teammate"].items():
         logger.log_item(f"Eval/Return_teammate_{label}", v)

@@ -32,7 +32,9 @@ from tqdm import tqdm
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("config", help="an offline BC training job JSON (for its hyperparameters + dataset)")
+    ap.add_argument(
+        "config", help="an offline BC training job JSON (for its hyperparameters + dataset)"
+    )
     ap.add_argument("--steps", type=int, default=None, help="override stage2_steps")
     ap.add_argument("--episodes", type=int, default=20, help="eval episodes per teammate")
     args = ap.parse_args()
@@ -91,15 +93,27 @@ def main() -> None:
     rng = jax.random.PRNGKey(job.seed)
     b0, t0 = sample()
     params = net.init(
-        rng, b0["ego_rtg"], b0["ego_obs"], b0["ego_actions"], timesteps=b0["timesteps"], mask=b0["mask"], teammate_id=t0
+        rng,
+        b0["ego_rtg"],
+        b0["ego_obs"],
+        b0["ego_actions"],
+        timesteps=b0["timesteps"],
+        mask=b0["mask"],
+        teammate_id=t0,
     )
 
     def loss_fn(p, b, tid, key):
         logits = mask_logits(
             net.apply(
-                p, b["ego_rtg"], b["ego_obs"], b["ego_actions"],
-                timesteps=b["timesteps"], mask=b["mask"], teammate_id=tid,
-                train=True, rngs={"dropout": key},
+                p,
+                b["ego_rtg"],
+                b["ego_obs"],
+                b["ego_actions"],
+                timesteps=b["timesteps"],
+                mask=b["mask"],
+                teammate_id=tid,
+                train=True,
+                rngs={"dropout": key},
             ),
             b["ego_avail"],
         )
@@ -144,13 +158,14 @@ def main() -> None:
             num_teammates=N,
         )
         agent.build_model()
+        label = f"{e.generator}:{int(e.member)}:{e.role}"
         scores = evaluate_agent_against(
             agent,
             {"stage1": {}, "stage2": params},
             env,
-            [(f"{e.generator}:{int(e.member)}:{e.role}", e.params, e.policy_cls)],
+            [(label, e.params, e.policy_cls)],
             rng=jax.random.PRNGKey(job.seed + 7),
-            target_return=cond_target,
+            target_returns={label: cond_target},
             max_episode_steps=job.env.rollout_length,
             num_episodes=args.episodes,
         )
@@ -159,7 +174,9 @@ def main() -> None:
     print("\n===== Teammate-id ORACLE (train teammates, perfect identity) =====")
     for label, r in sorted(returns.items()):
         print(f"  {label:24s} {r:7.3f}")
-    print(f"  ---- mean {np.mean(list(returns.values())):.3f}  (unconditioned pooled BC train ~1.06)")
+    print(
+        f"  ---- mean {np.mean(list(returns.values())):.3f}  (unconditioned pooled BC train ~1.06)"
+    )
 
 
 if __name__ == "__main__":

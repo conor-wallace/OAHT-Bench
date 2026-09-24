@@ -79,6 +79,16 @@ class ReturnConditionedAgent(AgentPolicy):
             self._obs_std = jnp.asarray(normalization.obs_std, dtype=jnp.float32)
             self._rtg_scale = jnp.asarray(float(normalization.rtg_scale), dtype=jnp.float32)
 
+    def set_target_return(self, value: float) -> None:
+        """Change the conditioning target between rollouts (e.g. per teammate).
+
+        ``init_hstate`` reads ``self._target_return`` fresh every call, so
+        mutating it here and then calling ``init_hstate``/``get_action`` again
+        (the normal per-teammate evaluation loop) is enough -- no other state
+        depends on the value at construction time.
+        """
+        self._target_return = float(value)
+
     @abc.abstractmethod
     def build_model(self) -> None:
         """Construct the flax modules from ``self.config`` (with resolved dims)."""

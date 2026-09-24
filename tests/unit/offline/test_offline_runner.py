@@ -205,7 +205,10 @@ def test_runner_logs_accuracies_and_evaluation_returns(tmp_path, baseline):
 
 
 def test_evaluation_target_return_comes_from_the_dataset(tmp_path):
-    """The reference reads per-opponent targets from a config table; we have none.
+    """dataset_target_return is the fallback path (no pooled crossplay matrix):
+    resolve_target_returns prefers a per-teammate value read off the matrix
+    when one exists (offline/evaluate.py), mirroring the reference's own
+    per-opponent target table.
 
     Conditioning on the dataset's best episode return is the Decision
     Transformer convention -- ask for the best behaviour the data contains.

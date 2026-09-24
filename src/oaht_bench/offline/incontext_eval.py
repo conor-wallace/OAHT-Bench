@@ -222,6 +222,7 @@ def evaluate_incontext(
     ocw_size: int,
     obs_dim: int,
     rng,
+    target_returns: dict,
     ego_index: int = 0,
 ):
     """Sequential-episode, OCW-accumulating eval for an opponent-trajectory agent.
@@ -231,6 +232,12 @@ def evaluate_incontext(
     append the teammate's stream. Returns ``(per_teammate_mean, per_teammate_curve,
     per_teammate_ancillary_acc, ancillary_floor)`` -- the last two ``None`` unless
     ``agent`` has a decoder (TAO; see :func:`_ancillary_mate_action_acc`).
+
+    ``target_returns`` is ``{label: target}`` (see
+    :func:`~oaht_bench.offline.evaluate.resolve_target_returns`) -- set via
+    ``agent.set_target_return`` once per teammate, before its OCW resets and
+    episodes start; every episode against one teammate shares that teammate's
+    target, only the identity varies across the outer loop.
     """
     import jax
 
@@ -240,6 +247,7 @@ def evaluate_incontext(
     per_ancillary: dict[str, float] = {} if probe else None
     pooled_true = []
     for label, mate_params, mate_policy in teammates:
+        agent.set_target_return(target_returns[label])
         ocw = OpponentContextWindow(ocw_size, max_episode_steps, obs_dim)
         curve: list[float] = []
         ep_pred, ep_true = [], []

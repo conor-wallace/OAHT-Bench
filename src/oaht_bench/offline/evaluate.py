@@ -16,6 +16,22 @@ Results are reported **per teammate** as well as averaged. An average hides the
 failure mode this benchmark is about: a policy that plays well with the
 teammates resembling its training data and badly with the rest scores the same
 as one that is uniformly mediocre.
+
+**The conditioning target is per teammate, not one dataset-wide number.**
+TAO's own reference computes ``OPPO_TARGET[i] = max over egos of that ego's
+mean return against teammate i`` -- the best response's expected return
+against *that specific* teammate (``offline_stage_2/utils.py``), not a single
+value shared by every rollout. That is exactly a column-max over a
+crossplay-style matrix, and :mod:`oaht_bench.population.pooled_crossplay`
+already computes one for dataset collection with the ego axis being the
+trained ``ppo_br`` population -- so a teammate's column max there already
+*is* ``OPPO_TARGET`` for that teammate, with no separate computation needed.
+:func:`resolve_target_returns` reads it from there when a dataset was
+collected in pooled mode (``pooled_matrix_path`` in its meta), applied
+identically to every baseline -- not a TAO-specific branch. Datasets with no
+matrix (legacy / single-population collections) fall back to
+:func:`dataset_target_return`'s single dataset-wide value, broadcast to every
+teammate, which is exactly today's behaviour.
 """
 
 from __future__ import annotations
@@ -40,7 +56,14 @@ class EvalScores:
     #: teammate label -> standard error over episodes
     per_teammate_stderr: dict
     episodes_per_teammate: int
+    #: The mean of per_teammate_target_return's values -- kept as a single
+    #: number because every existing reader (describe(), runner.py's
+    #: result["target_return"]) expects one; the detail lives alongside it.
     target_return: float
+    #: teammate label -> the RTG target that teammate was actually conditioned
+    #: on. None only for callers that still pass a bare float (not expected
+    #: from this module's own functions, which always resolve per teammate).
+    per_teammate_target_return: dict | None = None
     #: teammate label -> online mate_action_acc, or None if the agent has no
     #: mate_action_logits (BC) -- see docs/tuning_record.md. Decoded from the
     #: SAME window get_action conditioned the policy on, at every step of the
@@ -97,15 +120,85 @@ class EvalScores:
 
 
 def dataset_target_return(batch, *, quantile: float = 1.0) -> float:
-    """Target return to condition on, taken from the data.
+    """One dataset-wide target return, taken from the data.
 
-    The reference sets this per opponent from a config table. We have no such
-    table, so it comes from the dataset the policy was trained on: the given
-    quantile of per-episode ego return. Conditioning on the maximum asks the
-    policy for the best behaviour the data contains, which is the usual
-    Decision Transformer convention.
+    The fallback used when there is no per-teammate table to read (no
+    ``pooled_matrix_path`` in the dataset's meta -- see
+    :func:`resolve_target_returns`, which prefers a per-teammate value when
+    one is available): the given quantile of per-episode ego return across
+    the *whole* dataset. Conditioning on the maximum asks the policy for the
+    best behaviour the data contains, which is the usual Decision Transformer
+    convention.
     """
     return float(np.quantile(batch.episode_returns()[:, batch.ego_index], quantile))
+
+
+def crossplay_target_returns(pooled_matrix_path: str, teammates) -> dict:
+    """Per-teammate best-response return, read off the pooled crossplay matrix.
+
+    TAO's reference computes ``OPPO_TARGET[i] = max over egos of that ego's
+    mean return against teammate i`` from the training data
+    (``offline_stage_2/utils.py``). That is exactly a column-max over a
+    crossplay-style matrix, and :mod:`oaht_bench.population.pooled_crossplay`
+    already produces one for dataset collection -- since its ego axis is the
+    trained ``ppo_br`` population (one dedicated best response per teammate),
+    a teammate's column max there already *is* ``OPPO_TARGET`` for that
+    teammate. Works the same against an older, pre-``ppo_br`` matrix too
+    (whatever egos happen to be in the matrix), just with a lower ceiling --
+    the lookup itself doesn't care which matrix vintage it reads.
+
+    ``teammates`` is ``[(label, params, policy_cls)]`` (only ``label`` is
+    used); labels are the ``"generator:member:role"`` strings
+    :func:`~oaht_bench.offline.runner._teammate_policies` already emits.
+    Raises if a teammate's identity isn't a column in the matrix -- a stale
+    or mismatched matrix should fail loudly, not silently skip a teammate.
+    """
+    from oaht_bench.dataset.construction.epsilon_sampler import load_pooled
+
+    pooled = load_pooled(pooled_matrix_path)
+    index = {
+        (str(pooled.generator[i]), int(pooled.member[i]), str(pooled.role[i])): i
+        for i in range(pooled.size)
+    }
+    out = {}
+    for label, _, _ in teammates:
+        generator, member, role = label.split(":")
+        key = (generator, int(member), role)
+        if key not in index:
+            raise ValueError(
+                f"teammate {label!r} is not a column in the crossplay matrix at "
+                f"{pooled_matrix_path!r} -- stale or mismatched matrix for this "
+                f"dataset's teammates."
+            )
+        out[label] = float(pooled.matrix[:, index[key]].max())
+    return out
+
+
+def resolve_target_returns(meta: dict, teammates, *, norm=None, fallback_batch=None) -> dict:
+    """The RTG target every baseline conditions on, per teammate.
+
+    Prefers :func:`crossplay_target_returns` when the dataset was collected in
+    pooled mode (``meta["pooled_matrix_path"]`` set); otherwise falls back to
+    :func:`dataset_target_return`'s single dataset-wide value, broadcast to
+    every teammate label (``fallback_batch`` is then required -- raises
+    otherwise, rather than silently returning a wrong number). ``norm``
+    applies the same return-to-go rescaling training used
+    (``norm.apply_rtg``), when given.
+    """
+    matrix_path = meta.get("pooled_matrix_path")
+    if matrix_path:
+        raw = crossplay_target_returns(matrix_path, teammates)
+    else:
+        if fallback_batch is None:
+            raise ValueError(
+                "meta has no pooled_matrix_path, so a dataset-wide fallback is "
+                "needed, but no fallback_batch was given to compute it from."
+            )
+        value = dataset_target_return(fallback_batch)
+        raw = {label: value for label, _, _ in teammates}
+    if norm is None:
+        return raw
+    return {label: float(norm.apply_rtg(value)) for label, value in raw.items()}
 
 
 def evaluate_agent(
@@ -116,7 +209,7 @@ def evaluate_agent(
     members,
     *,
     rng,
-    target_return: float,
+    target_returns: dict,
     max_episode_steps: int,
     num_episodes: int = 20,
     ego_index: int = 0,
@@ -144,7 +237,7 @@ def evaluate_agent(
         env,
         teammates,
         rng=rng,
-        target_return=target_return,
+        target_returns=target_returns,
         max_episode_steps=max_episode_steps,
         num_episodes=num_episodes,
         ego_index=ego_index,
@@ -289,7 +382,7 @@ def evaluate_agent_against(
     teammates,
     *,
     rng,
-    target_return: float,
+    target_returns: dict,
     max_episode_steps: int,
     num_episodes: int = 20,
     ego_index: int = 0,
@@ -303,6 +396,12 @@ def evaluate_agent_against(
     from *different* populations (each with its own ``policy_cls``), which is what
     a held-out set spanning generators requires (§8). The ego takes seat
     ``agent_0``; each teammate plays ``num_episodes`` episodes in the other seat.
+
+    ``target_returns`` is ``{label: target}`` (see :func:`resolve_target_returns`)
+    -- every teammate can get a different conditioning target, not one value
+    shared by the whole rollout. Set via ``agent.set_target_return`` right
+    before that teammate's episodes, so it's already in effect by the time
+    ``init_hstate`` is called for them.
 
     ``greedy`` makes only the *ego* act by argmax (the teammate keeps sampling),
     which does not risk the symmetric-argmax deadlock invariant #2 guards against
@@ -324,6 +423,7 @@ def evaluate_agent_against(
     mate_acc = {} if probe else None
     pooled_true = []
     for label, mate_params, policy_cls in teammates:
+        agent.set_target_return(target_returns[label])
         rng, ep_rng = jax.random.split(rng)
         if probe:
             returns, pred, true, valid = _rollout_with_mate_probe(
@@ -370,7 +470,8 @@ def evaluate_agent_against(
         per_teammate=per_teammate,
         per_teammate_stderr=stderr,
         episodes_per_teammate=num_episodes,
-        target_return=float(target_return),
+        target_return=float(np.mean([target_returns[label] for label, *_ in teammates])),
+        per_teammate_target_return=dict(target_returns),
         per_teammate_mate_acc=mate_acc,
         mate_action_floor=mate_floor,
     )

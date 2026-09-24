@@ -66,6 +66,14 @@ def load_trained_agent(
     checkpoints trained on the same dataset (the common case: one dataset, one
     baseline per architecture) share ONE load instead of re-reading and
     re-windowing the same vault once per checkpoint.
+
+    The agent's conditioning target is per-teammate now (see
+    :func:`~oaht_bench.offline.evaluate.resolve_target_returns`), so it can't be
+    resolved here -- this only knows the dataset, not which teammates the
+    caller is about to score it against. The construction-time
+    ``target_return`` is a placeholder (the dataset-wide fallback value),
+    overwritten via ``agent.set_target_return`` before every real rollout in
+    :func:`_score`.
     """
     from oaht_bench.configs import load_job
     from oaht_bench.dataset.dataset import Dataset
@@ -91,27 +99,32 @@ def load_trained_agent(
     all_params = {"stage1": raw["stage1"], "stage2": raw["stage2"]}
 
     resolved = _resolve_dims(cfg, dataset.obs_dim, dataset.action_dim)
-    target = dataset_target_return(dataset.batch)
-    cond_target = target if dataset.windows.norm is None else dataset.windows.norm.apply_rtg(target)
+    placeholder = dataset_target_return(dataset.batch)
+    if dataset.windows.norm is not None:
+        placeholder = dataset.windows.norm.apply_rtg(placeholder)
     agent = agent_classes()[resolved.network.architecture](
         resolved,
         context_length=cfg.context_length,
-        target_return=cond_target,
+        target_return=placeholder,
         normalization=dataset.windows.norm,
     )
     agent.build_model()
-    return job, dataset, agent, all_params, cond_target
+    return job, dataset, agent, all_params
 
 
-def _unseen_roster(dataset_path: str, env) -> list:
-    """The "unseen" teammate list: the ``held_out`` roster ``dataset_path``'s
-    own collection split recorded.
+def _unseen_roster(dataset_path: str, env) -> tuple[list, dict]:
+    """The "unseen" teammate list, and its dataset's meta, from the ``held_out``
+    roster ``dataset_path``'s own collection split recorded.
 
     Reads only the vault's metadata (:class:`~oaht_bench.dataset.vault.VaultReader`),
     not the full episode data -- the roster is all this needs, and a pooled
     dataset's vault can be large. ``_teammate_policies`` reads ``batch.meta``
     only, so a bare object exposing that attribute stands in for the
-    :class:`~oaht_bench.dataset.schema.EpisodeBatch` it normally takes.
+    :class:`~oaht_bench.dataset.schema.EpisodeBatch` it normally takes. The
+    meta is returned too -- it's what :func:`~oaht_bench.offline.evaluate.
+    resolve_target_returns` needs to find this dataset's own
+    ``pooled_matrix_path``, and re-reading it separately would mean a second
+    (cheap, but pointless) vault-metadata read.
     """
     import types
 
@@ -120,11 +133,21 @@ def _unseen_roster(dataset_path: str, env) -> list:
 
     reader = VaultReader(f"{dataset_path}/dataset.vlt")
     batch = types.SimpleNamespace(meta=reader.meta)
-    return _teammate_policies(batch, env, which="held_out")
+    return _teammate_policies(batch, env, which="held_out"), reader.meta
 
 
 def _score(
-    agent, all_params, env, teammates, *, job, ns, cond_target, rng_base, incontext, ocw_size=None
+    agent,
+    all_params,
+    env,
+    teammates,
+    *,
+    job,
+    ns,
+    target_returns,
+    rng_base,
+    incontext,
+    ocw_size=None,
 ):
     """Across-seed mean return (+ mate_action_acc where available), against one
     fixed teammate set -- the same aggregation ``offline.runner._evaluate``'s
@@ -155,6 +178,7 @@ def _score(
                 ocw_size=ocw_size,
                 obs_dim=agent.obs_dim,
                 rng=jax.random.PRNGKey(rng_base + s),
+                target_returns=target_returns,
             )
             seed_pt.append(mean)
             seed_means.append(float(np.mean(list(mean.values()))))
@@ -188,7 +212,7 @@ def _score(
             env,
             teammates,
             rng=jax.random.PRNGKey(rng_base + s),
-            target_return=cond_target,
+            target_returns=target_returns,
             max_episode_steps=job.env.rollout_length,
             num_episodes=job.num_episodes,
         )
@@ -207,6 +231,27 @@ def _score(
     return out
 
 
+def _resolve_unseen_targets(unseen_meta, unseen_pool, *, norm, dataset_path, dataset_cache):
+    """:func:`~oaht_bench.offline.evaluate.resolve_target_returns` for the unseen
+    pool, loading a full ``Dataset`` (through the shared cache) only if
+    ``unseen_meta`` has no ``pooled_matrix_path`` and the dataset-wide fallback
+    is actually needed -- the common case (a pooled dataset) never pays for it.
+    """
+    from oaht_bench.offline.evaluate import resolve_target_returns
+
+    if unseen_meta.get("pooled_matrix_path"):
+        return resolve_target_returns(unseen_meta, unseen_pool, norm=norm)
+
+    from oaht_bench.dataset.dataset import Dataset
+
+    key = (dataset_path, "unseen_fallback")
+    if key not in dataset_cache:
+        dataset_cache[key] = Dataset(dataset_path, context_length=1, stride=1, normalize=False)
+    return resolve_target_returns(
+        unseen_meta, unseen_pool, norm=norm, fallback_batch=dataset_cache[key].batch
+    )
+
+
 def run(job) -> Path:
     """Evaluate every ``checkpoint_paths`` entry against its unseen (and, if
     available, seen) teammate set and write one JSON report."""
@@ -215,6 +260,7 @@ def run(job) -> Path:
     from oaht_bench.configs import save_job
     from oaht_bench.envs import make_env
     from oaht_bench.envs.log_wrapper import LogWrapper
+    from oaht_bench.offline.evaluate import resolve_target_returns
     from oaht_bench.offline.runner import _teammate_policies
 
     run_dir = Path(job.run_dir())
@@ -222,7 +268,7 @@ def run(job) -> Path:
     save_job(job, run_dir / "job.json", minimal=False)
 
     env = LogWrapper(make_env(job.env.env_name, job.env.env_kwargs()))
-    unseen_pool = _unseen_roster(job.dataset_path, env)
+    unseen_pool, unseen_meta = _unseen_roster(job.dataset_path, env)
     if not unseen_pool:
         raise ValueError(
             f"dataset_path={job.dataset_path!r} has no held_out self/conf "
@@ -239,19 +285,32 @@ def run(job) -> Path:
         run_path = Path(ckpt)
         bar.set_description(f"{run_path.name}: loading")
         log.info("evaluating %s", run_path)
-        ckpt_job, dataset, agent, all_params, cond_target = load_trained_agent(
+        ckpt_job, dataset, agent, all_params = load_trained_agent(
             run_path, dataset_cache=dataset_cache
         )
         seen_pool = _teammate_policies(dataset.batch, env, which="train")
         ns = int(ckpt_job.num_seeds)
         incontext = ckpt_job.offline.network.architecture == "tao"
+        # Conditioning target per teammate (TAO's own OPPO_TARGET convention,
+        # applied to every baseline -- see resolve_target_returns), always
+        # normalised by *this checkpoint's* own training scale regardless of
+        # which dataset a teammate's target was read from.
+        seen_targets = resolve_target_returns(
+            dataset.batch.meta, seen_pool, norm=dataset.windows.norm, fallback_batch=dataset.batch
+        )
+        unseen_targets = _resolve_unseen_targets(
+            unseen_meta,
+            unseen_pool,
+            norm=dataset.windows.norm,
+            dataset_path=job.dataset_path,
+            dataset_cache=dataset_cache,
+        )
         score_kwargs = dict(
             agent=agent,
             all_params=all_params,
             env=env,
             job=job,
             ns=ns,
-            cond_target=cond_target,
             rng_base=job.seed,
             incontext=incontext,
             ocw_size=ckpt_job.offline.context_trajectories if incontext else None,
@@ -266,12 +325,12 @@ def run(job) -> Path:
             "num_seeds": ns,
             "seen_pool_size": len(seen_pool),
             "unseen_pool_size": len(unseen_pool),
-            "unseen": _score(teammates=unseen_pool, **score_kwargs),
+            "unseen": _score(teammates=unseen_pool, target_returns=unseen_targets, **score_kwargs),
         }
         bar.update(1)
         if seen_pool:
             bar.set_description(f"{run_path.name}: seen")
-            entry["seen"] = _score(teammates=seen_pool, **score_kwargs)
+            entry["seen"] = _score(teammates=seen_pool, target_returns=seen_targets, **score_kwargs)
             entry["generalization_gap"] = float(
                 entry["seen"]["mean_return"] - entry["unseen"]["mean_return"]
             )

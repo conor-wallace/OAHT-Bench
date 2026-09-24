@@ -33,7 +33,7 @@ import jax
 
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper
-from oaht_bench.offline.evaluate import evaluate_agent_against
+from oaht_bench.offline.evaluate import evaluate_agent_against, resolve_target_returns
 from oaht_bench.offline.evaluation import load_trained_agent
 from oaht_bench.offline.runner import _teammate_policies
 
@@ -56,9 +56,7 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0, help="rng seed for the rollout")
     args = ap.parse_args()
 
-    job, dataset, agent, all_params, cond_target = load_trained_agent(
-        args.run_dir, dataset_path=args.dataset
-    )
+    job, dataset, agent, all_params = load_trained_agent(args.run_dir, dataset_path=args.dataset)
     if job.offline.network.architecture == "tao":
         raise SystemExit(
             "TAO's mate-action probe needs the teammate's own observation stream and lives "
@@ -75,13 +73,16 @@ def main() -> None:
         if not teammates:
             print(f"  {split}: no teammates in this split")
             continue
+        target_returns = resolve_target_returns(
+            dataset.batch.meta, teammates, norm=dataset.windows.norm, fallback_batch=dataset.batch
+        )
         scores = evaluate_agent_against(
             agent,
             params,
             env,
             teammates,
             rng=jax.random.PRNGKey(args.seed),
-            target_return=cond_target,
+            target_returns=target_returns,
             max_episode_steps=job.env.rollout_length,
             num_episodes=args.episodes,
         )
