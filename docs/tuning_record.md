@@ -2010,3 +2010,71 @@ size and the full budget could still surface something the small-scale
 local diagnostic can't (e.g. whether the bonus is well-behaved with 20
 members rather than 3, since the self-reinforcing dynamic above plausibly
 gets *stronger*, not weaker, with more members).
+
+### Sixth: `population_size=20` confirmed locally too; formula verified against the reference's actual source
+
+The user pushed back hard on `coef=0.001` -- reasonably, since it's 10x below
+the paper's own value and their own real GPU run (`population_size=3`) still
+wasn't improving. That run, however, still had the reference's PPO block
+(`entropy_coef=0.5` etc, from `mep.json`), not FCP's -- the same
+still-uncontrolled-variable mistake as before, now happening a third time.
+Fixed the root cause of the repeated mix-up rather than just re-explaining
+it: `gen_omis_lbf_mep_ppo_matched_diagnostic.py` was hardcoding
+`population_entropy_coef=0.010`, stale since the coefficient moved to
+`0.001` -- it now reads the value from `gen_omis_lbf_mep_config.py`'s
+`build()` instead of duplicating it, so the two configs cannot silently
+diverge on this value again (`configs/lbf_9x9/teammate_gen/
+mep_ppo_matched_diagnostic.json`, hash `925daa1e0979`: FCP's PPO block,
+`population_size=20`, `population_entropy_coef=0.001`).
+
+Ran that config locally (`population_size=20`, matching the real target
+scale, not just the earlier `population_size=3` diagnostic) in parallel with
+a `coef=0` control at the same `population_size=20`. Both climb steadily and
+track each other (`coef=0`: 0.04 -> 0.30 by update 213; `coef=0.001`: 0.04
+-> 0.24 by update 240) -- the fix holds at `population_size=20`, not just the
+smaller diagnostic scale.
+
+Separately, the user found a real Overcooked hyperparameter dump from COLE
+(a paper reproducing MEP as a baseline) including `ENT_VERSION=3`, not the
+`ent_version=1` default in `ppo2.learn()`'s own signature. This was worth
+checking directly against source rather than assuming: fetched
+`baselines/baselines/ppo2/runner.py` from the reference repo.
+`Runner.__init__`'s own default is `ent_version=3` (`ent_version=1` is only
+`learn()`'s default; the `Runner` class doesn't implement anything besides
+version 3 -- any other value hits `print(...); exit()`). Its formula:
+
+```python
+action_probs_pop_np_new = np.mean(action_probs_np_new, axis=0)  # mean_k pi_k(.|s)
+sampled_action_prob_pop_np_new = np.take(action_probs_pop_np_new, actions)
+neg_logp_pop_new = -np.log(sampled_action_prob_pop_np_new)      # -log(mean_k pi_k(a|s))
+rewards_np = rewards_np + self.ent_pool_coef * neg_logp_pop_new
+```
+
+`coef * (-log(mean_k pi_k(a|s)))`, computed by directly averaging
+probability vectors -- mathematically identical to
+`population_entropy_bonus`'s `-coef * (logsumexp(log_probs, axis=0) -
+log(N))`, the log-sum-exp route to the same quantity. **Confirmed: our
+implementation matches the reference's actually-used formula exactly**, not
+an assumption from the paper's abstract equations. `ent_version` was not the
+missing piece.
+
+The COLE hyperparameter dump the user found (`RUN_TYPE: 'pbt'`,
+`EX_NAME: 'pbt_simple'`, `ENTROPY_POOL: 0.0`) is very likely their
+reproduction of the paper's separate **PBT baseline** (no diversity term --
+one of several baselines the MEP paper compares against: SP/PBT/TrajeDi/
+FCP/MEP), not MEP itself; `ENTROPY_POOL=0.0` would disable the mechanism
+entirely. The README command found earlier (`ENTROPY_POOL=0.01
+ENT_VERSION=3`) remains the trustworthy MEP-specific reference value.
+
+With the formula independently verified against source and
+`population_size=20` now confirmed learning locally too, the full picture:
+no code bug at any point in this investigation (scaffolding, gradient flow,
+formula all check out against the reference), and the actual working
+coefficient for LBF's reward scale differs from the paper's Overcooked-
+calibrated one by roughly the same ratio as the two environments' reward
+magnitudes differ (LBF's normalized-to-1 sparse reward vs Overcooked's
+dense per-event rewards easily summing to 50-100+ per episode).
+
+**Still open**: the real GPU run at `population_size=20` and the full
+`total_timesteps=1.5e7` budget (not this diagnostic's smaller budget) is the
+final confirmation, left to the user.
