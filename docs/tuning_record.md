@@ -1838,3 +1838,60 @@ is ~40 PPO updates against a `total_timesteps=1.5e7` budget (~4,700 updates
 per member) — under 1% of the run. Too early to read as non-learning on its
 own; worth re-checking once a run at the corrected `time_limit=50` has
 progressed substantially further, separately from the horizon bug above.
+
+### Third bug: `population_entropy_coef=0.1` (the reference repo's raw default) makes MEP unable to learn LBF at all
+
+To settle whether the flat-returns result above was a hyperparameter issue or
+an implementation issue, the user re-ran MEP with its PPO block matched
+exactly to the already-tuned FCP config (`entropy_coef=0.01, learning_rate=
+0.001, max_grad_norm=0.5, update_epochs=15` — none of the reference repo's
+own PPO values), same env, same seed, same population size and budget, so
+`generator` was the only real difference. Result:
+`Train/returned_episode_returns` for FCP climbed from ~0.04 at step 0 to
+~0.47–0.49 (task ceiling) by ~2000 updates; MEP stayed at ~0.01–0.04 the
+whole ~4650-update run and, if anything, drifted down. The population
+cross-play matrix confirmed it at the population level: FCP's off-diagonal
+entries are ~0.3–0.5, MEP's are ~0.003–0.04 — an order of magnitude apart at
+identical PPO hyperparameters, generator held as the only difference.
+
+**Root cause: not the log-sum-exp reduction (verified correct, matches the
+paper, and is unit-tested), but the scale of `population_entropy_coef`.**
+LBF's reward is normalized so a whole *episode's* maximum possible task
+return is 1.0 (0.5 shared per agent, `normalize_reward=True` in Jumanji's
+`LevelBasedForaging`). The population-entropy bonus (`population_entropy_
+bonus()` in `teammate_gen/mep.py`) is added to *every single step's* reward
+regardless of task performance. At `coef=0.1` (the reference repo's raw
+`ENTROPY_POOL` default, which this script had explicitly set to match the
+repo rather than the paper) and a near-uniform 6-action population
+(representative of early training), the bonus computes to `~=0.179` per
+step, `~=8.96` summed over a 50-step episode — **~18x the entire episode's
+max achievable task reward.** Since PPO's advantage is computed from
+`reward + entropy_bonus` (`_env_step` in `teammate_gen/mep.py`), the
+gradient signal at that scale is almost entirely "look different from the
+population's mean policy," not "forage well" — consistent with both the
+flat/non-learning return curve and the near-zero self-play/cross-play
+separation seen earlier (members degrading to similarly low-competence,
+mutually-indistinguishable-in-task-terms policies chasing the same novelty
+signal, rather than diverging into genuinely diverse *competent* ones).
+
+At `MepConfig`'s own default (`0.010`, the MEP/OMIS paper's own Table-1
+middle-of-sweep value, which this script had overridden away from), the same
+calculation gives `~=1.79x` the max episode reward — a real nudge, not a
+signal that erases the task. `ENTROPY_POOL=0.1` was tuned against
+Overcooked's much denser, per-event, unnormalized reward (`SOUP_PICKUP_
+REWARD=1.0` etc. firing many times per 400-step episode) and was never
+validated against a reward this sparse — same "does not port" category as
+`MINIBATCHES`/`sim_threads` (see above), just far more consequential when
+mis-set: total learning failure rather than weaker diversity.
+
+**Fix**: `scripts/gen_omis_lbf_mep_config.py` no longer overrides
+`population_entropy_coef` away from `MepConfig`'s own default — the config
+now trains at `0.010`. `configs/lbf_9x9/teammate_gen/mep.json` regenerated
+(hash `8588a96bd16a`). A local smoke run (population_size=3,
+total_timesteps=5e4) still trains/saves/scores cleanly at the new value.
+
+**Not yet verified**: the theoretical ~1.79x ratio at `0.010` is a plausible
+nudge, not a proof that MEP will now learn LBF well — the real test is a
+full GPU run at the corrected value, not run here. If it still fails to
+learn, the scale analysis above at least rules out "the reference's raw
+default was fine" as an explanation and narrows where to look next.

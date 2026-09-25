@@ -52,7 +52,37 @@ mechanics bit-for-bit.
 MEP hyperparameters are the reference implementation's own defaults
 (`ruizhaogit/maximum_entropy_population_based_training`,
 `human_aware_rl/pbt/pbt_model_pool_entropy_parallel.py`), mapped onto our
-`PpoHyperparams`/`MepConfig` fields where an analogous field exists.
+`PpoHyperparams`/`MepConfig` fields where an analogous field exists --
+**except `population_entropy_coef`, see below.**
+
+`population_entropy_coef` is deliberately NOT the reference's raw
+`ENTROPY_POOL=0.1` -- kept at `MepConfig`'s own default (`0.010`, the MEP/
+OMIS paper's own Table-1 middle-of-sweep value) instead. A controlled
+side-by-side run (MEP vs FCP, identical PPO hyperparameters, differing only
+in generator) showed MEP never learning the task at all while FCP converged
+to ~0.49/0.5 (near the task ceiling) within ~2000 updates. The mechanism
+itself checks out against the paper (log-sum-exp reduction, not mean-of-log,
+per `population_entropy_bonus`'s own docstring and unit test) -- the bug was
+scale, not logic. LBF's reward is normalized so a whole *episode's* maximum
+possible task return is 1.0 (0.5 shared per agent); the entropy bonus is
+added every single *step* regardless of task performance. At `coef=0.1` and
+a near-uniform 6-action population (representative of early training), the
+bonus is `-0.1 * log(1/6) ~= 0.179` per step, `~=8.96` summed over a
+50-step episode -- ~18x the entire episode's max achievable task reward.
+PPO's advantage is computed from `reward + entropy_bonus`
+(`teammate_gen/mep.py`'s `_env_step`), so at that scale the gradient signal
+is almost entirely "look different from the population mean," not "forage
+well," which is consistent with both the flat/non-learning return curve and
+the near-zero self-play/cross-play separation observed (members degrading to
+similarly low-competence, mutually-indistinguishable-in-task-terms policies
+rather than genuinely diverse *good* ones). At the paper's own `0.010`, the
+same calculation gives `~=1.79x` the max episode reward -- a real nudge, not
+a signal that erases the task. `ENTROPY_POOL=0.1` was tuned against
+Overcooked's much denser, unnormalized, per-event reward (`SOUP_PICKUP_REWARD
+=1.0` etc., many events per 400-step episode) and was never validated against
+a reward this sparse; it belongs on the same "does not port" list as
+`MINIBATCHES`/`sim_threads` below, just far more consequential when
+mis-set (total learning failure, not just weaker diversity).
 Deliberately NOT imported: the reference's PBT resample/mutate/select-the-
 worst-out loop (`RESAMPLE_PROB`, `MUTATION_FACTORS`, `HYPERPARAMS_TO_MUTATE`,
 `ITER_PER_SELECTION`, `NUM_SELECTION_GAMES`, `NUM_PBT_ITER`,
@@ -140,7 +170,11 @@ def build() -> TeammateGenerationJob:
     generator = MepConfig(
         population_size=20,  # OMIS's own population count -- see module docstring
         total_timesteps=1.5e7,  # reference TOTAL_STEPS_PER_AGENT
-        population_entropy_coef=0.1,  # reference ENTROPY_POOL
+        # population_entropy_coef: NOT the reference's ENTROPY_POOL=0.1 -- see
+        # module docstring. Left at MepConfig's own default (0.010, the paper's
+        # own Table-1 value): at 0.1 the bonus is ~18x LBF's whole per-episode
+        # max task reward, which a controlled MEP-vs-FCP run showed prevents
+        # any task learning at all, not just weaker diversity.
         network=MlpNetwork(),  # hidden_dim=64 already matches SIZE_HIDDEN_LAYERS
         ppo=ppo,
     )
