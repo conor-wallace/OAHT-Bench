@@ -1943,3 +1943,70 @@ construction next; if it learns comparably to FCP, the reference repo's raw
 PPO defaults (not just `population_entropy_coef`) simply don't transfer to
 LBF, same category as `num_minibatches`. Real GPU run left to the user, as
 with all real training in this repo.
+
+### Fifth: the controlled test still didn't learn -- resolved locally, not a code bug, `population_entropy_coef=0.001`
+
+The GPU run of `mep_ppo_matched_diagnostic.json` (FCP's exact PPO block +
+`population_entropy_coef=0.010` together, for the first time) came back
+still completely flat from the very first update, prompting a direct
+question: is the loss actually propagating at all? That's answerable without
+a GPU, so it was run down locally (CPU, small population/budget, same seed,
+same FCP PPO block throughout) rather than guessed at:
+
+| variant | 1000-update `Train/returned_episode_returns` |
+|---|---|
+| FCP baseline | 0.04 -> 0.44, converging toward the ~0.5 ceiling |
+| MEP, `population_entropy_coef=0` | 0.04 -> 0.42, **numerically identical to the FCP baseline** (same seed, bonus term is the only structural difference and it's zero) |
+| MEP, `population_entropy_coef=0.01` | flat, 0.02-0.05, for the entire 1000-update run |
+| MEP, `population_entropy_coef=0.001` | 0.04 -> ~0.41, tracking FCP's curve shape; crossplay matrix 0.18-0.38 (competent, non-degenerate) |
+
+`coef=0` exactly reproducing FCP's trajectory is a strong, direct answer to
+"is the loss propagating": MEP's `TrainState` threading, `apply_gradients`,
+and the `all_gather`-based population-axis vmap add zero measurable
+difference from FCP's training dynamics when the bonus term is zero. The
+scaffolding is not the bug.
+
+Re-audited `population_entropy_bonus` and its call site (`_env_step`) for a
+shape/sign/reduction bug specifically because the empirical threshold (works
+at `0.001`, fails at `0.01`) fell an order of magnitude below what the
+earlier `t=0`-snapshot estimate predicted (`~1.79x` max episode reward at
+`0.01`, i.e. "a real nudge"). Traced `member_log_probs`' shape through the
+`vmap(_member_log_prob)(gathered_params)` call (`(N, 1, num_actors)`,
+`logsumexp(..., axis=0)` correctly reducing over the population axis, not
+some other one), confirmed the reduction matches the paper (log-sum-exp, not
+mean-of-log, per the existing unit test), and confirmed the `all_gather`'d
+params only ever feed a plain scalar into `traj_batch.reward` -- never
+differentiated against, no cross-lane gradient leak. No code bug found.
+
+The likely explanation is dynamical rather than a bug: the bonus is
+self-reinforcing. Whichever population member is *slowest* to commit to a
+good action keeps earning more bonus for staying different from an
+increasingly confident population, so unlike an ordinary reward signal, the
+diversity pressure does not shrink as the population converges. A magnitude
+estimate taken at initialization (a snapshot of a near-uniform policy)
+systematically undersells this term's real, sustained effect once training
+is underway -- which is why the `t=0` estimate for `0.010` (`~1.79x`, "a real
+nudge") was wrong in practice, and why the actually-working value
+(`0.001`) was found by direct empirical trial rather than derived.
+
+**Resolution**: `scripts/gen_omis_lbf_mep_config.py` now sets
+`population_entropy_coef=0.001` explicitly (not `MepConfig`'s own `0.010`
+default, which is left alone as a legitimate citation of the paper's value
+for environments this hasn't been empirically contradicted on --
+Hanabi/Overcooked-v2/lbf_12x12's wired-but-untrained MEP configs). Config
+regenerated (hash `2b66dd3c3835`). Local smoke test still trains/saves/
+scores cleanly at the new value. **Lesson for tuning coefficients of this
+shape** (a reward-augmenting term, not a loss-regularization coefficient
+like PPO's own `entropy_coef`): a closed-form magnitude estimate at
+initialization is not sufficient validation on its own -- a short real
+training curve is the only way that would have caught this the first time,
+and should be the standard going forward before trusting a ported
+coefficient's scale, regardless of how principled the estimate looks.
+
+**Still open**: the full GPU run (`population_size=20`,
+`total_timesteps=1.5e7`) at the corrected value hasn't been run yet -- the
+local result is at `population_size=3` and a much smaller budget. Population
+size and the full budget could still surface something the small-scale
+local diagnostic can't (e.g. whether the bonus is well-behaved with 20
+members rather than 3, since the self-reinforcing dynamic above plausibly
+gets *stronger*, not weaker, with more members).

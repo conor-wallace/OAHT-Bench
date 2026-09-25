@@ -56,33 +56,52 @@ MEP hyperparameters are the reference implementation's own defaults
 **except `population_entropy_coef`, see below.**
 
 `population_entropy_coef` is deliberately NOT the reference's raw
-`ENTROPY_POOL=0.1` -- kept at `MepConfig`'s own default (`0.010`, the MEP/
-OMIS paper's own Table-1 middle-of-sweep value) instead. A controlled
-side-by-side run (MEP vs FCP, identical PPO hyperparameters, differing only
-in generator) showed MEP never learning the task at all while FCP converged
-to ~0.49/0.5 (near the task ceiling) within ~2000 updates. The mechanism
-itself checks out against the paper (log-sum-exp reduction, not mean-of-log,
-per `population_entropy_bonus`'s own docstring and unit test) -- the bug was
-scale, not logic. LBF's reward is normalized so a whole *episode's* maximum
-possible task return is 1.0 (0.5 shared per agent); the entropy bonus is
-added every single *step* regardless of task performance. At `coef=0.1` and
-a near-uniform 6-action population (representative of early training), the
-bonus is `-0.1 * log(1/6) ~= 0.179` per step, `~=8.96` summed over a
-50-step episode -- ~18x the entire episode's max achievable task reward.
-PPO's advantage is computed from `reward + entropy_bonus`
-(`teammate_gen/mep.py`'s `_env_step`), so at that scale the gradient signal
-is almost entirely "look different from the population mean," not "forage
-well," which is consistent with both the flat/non-learning return curve and
-the near-zero self-play/cross-play separation observed (members degrading to
-similarly low-competence, mutually-indistinguishable-in-task-terms policies
-rather than genuinely diverse *good* ones). At the paper's own `0.010`, the
-same calculation gives `~=1.79x` the max episode reward -- a real nudge, not
-a signal that erases the task. `ENTROPY_POOL=0.1` was tuned against
-Overcooked's much denser, unnormalized, per-event reward (`SOUP_PICKUP_REWARD
-=1.0` etc., many events per 400-step episode) and was never validated against
-a reward this sparse; it belongs on the same "does not port" list as
-`MINIBATCHES`/`sim_threads` below, just far more consequential when
-mis-set (total learning failure, not just weaker diversity).
+`ENTROPY_POOL=0.1`, and (after a second finding below) not `MepConfig`'s own
+`0.010` default either -- `0.001`, an empirically validated value, specific
+to this config. A controlled side-by-side run (MEP vs FCP, identical PPO
+hyperparameters, differing only in generator) showed MEP never learning the
+task at all while FCP converged to ~0.49/0.5 (near the task ceiling) within
+~2000 updates, at `coef=0.1`. The mechanism itself checks out against the
+paper (log-sum-exp reduction, not mean-of-log, per
+`population_entropy_bonus`'s own docstring and unit test) -- the bug looked
+like scale, not logic. LBF's reward is normalized so a whole *episode's*
+maximum possible task return is 1.0 (0.5 shared per agent); the entropy
+bonus is added every single *step* regardless of task performance. At
+`coef=0.1` and a near-uniform 6-action population (representative of early
+training), the bonus is `-0.1 * log(1/6) ~= 0.179` per step, `~=8.96`
+summed over a 50-step episode -- ~18x the entire episode's max achievable
+task reward. At the paper's own `0.010`, the same snapshot calculation gives
+`~=1.79x` the max episode reward, which read as a plausible nudge.
+
+**That `0.010` estimate turned out to be unreliable.** A real run at
+`0.010` (PPO block still the reference's own, not FCP's) showed no
+improvement either. That wasn't yet a controlled test -- two variables
+differed from FCP's known-working config at once. A local CPU diagnostic
+held everything fixed to FCP's exact PPO block, varying only
+`population_entropy_coef` (full run-by-run table in
+`docs/tuning_record.md`): `coef=0` reproduces FCP's learning curve exactly
+(numerically identical trajectories -- confirms MEP's training scaffolding,
+gradient flow, and `TrainState` threading are all correct, ruling out a
+"loss isn't propagating" bug); `coef=0.01` stays completely flat for a full
+1000-update run; `coef=0.001` learns, tracking FCP's curve shape closely. A
+shape/reduction/gradient-isolation audit of `population_entropy_bonus` and
+its call site (`_env_step`) found no code bug. The `t=0`-snapshot magnitude
+estimates above undersell the bonus's real, sustained in-training effect:
+the mechanism is self-reinforcing (whichever member is last to commit to a
+good action keeps earning more bonus for staying different from an
+increasingly confident population), so it does not shrink toward
+convergence the way an ordinary reward term does -- a closed-form estimate
+at initialization is not a reliable predictor of its real magnitude;
+`0.001` was found by direct empirical trial, not derived. `MepConfig`'s own
+`0.010` default is left alone (a legitimate citation of the paper's value
+for environments this hasn't been contradicted on); this script's override
+is specific to LBF's reward scale. `ENTROPY_POOL=0.1` was tuned against
+Overcooked's much denser, unnormalized, per-event reward
+(`SOUP_PICKUP_REWARD=1.0` etc., many events per 400-step episode) and was
+never validated against a reward this sparse; it belongs on the same "does
+not port" list as `MINIBATCHES`/`sim_threads` below, just far more
+consequential when mis-set (total learning failure, not just weaker
+diversity).
 Deliberately NOT imported: the reference's PBT resample/mutate/select-the-
 worst-out loop (`RESAMPLE_PROB`, `MUTATION_FACTORS`, `HYPERPARAMS_TO_MUTATE`,
 `ITER_PER_SELECTION`, `NUM_SELECTION_GAMES`, `NUM_PBT_ITER`,
@@ -170,11 +189,12 @@ def build() -> TeammateGenerationJob:
     generator = MepConfig(
         population_size=20,  # OMIS's own population count -- see module docstring
         total_timesteps=1.5e7,  # reference TOTAL_STEPS_PER_AGENT
-        # population_entropy_coef: NOT the reference's ENTROPY_POOL=0.1 -- see
-        # module docstring. Left at MepConfig's own default (0.010, the paper's
-        # own Table-1 value): at 0.1 the bonus is ~18x LBF's whole per-episode
-        # max task reward, which a controlled MEP-vs-FCP run showed prevents
-        # any task learning at all, not just weaker diversity.
+        # population_entropy_coef: neither the reference's ENTROPY_POOL=0.1 nor
+        # MepConfig's own 0.010 default -- see module docstring. Both looked
+        # plausible from a t=0 magnitude estimate and both empirically blocked
+        # all task learning in a controlled local run; 0.001 was the value
+        # found, by direct trial, to actually let the population learn.
+        population_entropy_coef=0.001,
         network=MlpNetwork(),  # hidden_dim=64 already matches SIZE_HIDDEN_LAYERS
         ppo=ppo,
     )
