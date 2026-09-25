@@ -1895,3 +1895,51 @@ nudge, not a proof that MEP will now learn LBF well — the real test is a
 full GPU run at the corrected value, not run here. If it still fails to
 learn, the scale analysis above at least rules out "the reference's raw
 default was fine" as an explanation and narrows where to look next.
+
+### Fourth: the `population_entropy_coef=0.010` run still didn't learn -- but it wasn't the controlled test either
+
+`mep_lbf_9x9_omis_replication-8588a96bd16a` (`population_entropy_coef=0.010`,
+per the fix above) still showed no improvement over ~4650 updates
+(`percent_eaten` flat at ~15-18%, `returned_episode_returns` flat at
+~0.04-0.06). But this run's PPO block was still the reference repo's own
+values (`entropy_coef=0.5, learning_rate=5e-3, max_grad_norm=0.1,
+update_epochs=8`) — not matched to FCP's tuned block the way the earlier
+diagnostic run was. So the two runs so far each held a *different* variable
+fixed:
+
+| run | population_entropy_coef | PPO block | result |
+|---|---|---|---|
+| first diagnostic | 0.1 (reference) | matched to FCP | no learning |
+| this run | 0.010 (paper's Table-1) | reference's own | no learning |
+
+Neither isolates "does MEP's diversity mechanism work at all, holding every
+PPO hyperparameter equal to a generator (FCP) that already solves this
+task." `entropy_coef=0.5` alone (50x FCP's `0.01`) is a plausible
+independent explanation — a completely standard PPO regularizer, unrelated
+to anything MEP-specific, and large enough that its loss term
+(`0.5 * entropy`, ~0.5*log(6)~=0.9 for a near-uniform 6-action policy) is
+comparable in magnitude to the actor loss itself, discouraging the policy
+from ever committing to a confident forage-and-load strategy.
+
+Reviewed `mep.py`'s training loop line-by-line against `marl/ippo.py` (which
+both FCP and MEP build on): the rollout/GAE/PPO-update body is unchanged:
+the only addition is the entropy bonus folded additively into
+`traj_batch.reward`, and the `jax.lax.all_gather` used to compute it is
+read-only — it feeds a plain scalar into the reward, never touches another
+lane's gradients or parameters. No cross-lane parameter mixing found that
+would explain a population collapsing to a single degenerate policy.
+
+**Built the actually-controlled diagnostic**:
+`scripts/gen_omis_lbf_mep_ppo_matched_diagnostic.py` ->
+`configs/lbf_9x9/teammate_gen/mep_ppo_matched_diagnostic.json` (hash
+`e5e974343aab`) — MEP with PPO set to FCP's exact tuned block
+(`entropy_coef=0.01, learning_rate=0.001, max_grad_norm=0.5,
+update_epochs=15`, read from `fcp_lbf_9x9_omis_replication-05a1f067d0e7/
+job.json`) and `population_entropy_coef=0.010` held together in the same
+run for the first time. Smoke-tested locally (trains/saves/scores cleanly).
+If this still fails to learn, that's real evidence of an actual
+implementation bug worth digging into `mep.py`'s per-lane `train_state`
+construction next; if it learns comparably to FCP, the reference repo's raw
+PPO defaults (not just `population_entropy_coef`) simply don't transfer to
+LBF, same category as `num_minibatches`. Real GPU run left to the user, as
+with all real training in this repo.
