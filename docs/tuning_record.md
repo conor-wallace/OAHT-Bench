@@ -2078,3 +2078,96 @@ dense per-event rewards easily summing to 50-100+ per episode).
 **Still open**: the real GPU run at `population_size=20` and the full
 `total_timesteps=1.5e7` budget (not this diagnostic's smaller budget) is the
 final confirmation, left to the user.
+
+## CoMeDi on LBF-9x9, and why it's the wrong environment to test adversarial-vs-non-adversarial generation
+
+Ran the same lbf_9x9 pipeline (identical PPO block, `population_size=20`,
+same `ppo_br`/weighted-dataset-collection scheme) with CoMeDi in place of
+MEP, to test whether an adversarial (cross-play-minimizing) generator
+produces teammates that are harder to model offline than MEP's non-
+adversarial population-entropy bonus. All five baselines scored lower under
+CoMeDi than MEP when normalized by each population's own crossplay *peak*
+(2-7 normalized points, consistent direction across all five). That looked
+like a clean result and almost went into the paper as one.
+
+**It doesn't survive a proper check.** CoMeDi's population is individually
+somewhat less competent overall (self-play mean 0.408 vs MEP's 0.453,
+matched-best-response-ego mean 0.449 vs 0.473, roughly a 5% gap) while its
+single best cell is nearly identical to MEP's (0.492 vs 0.491) --
+normalizing by the population-wide peak corrects for the latter but not the
+former. Re-normalizing each baseline's return *per teammate*, as a
+percentage of that specific teammate's own matched-ego score rather than
+the population-wide peak, makes most of the gap disappear: BC/LIAM/MeLIBA
+are 1-3 points lower under CoMeDi, but OMIS and TAO are actually *higher*.
+Not the clean, consistent-direction signal the peak-normalized comparison
+suggested -- credit to the user for asking "are you sure this isn't just
+because CoMeDi's population is slightly worse on average" before this went
+into the paper.
+
+Separately: CoMeDi's crossplay on LBF-9x9 did not collapse to a sparse
+matrix the way BRDiv/L-BRDiv's does on Hanabi (compare the CoMeDi-LBF-9x9
+heatmap's visibly bright off-diagonal against Hanabi's near-pure-diagonal
+one already in the paper) -- separation 0.108, barely different from MEP's
+0.141 (and lower, despite CoMeDi's objective explicitly penalizing cross-
+play). LBF-9x9 may simply be too small/easy a task for an adversarial
+generator's cost to show up as a downstream difficulty difference: every
+population, adversarial or not, ends up "diverse enough" there. See the
+MEP-on-Hanabi section below for the converse, better-motivated test.
+
+Both LBF-9x9-population configs (`configs/lbf_9x9/teammate_gen/mep.json`,
+`comedi.json` at `population_size=20`) and their full pipelines
+(`ppo_br`/weighted dataset/evaluation) are real, run, and in the paper --
+just not as evidence for the adversarial-generation hypothesis they were
+built to test.
+
+## MEP on Hanabi at K=20: does MEP's diversity mechanism underperform where the adversarial generators already succeed?
+
+The converse test to the CoMeDi-on-LBF-9x9 one above: BRDiv/L-BRDiv's
+Hanabi crossplay is *already* near-pure-diagonal (Figure in the paper,
+existing pooled 20x20 heatmap) -- Hanabi is a task where adversarial
+generation demonstrably produces sharp diversity. If MEP's own non-
+adversarial population-entropy bonus can't produce comparably sharp
+diversity there, that is real evidence its mechanism (not just its
+tuning) underperforms on harder coordination tasks, unconfounded by
+whether LBF-9x9 was ever a fair test.
+
+`scripts/gen_hanabi_mep_k20_config.py` builds a `population_size=20` MEP
+config (`configs/hanabi/teammate_gen/mep_k20.json`) matching the existing,
+already-validated shared Hanabi PPO backbone (`num_envs=1024,
+learning_rate=5e-4, max_grad_norm=0.5, update_epochs=4,
+total_timesteps=3e9`) used by BRDiv/CoMeDi/L-BRDiv/FCP -- `population_size`
+(5 -> 20) is the only change from the existing wired-but-untuned
+`mep.json`. `population_entropy_coef` was NOT left at `MepConfig`'s own
+default (`0.010`) -- same class of mistake as LBF, and Hanabi's reward (a
+small integer score, ceiling 25, BRDiv's own validated self-play at 11.55
+as the realistic competence anchor) is yet another different scale from
+both Overcooked and LBF.
+
+Ran the same local, small-scale (`num_envs=16, population_size=3,
+total_timesteps=2e6`) entropy-bonus-on-vs-off methodology that found LBF's
+real value, before trusting any number for a `3e9`-timestep real run:
+
+| variant | tail-avg return | separation |
+|---|---:|---:|
+| FCP baseline | 3.44 | -- |
+| MEP, `coef=0` | 3.47 | -- |
+| MEP, `coef=0.002` | 3.47 | 0.21 |
+| MEP, `coef=0.005` | 2.50 (-28%) | 0.90 |
+
+`coef=0.005` gives more separation but at a real competence cost.
+`coef=0.002` was chosen deliberately over it: this experiment is testing
+whether MEP's mechanism produces weak diversity on Hanabi, and a
+competence-costing coefficient would confound that question exactly the
+way the CoMeDi-vs-MEP LBF-9x9 comparison above was confounded by a
+population that was individually less competent overall. A result at a
+competence-preserving coefficient is unconfounded either way: if
+separation stays weak at the real `K=20`/`3e9`-step scale too, that is
+evidence MEP's mechanism underperforms here, not evidence it merely traded
+competence differently than the adversarial generators do.
+
+**Still open**: this is validated at `population_size=3` and a `2e6`-step
+budget; the real `population_size=20`, `total_timesteps=3e9` run (a much
+larger commitment than any LBF-9x9 run) is left to the user. The N-scaling
+question raised earlier for LBF (does the self-reinforcing bonus dynamic
+get stronger with more members) applies here too and is untested at real
+scale.
