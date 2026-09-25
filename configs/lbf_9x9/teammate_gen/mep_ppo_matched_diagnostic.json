@@ -12,6 +12,7 @@
     },
     "generator": {
       "generator": "mep",
+      "population_entropy_coef": 0.001,
       "population_size": 20,
       "ppo": {
         "learning_rate": 0.001,

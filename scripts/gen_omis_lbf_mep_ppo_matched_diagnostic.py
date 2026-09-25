@@ -76,7 +76,13 @@ def build() -> TeammateGenerationJob:
     generator = MepConfig(
         population_size=replication_job.generator.population_size,
         total_timesteps=replication_job.generator.total_timesteps,
-        population_entropy_coef=0.010,  # the now-corrected default, held fixed
+        # Read from the replication job rather than hardcoded here -- this
+        # value has already drifted twice (0.1 -> 0.010 -> 0.001) as the
+        # investigation progressed, and a hardcoded copy here silently went
+        # stale each time, producing confusing runs that mixed the FIXED
+        # coefficient with the UNFIXED PPO block or vice versa. Single
+        # source of truth: gen_omis_lbf_mep_config.py's build().
+        population_entropy_coef=replication_job.generator.population_entropy_coef,
         network=MlpNetwork(),
         ppo=ppo,
     )
