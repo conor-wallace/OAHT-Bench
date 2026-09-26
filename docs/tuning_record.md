@@ -2171,3 +2171,56 @@ larger commitment than any LBF-9x9 run) is left to the user. The N-scaling
 question raised earlier for LBF (does the self-reinforcing bonus dynamic
 get stronger with more members) applies here too and is untested at real
 scale.
+
+## MEP gradient accumulation, for GPUs too small for `num_envs=1024`
+
+The Hanabi shared backbone's `num_envs=1024` was validated as part of the
+BRDiv-Hanabi convergence work (~22.9k updates, batch 262,144 transitions per
+update) -- not independently chosen for memory reasons. A 6 GB card can't fit
+that; dropping `num_envs` alone (holding `total_timesteps` fixed) changes two
+things at once, not one: it shrinks the per-update batch *and* inflates
+`num_updates` (and therefore the accumulated-metrics-array memory cost, and
+the shape of the LR cosine anneal, which is keyed off `num_updates`) --
+already documented above for the LBF-9x9 memory analysis.
+
+Added `MepConfig.gradient_accumulation_steps` (default `1`, no behavior
+change): `> 1` wraps `mep.py`'s optimizer in `optax.MultiSteps`, accumulating
+gradients over that many *fresh*, single-pass micro-rollouts (each still
+collected at `num_envs`) before applying one real parameter update -- so the
+effective batch size is `gradient_accumulation_steps x num_envs`, matching
+what a real `num_envs` that large would give, while peak memory only ever
+holds one micro-rollout's worth of data. Trades wall-clock time for memory
+(same total env-steps per real update, collected sequentially instead of in
+parallel) and does not preserve `update_epochs`-style reuse of the same
+batch across multiple passes -- each accumulated micro-rollout is used once,
+the design tradeoff chosen explicitly over the extra sequential cost (or
+host-offloading complexity) of preserving that reuse too.
+
+Correctness depends on `MultiSteps` freezing params for the whole
+accumulation window (confirmed from its source: `inner_opt_state`, which
+carries the wrapped optimizer's own step counter, only commits on the real
+`emit=True` call, so every intermediate accumulation call recomputes from
+the same not-yet-advanced state and gets discarded) -- every rollout and
+every PPO minibatch/epoch pass inside one window sees the identical policy
+snapshot, so the on-policy ratio `_loss_fn` computes stays valid throughout.
+This also means the LR schedule's `count` argument advances once per *real*
+update, not once per raw minibatch call -- `make_lr_schedule` gained an
+`accumulation_steps` parameter so its `// steps_per_update` division (which
+recovers "how many rollouts have completed" when every raw step is a real
+update) isn't applied a second time when it doesn't need to be. Verified in
+isolation with a synthetic optimizer before touching the real training loop:
+params changed only every `every_k` raw calls, with LR values matching
+`schedule_fn(0), schedule_fn(1), ...` in step with real updates, not raw
+calls.
+
+**Smoke-tested, not yet validated at real scale.** A tiny `lbf_9x9` MEP run
+(`population_size=2`, `num_envs=8`, `total_timesteps=1e5`) at
+`gradient_accumulation_steps=4` completed cleanly, and comparing checkpoint
+snapshots confirmed real parameter movement (all 12 weight/bias tensors
+moved by a substantial, non-zero amount between the first and last
+checkpoint -- not frozen). `Population/SelfPlay`/`CrossPlay`/`Separation`
+came out comparable in scale to an identical run at
+`gradient_accumulation_steps=1`. This confirms the mechanism runs correctly
+end-to-end; it does **not** confirm that accumulation actually stabilizes
+training relative to a true `num_envs=1024` run the way it's meant to --
+that needs the real Hanabi GPU experiment, which this was built for.

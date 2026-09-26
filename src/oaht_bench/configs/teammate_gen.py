@@ -251,9 +251,15 @@ class RpgConfig(GeneratorBase):
     ``ppo`` supplies the *base* agent's PPO hyperparameters; the manipulator has
     its own learning rate and entropy, since it optimizes the diversity objective
     rather than task return.
+
+    ``actor_type`` follows FCP/MEP's per-env choices (``"mlp"`` on LBF/MPE,
+    ``"rnn"`` on Hanabi, ``"cnn_rnn"`` on Overcooked-v2) -- base and manipulator
+    share one network and never condition on population index, so never need
+    the ``*_conditional_critic`` variants CoMeDi/BRDiv/L-BRDiv use.
     """
 
     generator: Literal["rpg"] = "rpg"
+    actor_type: ActorType = "mlp"
     total_timesteps: float = Field(default=1e7, gt=0)
     n_lookahead: int = Field(
         default=1,
@@ -320,6 +326,20 @@ class MepConfig(GeneratorBase):
         "`ppo.entropy_coef`, which regularizes each member's own policy entropy -- "
         "these are two different terms and both apply. Untuned; starts at the "
         "paper's own middle-of-sweep value (their Table 1).",
+    )
+    gradient_accumulation_steps: int = Field(
+        default=1,
+        ge=1,
+        description="Accumulate this many fresh, single-pass rollouts (via "
+        "optax.MultiSteps) before applying a real optimizer update, so `num_envs` "
+        "can be dropped for GPU memory while the *effective* batch size --"
+        "`gradient_accumulation_steps x num_envs` -- and gradient variance stay "
+        "what a larger `num_envs` would have given. 1 (default) disables "
+        "accumulation and reproduces the previous behavior exactly. Trades "
+        "wall-clock time for memory: total env-steps per real update is "
+        "unchanged, just collected sequentially instead of in parallel. Does "
+        "not preserve `update_epochs`-style reuse of the same data across "
+        "multiple passes -- each accumulated micro-rollout is used once.",
     )
 
 

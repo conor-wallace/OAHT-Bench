@@ -117,10 +117,30 @@ def population_entropy_bonus(member_log_probs: jnp.ndarray, coef: float) -> jnp.
     return -coef * pop_log_prob
 
 
-def make_mep_train(runtime, env, logger, population_entropy_coef, progress_callback=None):
+def make_mep_train(
+    runtime,
+    env,
+    logger,
+    population_entropy_coef,
+    progress_callback=None,
+    gradient_accumulation_steps=1,
+):
     """Build the MEP training function. Must be ``jax.vmap``'d with
     ``axis_name="population"`` over ``population_size`` -- the population-
     entropy bonus reads that axis via ``jax.lax.all_gather``.
+
+    ``gradient_accumulation_steps > 1`` wraps the optimizer in
+    ``optax.MultiSteps``: every ``_env_step``/rollout collection below still
+    runs at ``config.num_envs``, but the optimizer only actually updates
+    params once every ``gradient_accumulation_steps`` rollouts, having
+    averaged their gradients. Params stay frozen for the whole accumulation
+    window (``MultiSteps`` returns a zero update on intermediate calls), so
+    every rollout and every PPO minibatch/epoch pass inside that window sees
+    the exact same policy snapshot -- the on-policy ratio in ``_loss_fn``
+    stays valid throughout, and nothing else in this function needs to know
+    accumulation is happening. See
+    ``docs/tuning_record.md``'s MEP-on-Hanabi section for why (GPU memory) and
+    ``marl/lr_schedule.py`` for how the LR schedule stays correctly paced.
     """
     config = runtime
 
@@ -132,8 +152,18 @@ def make_mep_train(runtime, env, logger, population_entropy_coef, progress_callb
 
         tx = optax.chain(
             optax.clip_by_global_norm(config.ppo.max_grad_norm),
-            optax.adam(learning_rate=make_lr_schedule(config.ppo, config.num_updates), eps=1e-5),
+            optax.adam(
+                learning_rate=make_lr_schedule(
+                    config.ppo, config.num_updates, accumulation_steps=gradient_accumulation_steps
+                ),
+                eps=1e-5,
+            ),
         )
+        if gradient_accumulation_steps > 1:
+            every_k = (
+                gradient_accumulation_steps * config.ppo.update_epochs * config.ppo.num_minibatches
+            )
+            tx = optax.MultiSteps(tx, every_k_schedule=every_k)
         train_state = TrainState.create(apply_fn=policy.network.apply, params=init_params, tx=tx)
 
         rng, _rng = jax.random.split(rng)
@@ -454,6 +484,7 @@ def train_mep_members(
     runtime: PpoRuntime,
     population_entropy_coef: float,
     wandb_logger: RunLogger,
+    gradient_accumulation_steps: int = 1,
 ) -> TrainOutput:
     """Single seed of training an MEP population. The population axis is
     *named* (``axis_name="population"``) so the entropy bonus's
@@ -463,7 +494,11 @@ def train_mep_members(
     train_jit = jax.jit(
         jax.vmap(
             make_mep_train(
-                runtime, env, logger=wandb_logger, population_entropy_coef=population_entropy_coef
+                runtime,
+                env,
+                logger=wandb_logger,
+                population_entropy_coef=population_entropy_coef,
+                gradient_accumulation_steps=gradient_accumulation_steps,
             ),
             axis_name="population",
         )
@@ -508,6 +543,7 @@ def run_mep(job: TeammateGenerationJob, wandb_logger: RunLogger) -> MepPopulatio
                     runtime=runtime,
                     population_entropy_coef=gen.population_entropy_coef,
                     wandb_logger=wandb_logger,
+                    gradient_accumulation_steps=gen.gradient_accumulation_steps,
                 )
             )
         )
