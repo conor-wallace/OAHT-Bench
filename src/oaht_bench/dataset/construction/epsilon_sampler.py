@@ -99,6 +99,25 @@ class PooledMatrix:
     def size(self) -> int:
         return int(self.matrix.shape[0])
 
+    @property
+    def ceiling(self) -> float:
+        """The matrix's own single peak cell -- the best achieved coordination
+        return anywhere in this pooled population. Used to make ``weighted``'s
+        ``temperature`` a fraction of this experiment's own ceiling rather than
+        an absolute return, so the same numeric ``temperature`` means the same
+        thing regardless of the environment's raw reward scale (a temperature
+        tuned in LBF's ~0.5 scale would otherwise collapse to a near-deterministic
+        argmax if reused unchanged on Overcooked's ~200 scale, or vice versa).
+        This is a single global scalar, not :func:`~oaht_bench.population.pooled_crossplay.normalise_per_teammate`'s
+        per-column min-max -- that would additionally reshape each column to
+        span exactly [0,1] regardless of its true spread, so a teammate whose
+        egos are all nearly tied would get the same softmax sharpness as one
+        with a huge genuine competence gap. Dividing by one global constant
+        preserves every relative relationship in the matrix; it only changes
+        what a given ``temperature`` number means.
+        """
+        return float(self.matrix.max())
+
     def teammate_pool(self, roles: tuple[str, ...] = DEFAULT_TEAMMATE_ROLES) -> list[int]:
         """Roster indices eligible to sit in the teammate seat, by role."""
         return [j for j in range(self.size) if str(self.role[j]) in roles]
@@ -244,16 +263,28 @@ def plan_weighted_seatings(
     allow_self_pairing: bool = True,
     allowed: Sequence[int] | None = None,
 ) -> list[Seating]:
-    """Draw the ego per episode from a softmax over the matrix's raw returns.
+    """Draw the ego per episode from a softmax over the matrix's own
+    ceiling-normalised returns.
 
     Unlike :func:`plan_seatings`'s discrete bands (one deterministic argmin pick
     per band), every episode for a teammate is an independent draw from
-    ``softmax(matrix[egos, j] / temperature)`` -- raw returns, not the
-    ``[0,1]``-normalised ``quality`` (softmax needs the actual scale the
-    temperature acts on). ``temperature -> 0`` concentrates on the argmax
-    (recovering ``expert``'s pick); ``temperature -> inf`` approaches a uniform
-    draw. Teammate coverage is still exact and equal, via the same
-    :func:`_cycle` every other variant uses -- only the ego draw is stochastic.
+    ``softmax((matrix[egos, j] / pooled.ceiling) / temperature)``. This is
+    ``matrix``'s raw returns divided by this experiment's own single peak cell
+    (:attr:`PooledMatrix.ceiling`) -- not the ``[0,1]``-normalised per-teammate
+    ``quality`` (that would additionally reshape every column to span exactly
+    ``[0,1]`` regardless of its true spread; dividing by one global scalar
+    preserves every relative relationship in the matrix and only changes what
+    ``temperature`` means). The point of the ceiling division: ``temperature``
+    is now a fraction of this experiment's own best achieved return, so the
+    same numeric value means the same thing across environments with very
+    different raw reward scales (e.g. LBF's ~0.5 vs. Overcooked's ~200) --
+    reusing a ``temperature`` tuned on raw returns across such a scale change
+    would otherwise silently collapse to a near-deterministic argmax or
+    approach uniform, depending on which direction the scale moved.
+    ``temperature -> 0`` concentrates on the argmax (recovering ``expert``'s
+    pick); ``temperature -> inf`` approaches a uniform draw. Teammate coverage
+    is still exact and equal, via the same :func:`_cycle` every other variant
+    uses -- only the ego draw is stochastic.
 
     ``teammate_roles``/``allow_self_pairing``/``allowed`` match
     :func:`plan_seatings` exactly.
@@ -269,6 +300,7 @@ def plan_weighted_seatings(
             f"{' within the train split' if allowed_set is not None else ''}."
         )
     ego_pool = np.array(sorted(allowed_set) if allowed_set is not None else range(pooled.size))
+    ceiling = pooled.ceiling
 
     plan: list[Seating] = []
     for j in _cycle(teammates, num_episodes, rng):
@@ -276,7 +308,7 @@ def plan_weighted_seatings(
         if not allow_self_pairing:
             egos = egos[egos != j]
         returns = pooled.matrix[egos, j]
-        logits = returns / temperature
+        logits = (returns / ceiling) / temperature
         probs = np.exp(logits - logits.max())
         probs /= probs.sum()
         ego = int(rng.choice(egos, p=probs))

@@ -154,8 +154,8 @@ class DatasetCollectionJob(JobBase):
         "not D4RL's 'medium-replay', which stops at medium performance. The ε "
         "variants ('expert', 'mixed', 'br_vs_worst') are discrete target bands over "
         "the pooled ego-response-quality spectrum; 'weighted' draws the ego per "
-        "episode from a softmax over the matrix's raw returns (`temperature`) "
-        "instead of a fixed band. All need pooled mode."
+        "episode from a softmax over the matrix's own ceiling-normalized returns "
+        "(`temperature`) instead of a fixed band. All need pooled mode."
     )
     pooled_matrix_path: str | None = Field(
         default=None,
@@ -175,10 +175,16 @@ class DatasetCollectionJob(JobBase):
         default=0.2,
         gt=0,
         description="'weighted' only: softmax temperature over the crossplay "
-        "matrix's raw returns for the per-episode ego draw. Low = concentrates near "
-        "each teammate's own dedicated best response (approaches 'expert'); high = "
-        "approaches a uniform draw over every teammate's best response. Ignored by "
-        "every other variant.",
+        "matrix's own returns, normalized by that matrix's single peak cell "
+        "(PooledMatrix.ceiling) before dividing by temperature -- so this is a "
+        "fraction of this experiment's own best achieved return, not an absolute "
+        "return, and the same numeric value means the same thing across "
+        "environments with different reward scales (a temperature tuned in one "
+        "environment's raw units would otherwise need re-deriving for another's, "
+        "e.g. LBF's ~0.5 return scale vs. Overcooked's ~200). Low = concentrates "
+        "near each teammate's own dedicated best response (approaches 'expert'); "
+        "high = approaches a uniform draw over every teammate's best response. "
+        "Ignored by every other variant.",
     )
     allow_self_pairing: bool = Field(
         default=True,

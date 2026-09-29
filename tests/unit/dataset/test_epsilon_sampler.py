@@ -215,6 +215,28 @@ def test_weighted_respects_allow_self_pairing():
             assert s.ego == 1
 
 
+def test_weighted_temperature_is_portable_across_reward_scales():
+    # The motivating property: the softmax divides by the matrix's own
+    # ceiling before temperature, so the same numeric temperature produces
+    # the same sampling distribution regardless of the environment's raw
+    # reward scale (e.g. LBF's ~0.5 vs. Overcooked's ~200) -- scaling every
+    # cell by a constant must leave the plan unchanged.
+    small_matrix = np.array([[5.0, 1.0, 2.0], [1.0, 5.0, 2.0], [2.0, 2.0, 5.0]])
+    large_matrix = small_matrix * 400.0  # same relative structure, ~2000-scale
+    g, m, r = _uniform_roles(3)
+    pooled_small = _pooled(small_matrix, g, m, r)
+    pooled_large = _pooled(large_matrix, g, m, r)
+
+    plan_small = plan_weighted_seatings(
+        pooled_small, 500, temperature=0.2, rng=np.random.default_rng(5)
+    )
+    plan_large = plan_weighted_seatings(
+        pooled_large, 500, temperature=0.2, rng=np.random.default_rng(5)
+    )
+
+    assert [(s.ego, s.teammate) for s in plan_small] == [(s.ego, s.teammate) for s in plan_large]
+
+
 def test_load_pooled_round_trip(tmp_path):
     from oaht_bench.population.pooled_crossplay import RosterEntry, save_pooled
 
