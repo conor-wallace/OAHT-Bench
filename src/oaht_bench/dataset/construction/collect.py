@@ -136,7 +136,33 @@ def _tree_freeze(frozen, keep, new):
 #: one compiled executable. Same rationale (and the same recompile-per-call bug it
 #: avoids) as ``run_episodes._ROLLOUT_CACHE``. Key objects are pinned so ids can't be
 #: reused while cached.
+#:
+#: Never evicts on its own -- see :func:`clear_rollout_cache`.
 _BATCH_ROLLOUT_CACHE: dict = {}
+
+
+def clear_rollout_cache() -> None:
+    """Free every compiled rollout cached here, and JAX's own per-shape
+    compilation cache with it.
+
+    ``_BATCH_ROLLOUT_CACHE`` is keyed by policy identity, not by batch shape, so
+    it stays small (bounded by distinct generator/architecture combinations) --
+    but every entry is a ``@jax.jit`` closure, and JAX's *own* internal cache
+    for that closure grows by one compiled executable per distinct input shape
+    it's ever seen. A pooled `weighted`-variant collection can have a few
+    hundred distinct ``(ego, teammate)`` pairings sharing a handful of these
+    closures, each pairing's own leftover, non-``batch_size``-sized final
+    chunk triggering one more compile (the docstring on
+    :func:`collect_episodes_batched` already notes this: "a smaller final
+    chunk recompiles once") -- and none of those compiled executables are ever
+    freed for the life of the process. On a memory-constrained GPU and a long
+    enough run (many pairings), that accumulation outlives any bound on the
+    Python-level cache here. Call this periodically during a large collection
+    to trade some recompilation time for bounded memory -- not after every
+    pairing, which would defeat the point of caching at all.
+    """
+    _BATCH_ROLLOUT_CACHE.clear()
+    jax.clear_caches()
 
 
 def collect_episodes_batched(

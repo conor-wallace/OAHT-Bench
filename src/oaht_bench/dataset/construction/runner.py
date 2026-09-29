@@ -21,7 +21,7 @@ from tqdm import tqdm
 from oaht_bench.common.save_load_utils import load_train_run
 from oaht_bench.configs import load_job, save_job
 from oaht_bench.configs.job import DatasetCollectionJob
-from oaht_bench.dataset.construction.collect import collect_episodes_batched
+from oaht_bench.dataset.construction.collect import clear_rollout_cache, collect_episodes_batched
 from oaht_bench.dataset.construction.epsilon_sampler import (
     EPSILON_TARGETS,
     load_pooled,
@@ -278,11 +278,14 @@ def _collect_single(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
                         seats,
                         max_episode_steps=job.env.rollout_length,
                         num_episodes=len(sub),
+                        batch_size=job.rollout_batch_size,
                         greedy=False,  # sampled: matches training and deployment
                     )
                     for e in eps:
                         yield e, member_row, None, None  # single mode: no ε label
                     bar.update(len(sub))
+                if job.clear_rollout_cache_every and (gi + 1) % job.clear_rollout_cache_every == 0:
+                    clear_rollout_cache()
 
     meta = {
         "config_hash": job.content_hash(),
@@ -438,6 +441,7 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
                         seats,
                         max_episode_steps=job.env.rollout_length,
                         num_episodes=len(sub),
+                        batch_size=job.rollout_batch_size,
                         greedy=False,  # sampled: matches training and deployment
                     )
                     for k, idx in enumerate(sub):
@@ -445,6 +449,8 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
                         member_row = np.asarray([ego_row_id] + [seating.teammate] * (num_seats - 1))
                         yield eps[k], member_row, seating.epsilon, seating.target
                     bar.update(len(sub))
+                if job.clear_rollout_cache_every and (gi + 1) % job.clear_rollout_cache_every == 0:
+                    clear_rollout_cache()
 
     meta = {
         "config_hash": job.content_hash(),

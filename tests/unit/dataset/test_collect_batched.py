@@ -67,3 +67,35 @@ def test_batched_matches_eager(greedy):
         assert np.allclose(np.asarray(eager.obs), np.asarray(b.obs)), i
         assert np.allclose(np.asarray(eager.rewards), np.asarray(b.rewards)), i
         assert np.array_equal(np.asarray(eager.dones), np.asarray(b.dones)), i
+
+
+def test_clear_rollout_cache_does_not_change_the_result():
+    # clear_rollout_cache exists purely to bound memory on a long collection --
+    # it must be a no-op for correctness. Same rng, same seats, before and
+    # after clearing: bit-identical episodes, and the cache entry that was
+    # cleared gets rebuilt (from-scratch recompile) rather than erroring.
+    from oaht_bench.dataset.construction.collect import (
+        _BATCH_ROLLOUT_CACHE,
+        clear_rollout_cache,
+        collect_episodes_batched,
+    )
+
+    base_env, seats, rollout_length = _setup()
+    rng = jax.random.PRNGKey(1)
+    kwargs = dict(
+        env=base_env, seats=seats, max_episode_steps=rollout_length, num_episodes=3, batch_size=2
+    )
+
+    before = collect_episodes_batched(rng, **kwargs)
+    assert _BATCH_ROLLOUT_CACHE  # something got cached
+
+    clear_rollout_cache()
+    assert not _BATCH_ROLLOUT_CACHE  # actually cleared
+
+    after = collect_episodes_batched(rng, **kwargs)
+    assert _BATCH_ROLLOUT_CACHE  # recompiled and re-cached, not left empty
+
+    for eb, ea in zip(before, after, strict=True):
+        assert eb.length == ea.length
+        assert np.array_equal(np.asarray(eb.actions), np.asarray(ea.actions))
+        assert np.allclose(np.asarray(eb.obs), np.asarray(ea.obs))

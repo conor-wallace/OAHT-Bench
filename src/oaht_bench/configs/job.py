@@ -249,6 +249,33 @@ class DatasetCollectionJob(JobBase):
         "environments with long rollouts and/or large observations rather than "
         "assuming the default scales.",
     )
+    rollout_batch_size: int = Field(
+        default=256,
+        gt=0,
+        description="Episodes per vmapped device call inside "
+        "`collect_episodes_batched` (that function's old hardcoded default). "
+        "Bounds one call's device memory to roughly "
+        "`rollout_batch_size * env.rollout_length * obs_dim` -- same concern as "
+        "`write_chunk_episodes`, but for the GPU rollout itself rather than the "
+        "host-side vault write. Lower for environments with long rollouts, large "
+        "observations, or heavy (e.g. CNN) actor networks.",
+    )
+    clear_rollout_cache_every: int = Field(
+        default=0,
+        ge=0,
+        description="Call `collect.clear_rollout_cache()` after this many "
+        "(ego, teammate) pairings, clearing every compiled rollout and JAX's own "
+        "per-shape compilation cache. 0 (default) never clears, matching every "
+        "existing config's behavior. `weighted`-variant pooled collection can "
+        "have a few hundred distinct pairings, and a pairing's own leftover, "
+        "non-`rollout_batch_size`-sized final chunk triggers one more compile "
+        "that is never freed otherwise -- on a long run and a memory-constrained "
+        "GPU those accumulate. Set this (e.g. 20-50) if a collection OOMs "
+        "partway through rather than immediately, even after lowering "
+        "`rollout_batch_size`. Trades some recompilation time for bounded "
+        "memory; too low adds real overhead, since every pairing after a clear "
+        "recompiles from scratch.",
+    )
 
 
 class PooledCrossplayJob(JobBase):
