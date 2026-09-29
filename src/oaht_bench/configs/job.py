@@ -235,6 +235,20 @@ class DatasetCollectionJob(JobBase):
         description="Seed for the train/test teammate split, kept separate from "
         "`seed` so the held-out set is stable when the collection seed changes.",
     )
+    write_chunk_episodes: int = Field(
+        default=2000,
+        gt=0,
+        description="Episodes buffered in memory before each flush to the vault "
+        "(runner.py's old hardcoded `_WRITE_CHUNK`). Bounds collection RAM to "
+        "roughly `write_chunk_episodes * env.rollout_length * per-timestep bytes`, "
+        "which the default was never tuned against: Overcooked-v2's ~400-step "
+        "episodes and CNN-sized (600-float) observations put a single default "
+        "chunk's observation array alone at ~3.8GB (both agents, float32) --"
+        "OOM territory on a small GPU box, versus a few hundred MB for LBF/MPE's "
+        "shorter, smaller-observation episodes at the same value. Lower this for "
+        "environments with long rollouts and/or large observations rather than "
+        "assuming the default scales.",
+    )
 
 
 class PooledCrossplayJob(JobBase):

@@ -163,7 +163,7 @@ def run(job: DatasetCollectionJob) -> Path:
         n += 1
         length_sum += int(episode.length)
         ret_sum += float(episode.returns()[0])
-        if len(chunk_eps) >= _WRITE_CHUNK:
+        if len(chunk_eps) >= job.write_chunk_episodes:
             flush()
     flush()
     # Finalise: writes the norm_stats.json sidecar (observation/rtg statistics
@@ -193,9 +193,6 @@ def run(job: DatasetCollectionJob) -> Path:
     )
     return run_dir
 
-
-#: Episodes flat-packed and appended to the vault per write. Bounds collection RAM.
-_WRITE_CHUNK = 2000
 
 #: Episodes collected per batched call within a pairing group. Bounds the ragged
 #: episodes held in RAM before they stream on to the vault writer.
