@@ -4,18 +4,15 @@ The matrix itself comes from real rollouts (integration, not unit-tested here);
 this pins the deterministic per-teammate normalization the dataset sampler reads,
 plus the two invariants the BR-only ego redefinition depends on: the teammate
 roster excludes `br`-role rows, and the matrix computation refuses to run against
-a mismatched (not-exactly-1:1) `br_egos`.
+a mismatched (not-exactly-1:1) set of `egos`.
 """
 
 import numpy as np
 import pytest
 
-from oaht_bench.population.pooled_crossplay import (
-    RosterEntry,
-    evaluate_pooled,
-    normalise_per_teammate,
-    teammate_roster,
-)
+from oaht_bench.population.loading import load_teammate_policies
+from oaht_bench.population.members import Member
+from oaht_bench.population.pooled_crossplay import evaluate_pooled, normalise_per_teammate
 
 
 def test_normalise_is_per_teammate_columnwise():
@@ -56,20 +53,20 @@ def test_flat_column_maps_to_one_half_not_nan():
 
 def _fake_roster():
     return [
-        RosterEntry("brdiv", 0, "conf", "p_b0c", "clsB"),
-        RosterEntry("brdiv", 0, "br", "p_b0b", "clsB"),  # not a teammate, not an ego
-        RosterEntry("comedi", 1, "self", "p_c1", "clsC"),
-        RosterEntry("fcp", 4, "self", "p_f4", "clsF"),
+        Member("brdiv", 0, "conf", "p_b0c", "clsB"),
+        Member("brdiv", 0, "br", "p_b0b", "clsB"),  # not a teammate, not an ego
+        Member("comedi", 1, "self", "p_c1", "clsC"),
+        Member("fcp", 4, "self", "p_f4", "clsF"),
     ]
 
 
-def test_teammate_roster_excludes_br_role_rows(monkeypatch):
-    import oaht_bench.population.pooled_crossplay as pc
+def test_load_teammate_policies_excludes_br_role_rows(monkeypatch):
+    import oaht_bench.population.loading as loading
 
     roster = _fake_roster()
-    monkeypatch.setattr(pc, "build_roster", lambda dirs, env, **kw: roster)
+    monkeypatch.setattr(loading, "build_roster", lambda dirs, env, **kw: roster)
 
-    teammates = teammate_roster(["pops/brdiv", "pops/comedi", "pops/fcp"], env=None)
+    teammates = load_teammate_policies(["pops/brdiv", "pops/comedi", "pops/fcp"], env=None)
 
     assert [(t.generator, t.member, t.role) for t in teammates] == [
         ("brdiv", 0, "conf"),
@@ -78,21 +75,21 @@ def test_teammate_roster_excludes_br_role_rows(monkeypatch):
     ]
 
 
-def test_evaluate_pooled_requires_br_egos_to_cover_the_roster_exactly_1to1():
+def test_evaluate_pooled_requires_egos_to_cover_the_roster_exactly_1to1():
     teammates = [
-        RosterEntry("brdiv", 0, "conf", "p", "cls"),
-        RosterEntry("comedi", 1, "self", "p", "cls"),
+        Member("brdiv", 0, "conf", "p", "cls"),
+        Member("comedi", 1, "self", "p", "cls"),
     ]
     # Missing comedi:1, plus an extra entry for a teammate not in the roster.
-    br_egos = {
-        ("brdiv", 0, "conf"): ("br_params", "cls"),
-        ("fcp", 9, "self"): ("br_params", "cls"),
-    }
+    egos = [
+        Member("brdiv", 0, "conf", "br_params", "cls"),
+        Member("fcp", 9, "self", "br_params", "cls"),
+    ]
     with pytest.raises(ValueError, match="1:1"):
         evaluate_pooled(
             env=None,
             teammates=teammates,
-            br_egos=br_egos,
+            egos=egos,
             rng=None,
             max_episode_steps=1,
         )

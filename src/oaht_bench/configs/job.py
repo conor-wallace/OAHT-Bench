@@ -239,7 +239,12 @@ class DatasetCollectionJob(JobBase):
         default=2000,
         gt=0,
         description="Episodes buffered in memory before each flush to the vault "
-        "(runner.py's old hardcoded `_WRITE_CHUNK`). Bounds collection RAM to "
+        "(runner.py's old hardcoded `_WRITE_CHUNK`), and also the number of "
+        "episodes requested per `collect_episodes_batched` call (runner.py's old "
+        "hardcoded `_COLLECT_SUBGROUP`) -- that call fully materialises its whole "
+        "`num_episodes` in host memory before returning, so using a separate, "
+        "larger constant there meant this field did not actually bound peak "
+        "memory; lowering it alone could not fix an OOM. Bounds collection RAM to "
         "roughly `write_chunk_episodes * env.rollout_length * per-timestep bytes`, "
         "which the default was never tuned against: Overcooked-v2's ~400-step "
         "episodes and CNN-sized (600-float) observations put a single default "
@@ -282,7 +287,7 @@ class PooledCrossplayJob(JobBase):
     """Compute the pooled cross-population coordination-return matrix (§4, step 2).
 
     Builds the designed-teammate roster from every listed generator
-    (:func:`~oaht_bench.population.pooled_crossplay.teammate_roster` -- ``self``/
+    (:func:`~oaht_bench.population.loading.load_teammate_policies` -- ``self``/
     ``conf`` roles only) and scores every ordered ``(dedicated best response,
     teammate)`` pair. The ego axis is always ``br_population_path``'s trained
     ``ppo_br`` population, never the teammates' own generators' policies -- a
@@ -293,7 +298,7 @@ class PooledCrossplayJob(JobBase):
     output.
 
     ``population_path`` is the same list, in the same order, a pooled
-    ``dataset_collection`` uses: ``teammate_roster`` preserves list order and the
+    ``dataset_collection`` uses: ``load_teammate_policies`` preserves list order and the
     sampler indexes the matrix by roster position, so a reordered list would
     silently mis-seat (the collection runner's ``check_roster`` guards against
     exactly that).

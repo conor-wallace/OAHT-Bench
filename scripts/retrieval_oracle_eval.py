@@ -47,8 +47,8 @@ import numpy as np
 
 from oaht_bench.configs import load_job
 from oaht_bench.envs import make_env
-from oaht_bench.population.loading import load_br_egos
-from oaht_bench.population.pooled_crossplay import build_roster
+from oaht_bench.population.loading import build_roster, load_ego_policies
+from oaht_bench.population.members import index_by_identity
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # scripts/ for the sibling import
 from performance_ladder import _label, build_br_matrix  # noqa: E402
@@ -175,8 +175,8 @@ def main() -> None:
     job = load_job(args.populations[0] / "job.json")
     env = make_env(job.env.env_name, job.env.env_kwargs())
     roster = build_roster(args.populations, env)
-    br = load_br_egos(args.br_run, env)
-    mates = [e for e in roster if (e.generator, e.member, e.role) in br]
+    egos_by_id = index_by_identity(load_ego_policies(args.br_run, env))
+    mates = [e for e in roster if (e.generator, e.member, e.role) in egos_by_id]
     labels = [_label(e) for e in mates]
 
     if args.matrix_in:
@@ -197,7 +197,8 @@ def main() -> None:
     # the best fixed TRAIN BR -- selectable without knowing any teammate's identity.
     generalist_row = max(train_idx, key=lambda k: matrix[k, train_idx].mean())
     gm = mates[generalist_row]
-    generalist_params, generalist_cls = br[(gm.generator, gm.member, gm.role)]
+    generalist = egos_by_id[(gm.generator, gm.member, gm.role)]
+    generalist_params, generalist_cls = generalist.params, generalist.policy_cls
     print(f"calibration ego (best fixed train BR): {labels[generalist_row]}")
 
     action_dim = env.action_space(env.agents[0]).n

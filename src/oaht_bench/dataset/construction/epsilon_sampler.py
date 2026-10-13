@@ -24,7 +24,7 @@ stays orthogonal and is layered by the caller, not baked in here.
 
 The sampler works on the matrix + roster *manifest* (generator/member/role), not
 live policies -- it emits roster indices and the ε value per episode. The caller
-rebuilds the live roster (:func:`~oaht_bench.population.pooled_crossplay.teammate_roster`,
+rebuilds the live roster (:func:`~oaht_bench.population.loading.load_teammate_policies`,
 deterministic in the same population order) and seats index ``ego`` against index
 ``teammate`` -- both index into the *same* teammate identity space, since every
 ego is that identity's own dedicated best response. :meth:`PooledMatrix.check_roster`
@@ -62,19 +62,29 @@ DEFAULT_TEAMMATE_ROLES: tuple[str, ...] = ("self", "conf")
 
 @dataclass(frozen=True)
 class Seating:
-    """One episode's assignment: roster index ``ego`` (seat 0) vs ``teammate``.
+    """One concrete ``(ego, teammate)`` pairing and how many episodes to collect for it.
+
+    A plan never contains the same ``(ego, teammate)`` pair twice -- every episode
+    assigned to that pairing across the whole plan is folded into this one entry's
+    ``count``, so a caller can batch each ``Seating`` directly (``collect_episodes_batched``
+    needs exactly one fixed pairing per call) without first re-grouping the plan itself.
 
     ``epsilon`` is the pooled-matrix ε(ego|teammate) actually realised by the
     choice -- the stable ``ego_response_quality`` descriptor the dataset records,
-    which is the matrix value, not the episode's sampled return. ``target`` is the
-    band level the seating was drawn to hit; ``epsilon`` may differ when no ego
-    lands exactly on the target (the nearest is taken).
+    which is the matrix value, not the episode's sampled return, so it is the same
+    for every one of ``count`` episodes. ``target`` is the band level the pairing
+    was drawn to hit; ``epsilon`` may differ when no ego lands exactly on the
+    target (the nearest is taken). If the same ``(ego, teammate)`` pair happens to
+    be the nearest choice for two different bands (only possible on a matrix with
+    very little spread), ``target`` records whichever band reached it first and
+    ``count`` folds in both -- harmless, since ``epsilon`` is identical either way.
     """
 
     ego: int
     teammate: int
     epsilon: float
     target: float
+    count: int
 
 
 @dataclass(frozen=True)
@@ -85,7 +95,7 @@ class PooledMatrix:
     coordination return with teammate ``j``; ``quality`` is the per-teammate
     [0,1] normalisation the sampler bands on. ``generator``/``member``/``role``
     address any row or column back to its provenance and are index-aligned
-    with a live :func:`~oaht_bench.population.pooled_crossplay.teammate_roster`.
+    with a live :func:`~oaht_bench.population.loading.load_teammate_policies`.
     """
 
     matrix: np.ndarray
@@ -146,7 +156,7 @@ class PooledMatrix:
                 )
 
 
-def load_pooled(path: str | Path) -> PooledMatrix:
+def load_pooled_matrix(path: str | Path) -> PooledMatrix:
     """Read a ``pooled_crossplay.npz`` written by
     :func:`~oaht_bench.population.pooled_crossplay.save_pooled`."""
     z = np.load(Path(path), allow_pickle=False)
@@ -222,8 +232,9 @@ def plan_seatings(
     roster space, so a caller still seats ``roster[seating.ego]`` unchanged. ``None``
     (the default) allows every roster entry.
 
-    Returns the seatings interleaved, so slicing the dataset by index does not
-    hand back a single band.
+    Returns one :class:`Seating` per unique ``(ego, teammate)`` pairing the plan
+    uses, each carrying the total episode ``count`` assigned to it -- never the
+    same pairing twice (see :class:`Seating`).
     """
     allowed_set = None if allowed is None else set(int(i) for i in allowed)
 
@@ -237,7 +248,7 @@ def plan_seatings(
         )
     ego_pool = np.array(sorted(allowed_set) if allowed_set is not None else range(pooled.size))
 
-    plan: list[Seating] = []
+    groups: dict[tuple[int, int], Seating] = {}
     for level, count in _band_counts(targets, num_episodes):
         for j in _cycle(teammates, count, rng):
             col = pooled.quality[:, j]
@@ -248,9 +259,18 @@ def plan_seatings(
             if not allow_self_pairing:
                 egos = egos[egos != j]
             ego = int(egos[np.argmin(np.abs(col[egos] - level))])
-            plan.append(Seating(ego=ego, teammate=j, epsilon=float(col[ego]), target=float(level)))
+            key = (ego, j)
+            prev = groups.get(key)
+            if prev is None:
+                groups[key] = Seating(
+                    ego=ego, teammate=j, epsilon=float(col[ego]), target=float(level), count=1
+                )
+            else:
+                groups[key] = Seating(
+                    prev.ego, prev.teammate, prev.epsilon, prev.target, prev.count + 1
+                )
 
-    return [plan[i] for i in rng.permutation(len(plan))]
+    return list(groups.values())
 
 
 def plan_weighted_seatings(
@@ -287,7 +307,10 @@ def plan_weighted_seatings(
     uses -- only the ego draw is stochastic.
 
     ``teammate_roles``/``allow_self_pairing``/``allowed`` match
-    :func:`plan_seatings` exactly.
+    :func:`plan_seatings` exactly. Like :func:`plan_seatings`, returns one
+    :class:`Seating` per unique ``(ego, teammate)`` pairing drawn, with ``count``
+    holding how many of the ``num_episodes`` independent draws landed on it --
+    never the same pairing twice.
     """
     allowed_set = None if allowed is None else set(int(i) for i in allowed)
 
@@ -302,7 +325,7 @@ def plan_weighted_seatings(
     ego_pool = np.array(sorted(allowed_set) if allowed_set is not None else range(pooled.size))
     ceiling = pooled.ceiling
 
-    plan: list[Seating] = []
+    groups: dict[tuple[int, int], Seating] = {}
     for j in _cycle(teammates, num_episodes, rng):
         egos = ego_pool
         if not allow_self_pairing:
@@ -313,9 +336,16 @@ def plan_weighted_seatings(
         probs /= probs.sum()
         ego = int(rng.choice(egos, p=probs))
         eps = float(pooled.quality[ego, j])
-        plan.append(Seating(ego=ego, teammate=j, epsilon=eps, target=eps))
+        key = (ego, j)
+        prev = groups.get(key)
+        if prev is None:
+            groups[key] = Seating(ego=ego, teammate=j, epsilon=eps, target=eps, count=1)
+        else:
+            groups[key] = Seating(
+                prev.ego, prev.teammate, prev.epsilon, prev.target, prev.count + 1
+            )
 
-    return [plan[i] for i in rng.permutation(len(plan))]
+    return list(groups.values())
 
 
 def plan_for_variant(

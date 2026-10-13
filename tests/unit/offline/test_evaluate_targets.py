@@ -15,7 +15,8 @@ from oaht_bench.offline.evaluate import crossplay_target_returns, resolve_target
 
 
 def _matrix_path(tmp_path):
-    from oaht_bench.population.pooled_crossplay import RosterEntry, save_pooled
+    from oaht_bench.population.members import Member
+    from oaht_bench.population.pooled_crossplay import save_pooled
 
     matrix = np.array(
         [
@@ -25,9 +26,9 @@ def _matrix_path(tmp_path):
         ]
     )
     roster = [
-        RosterEntry("fcp", 0, "self", params=None, policy_cls=None),
-        RosterEntry("comedi", 1, "self", params=None, policy_cls=None),
-        RosterEntry("brdiv", 2, "conf", params=None, policy_cls=None),
+        Member("fcp", 0, "self", params=None, policy_cls=None),
+        Member("comedi", 1, "self", params=None, policy_cls=None),
+        Member("brdiv", 2, "conf", params=None, policy_cls=None),
     ]
     return save_pooled(matrix, roster, tmp_path / "pooled_crossplay.npz", meta={"env": "test"})
 

@@ -22,7 +22,7 @@ def _setup():
     from oaht_bench.configs.env import HanabiConfig
     from oaht_bench.envs import make_env
     from oaht_bench.envs.log_wrapper import LogWrapper
-    from oaht_bench.population.pooled_crossplay import build_roster
+    from oaht_bench.population.loading import build_roster
 
     env_cfg = HanabiConfig(
         name="hanabi",

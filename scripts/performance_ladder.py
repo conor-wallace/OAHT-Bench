@@ -55,8 +55,8 @@ from oaht_bench.common.run_episodes import run_episodes
 from oaht_bench.configs import load_job
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper
-from oaht_bench.population.loading import load_br_egos
-from oaht_bench.population.pooled_crossplay import build_roster
+from oaht_bench.population.loading import build_roster, load_ego_policies
+from oaht_bench.population.members import index_by_identity
 
 
 def _label(entry) -> str:
@@ -74,29 +74,29 @@ def build_br_matrix(populations: list[Path], br_run: Path, *, episodes: int, see
     job = load_job(populations[0] / "job.json")
     env = LogWrapper(make_env(job.env.env_name, job.env.env_kwargs()))
     roster = build_roster(populations, env)
-    br = load_br_egos(br_run, env)
+    egos_by_id = index_by_identity(load_ego_policies(br_run, env))
 
-    mates = [e for e in roster if (e.generator, e.member, e.role) in br]
+    mates = [e for e in roster if (e.generator, e.member, e.role) in egos_by_id]
     if not mates:
         raise SystemExit(
             f"no roster entry matches a BR in {br_run} -- check --populations lists "
             f"the same generators the ppo_br run trained against."
         )
     labels = [_label(e) for e in mates]
-    egos = [br[(e.generator, e.member, e.role)] for e in mates]
+    egos = [egos_by_id[(e.generator, e.member, e.role)] for e in mates]
 
     k = len(mates)
     matrix = np.zeros((k, k))
     rng = jax.random.PRNGKey(seed)
     t0 = time.time()
-    for i, (ego_params, ego_cls) in enumerate(egos):
+    for i, ego in enumerate(egos):
         for j, mate in enumerate(mates):
             rng, key = jax.random.split(rng)
             out = run_episodes(
                 key,
                 env,
-                agent_0_param=ego_params,
-                agent_0_policy=ego_cls,
+                agent_0_param=ego.params,
+                agent_0_policy=ego.policy_cls,
                 agent_1_param=mate.params,
                 agent_1_policy=mate.policy_cls,
                 max_episode_steps=job.env.rollout_length,

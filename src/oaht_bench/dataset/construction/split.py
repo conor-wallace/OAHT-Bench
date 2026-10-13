@@ -33,7 +33,7 @@ from dataclasses import dataclass
 import numpy as np
 
 #: One roster entry's identity: ``(generator, member, role)``, index-aligned with a
-#: :func:`~oaht_bench.population.pooled_crossplay.build_roster` roster.
+#: :func:`~oaht_bench.population.loading.build_roster` roster.
 Identity = tuple[str, int, str]
 
 

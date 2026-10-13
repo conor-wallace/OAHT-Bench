@@ -428,7 +428,7 @@ def run_ppo_br(job, logger):
     # Save to the *absolute* run dir: save_train_run resolves a relative savedir against
     # REPO_PATH (src/oaht_bench), which would put the checkpoint under
     # src/oaht_bench/results/... while the manifest (written CWD-relative below) lands in
-    # the repo-root results/... -- so load_br_egos, which reads both from one run dir,
+    # the repo-root results/... -- so load_ego_policies, which reads both from one run dir,
     # would not find the params. ppo_br is consumed straight from results/ (no release
     # step), so both must sit together there.
     run_dir = Path(job.run_dir()).resolve()

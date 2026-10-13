@@ -10,15 +10,16 @@ axis of this matrix is always the trained ``ppo_br`` population: one dedicated
 best-response per designed teammate, never the teammate's own generator's
 policies.
 
-**Teammates and egos share one identity space.** ``teammate_roster`` builds the
-*designed teammates* -- one policy per released member of every generator, ``self``
-for homogeneous generators (FCP, CoMeDi), ``conf`` for paired ones (BRDiv,
-L-BRDiv); a paired generator's own ``br`` role (its own designed best response) is
-never a teammate and, since ``ppo_br`` replaces it, is never an ego either -- it
-plays no further part in this matrix. ``ppo_br`` trains exactly one dedicated best
-response per teammate identity (:mod:`oaht_bench.teammate_gen.ppo_br`), so the
-matrix is a genuine square ``K x K``: ``matrix[i, j]`` is the mean episode return
-with teammate ``i``'s dedicated best response in the ego seat (seat 0) and
+**Teammates and egos share one identity space.**
+:func:`~oaht_bench.population.loading.load_teammate_policies` builds
+the *designed teammates* -- one policy per released member of every generator,
+``self`` for homogeneous generators (FCP, CoMeDi), ``conf`` for paired ones
+(BRDiv, L-BRDiv); a paired generator's own ``br`` role (its own designed best
+response) is never a teammate and, since ``ppo_br`` replaces it, is never an ego
+either -- it plays no further part in this matrix. ``ppo_br`` trains exactly one
+dedicated best response per teammate identity (:mod:`oaht_bench.teammate_gen.ppo_br`),
+so the matrix is a genuine square ``K x K``: ``matrix[i, j]`` is the mean episode
+return with teammate ``i``'s dedicated best response in the ego seat (seat 0) and
 teammate ``j`` in the teammate seat (seat 1), which for these cooperative
 environments is the shared coordination return -- every cell measured, not just
 the diagonal, so a teammate's episodes can genuinely be spread across several
@@ -31,120 +32,20 @@ column/row can always be traced back to ``(generator, member, role)``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import jax
 import numpy as np
 from tqdm import tqdm
 
 from oaht_bench.common.run_episodes import run_episodes
-from oaht_bench.population.loading import artifact_dir
-from oaht_bench.population.members import get_member_params, released_members
-
-
-@dataclass(frozen=True)
-class RosterEntry:
-    """One policy in the pooled roster, tagged with its provenance and seat role.
-
-    ``role`` is ``self`` for a homogeneous generator's self-play policy, or
-    ``conf``/``br`` for a paired generator's confederate / best response. It is
-    kept so the dataset sampler can, for example, restrict *teammates* to
-    ``{self, conf}`` while allowing any policy as the ego.
-    """
-
-    generator: str
-    member: int
-    role: str
-    params: Any
-    policy_cls: Any
-
-
-def _load_population(pop_dir: Path, env):
-    """Rebuild a released population the same way scoring and collection do."""
-    from oaht_bench.common.save_load_utils import load_train_run
-    from oaht_bench.configs import load_job
-    from oaht_bench.population.loading import population_from_run
-
-    pop_dir = Path(pop_dir)
-    run_dir = pop_dir.parent.parent if pop_dir.name == "saved_train_run" else pop_dir
-    job = load_job(run_dir / "job.json")
-    out = load_train_run(str(artifact_dir(run_dir)))
-    return population_from_run(job, out, env), job
-
-
-def build_roster(population_dirs: list[Path], env, *, seed_index: int = 0) -> list[RosterEntry]:
-    """Flatten released populations into one roster of individual policies.
-
-    ``population_dirs`` are released run directories (``populations/<env>/<gen>/``),
-    one per generator. Each contributes its *released* members -- the converged
-    checkpoints for FCP, one per convention for the others (see
-    :func:`released_members`) -- as self / conf / br policies.
-    """
-    roster: list[RosterEntry] = []
-    for pop_dir in population_dirs:
-        loaded, job = _load_population(pop_dir, env)
-        generator = job.generator.generator
-        for m in released_members(job, loaded.pop_size):
-            m = int(m)
-            if loaded.paired:
-                roster.append(
-                    RosterEntry(
-                        generator,
-                        m,
-                        "conf",
-                        get_member_params(loaded.params, m, seed_index=seed_index),
-                        loaded.policy_cls,
-                    )
-                )
-                roster.append(
-                    RosterEntry(
-                        generator,
-                        m,
-                        "br",
-                        get_member_params(loaded.partner_params, m, seed_index=seed_index),
-                        loaded.policy_cls,
-                    )
-                )
-            else:
-                roster.append(
-                    RosterEntry(
-                        generator,
-                        m,
-                        "self",
-                        get_member_params(loaded.params, m, seed_index=seed_index),
-                        loaded.policy_cls,
-                    )
-                )
-    return roster
-
-
-#: Roles that are designed teammates. A paired generator's own ``br`` role is
-#: excluded -- it was always excluded from being seated as a teammate, and now
-#: that ``ppo_br`` supplies the ego axis, it plays no other part in this matrix.
-_TEAMMATE_ROLES = ("self", "conf")
-
-
-def teammate_roster(population_dirs: list[Path], env, *, seed_index: int = 0) -> list[RosterEntry]:
-    """The designed-teammate subset of :func:`build_roster` -- ``self``/``conf`` only.
-
-    This is the ``K``-sized identity list both the crossplay matrix and pooled
-    dataset collection index by: every teammate has exactly one entry here, and
-    (once ``ppo_br`` has been trained against it) exactly one dedicated best
-    response, so ego and teammate share this same index space.
-    """
-    return [
-        e
-        for e in build_roster(population_dirs, env, seed_index=seed_index)
-        if e.role in _TEAMMATE_ROLES
-    ]
+from oaht_bench.population.members import Member, index_by_identity
 
 
 def evaluate_pooled(
     env,
-    teammates: list[RosterEntry],
-    br_egos: dict[tuple[str, int, str], tuple[Any, Any]],
+    teammates: list[Member],
+    egos: list[Member],
     *,
     rng: jax.Array,
     max_episode_steps: int,
@@ -153,21 +54,25 @@ def evaluate_pooled(
 ) -> np.ndarray:
     """Score every ordered ``(dedicated best response, teammate)`` pair.
 
-    ``teammates`` is :func:`teammate_roster`'s ``K``-sized list; ``br_egos`` is
-    :func:`~oaht_bench.population.loading.load_br_egos`'s
-    ``{(generator, member, role): (params, policy_cls)}``, one entry per
-    teammate. Returns ``matrix`` of shape ``(K, K)`` with ``matrix[i, j]`` the
-    mean return of teammate ``i``'s dedicated best response (seat 0) with
+    ``teammates`` is :func:`~oaht_bench.population.loading.load_teammate_policies`'s
+    ``K``-sized list; ``egos``
+    is :func:`~oaht_bench.population.loading.load_ego_policies`'s list, one
+    entry per teammate, each carrying that teammate's own ``(generator,
+    member, role)`` identity with its own dedicated best-response ``params``/
+    ``policy_cls``. Returns ``matrix`` of shape ``(K, K)`` with ``matrix[i, j]``
+    the mean return of teammate ``i``'s dedicated best response (seat 0) with
     teammate ``j`` (seat 1) -- so column ``j``'s diagonal cell is teammate
     ``j`` against its *own* dedicated best response, and every other cell in
     that column is a different teammate's best response cross-played against
     ``j``, which is what gives the dataset sampler real cross-play egos to
     weight over rather than a single fixed point per teammate.
 
-    Raises if ``br_egos`` doesn't cover exactly the teammate identities in
+    Raises if ``egos`` doesn't cover exactly the teammate identities in
     ``teammates`` -- ``ppo_br`` is meant to cover the whole released roster
     1:1, so a mismatch means a stale or partial ``ppo_br`` run, not a case to
-    silently work around.
+    silently work around. ``egos`` is not assumed to be in the same order as
+    ``teammates`` -- :func:`~oaht_bench.population.members.index_by_identity`
+    does the identity-keyed lookup rather than relying on position.
 
     Cost is ``K**2 * num_episodes`` episodes; ``greedy`` stays off for the
     same reason :mod:`~oaht_bench.population.crossplay` keeps it off (argmax
@@ -177,13 +82,14 @@ def evaluate_pooled(
     optimisation if it becomes a bottleneck.
     """
     identities = [(t.generator, int(t.member), t.role) for t in teammates]
-    missing = set(identities) - set(br_egos)
-    extra = set(br_egos) - set(identities)
+    egos_by_id = index_by_identity(egos)
+    missing = set(identities) - set(egos_by_id)
+    extra = set(egos_by_id) - set(identities)
     if missing or extra:
         raise ValueError(
-            "br_egos must cover exactly the teammate roster 1:1 -- "
+            "egos must cover exactly the teammate roster 1:1 -- "
             f"missing dedicated best responses for {sorted(missing)}, "
-            f"and br_egos has entries with no matching teammate: {sorted(extra)}. "
+            f"and egos has entries with no matching teammate: {sorted(extra)}. "
             "Retrain ppo_br against the current teammate roster."
         )
 
@@ -191,14 +97,14 @@ def evaluate_pooled(
     matrix = np.zeros((k, k), dtype=float)
     with tqdm(total=k * k, desc="crossplay pairs", unit="pair") as bar:
         for i, ego_identity in enumerate(identities):
-            ego_params, ego_cls = br_egos[ego_identity]
+            ego = egos_by_id[ego_identity]
             for j, mate in enumerate(teammates):
                 rng, pair_rng = jax.random.split(rng)
                 out = run_episodes(
                     pair_rng,
                     env,
-                    agent_0_param=ego_params,
-                    agent_0_policy=ego_cls,
+                    agent_0_param=ego.params,
+                    agent_0_policy=ego.policy_cls,
                     agent_1_param=mate.params,
                     agent_1_policy=mate.policy_cls,
                     max_episode_steps=max_episode_steps,
@@ -226,7 +132,7 @@ def normalise_per_teammate(matrix: np.ndarray) -> np.ndarray:
     return out
 
 
-def save_pooled(matrix: np.ndarray, roster: list[RosterEntry], path: Path, *, meta: dict) -> Path:
+def save_pooled(matrix: np.ndarray, roster: list[Member], path: Path, *, meta: dict) -> Path:
     """Write the matrix, the roster manifest, and provenance as one ``.npz``.
 
     The roster arrays are what make a column/row addressable as
@@ -265,7 +171,7 @@ def run(job) -> Path:
     from oaht_bench.configs import save_job
     from oaht_bench.envs import make_env
     from oaht_bench.envs.log_wrapper import LogWrapper
-    from oaht_bench.population.loading import load_br_egos
+    from oaht_bench.population.loading import load_ego_policies, load_teammate_policies
 
     run_dir = Path(job.run_dir())
     out = Path(job.output_path) if job.output_path else run_dir / "pooled_crossplay.npz"
@@ -279,13 +185,13 @@ def run(job) -> Path:
     save_job(job, run_dir / "job.json", minimal=False)
 
     env = LogWrapper(make_env(job.env.env_name, job.env.env_kwargs()))
-    teammates = teammate_roster([Path(p) for p in job.population_path], env)
-    br_egos = load_br_egos(job.br_population_path, env)
+    teammates = load_teammate_policies([Path(p) for p in job.population_path], env)
+    egos = load_ego_policies(job.br_population_path, env)
 
     matrix = evaluate_pooled(
         env,
         teammates,
-        br_egos,
+        egos,
         rng=jax.random.PRNGKey(job.seed),
         max_episode_steps=job.env.rollout_length,
         num_episodes=job.num_episodes,

@@ -64,7 +64,7 @@ def main() -> int:
     from oaht_bench.models.omis_agent import OmisAgent
     from oaht_bench.models.tao_agent import TaoAgent
     from oaht_bench.offline.runner import _resolve_dims
-    from oaht_bench.population.pooled_crossplay import build_roster
+    from oaht_bench.population.loading import build_roster
 
     agents = {
         "bc": BcAgent,

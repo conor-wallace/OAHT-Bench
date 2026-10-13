@@ -11,7 +11,7 @@ from oaht_bench.dataset.construction.epsilon_sampler import (
     PooledMatrix,
     Seating,
     _band_counts,
-    load_pooled,
+    load_pooled_matrix,
     plan_for_variant,
     plan_seatings,
     plan_weighted_seatings,
@@ -56,7 +56,7 @@ def test_expert_band_selects_the_best_response_per_teammate():
     pooled = _pooled(matrix, g, m, r)
     plan = plan_seatings(pooled, EPSILON_TARGETS["expert"], 9, rng=np.random.default_rng(0))
 
-    assert len(plan) == 9
+    assert sum(s.count for s in plan) == 9
     best_ego = {j: int(np.argmax(matrix[:, j])) for j in range(3)}
     for s in plan:
         assert s.ego == best_ego[s.teammate]
@@ -79,10 +79,12 @@ def test_br_vs_worst_is_bimodal_and_covers_both_extremes():
     g, m, r = _uniform_roles(3)
     pooled = _pooled(matrix, g, m, r)
     plan = plan_seatings(pooled, EPSILON_TARGETS["br_vs_worst"], 8, rng=np.random.default_rng(2))
-    eps = sorted(s.epsilon for s in plan)
-    # Exactly half at the top of the spectrum, half at the bottom, nothing mid.
-    assert eps.count(pytest.approx(1.0)) == 4
-    assert eps.count(pytest.approx(0.0)) == 4
+    # Exactly half the episodes at the top of the spectrum, half at the bottom,
+    # nothing mid -- counted by episode count, not by number of groups.
+    top = sum(s.count for s in plan if s.epsilon == pytest.approx(1.0))
+    bottom = sum(s.count for s in plan if s.epsilon == pytest.approx(0.0))
+    assert top == 4
+    assert bottom == 4
 
 
 def test_teammates_are_covered_equally():
@@ -91,8 +93,17 @@ def test_teammates_are_covered_equally():
     g, m, r = _uniform_roles(4)
     pooled = _pooled(matrix, g, m, r)
     plan = plan_seatings(pooled, [(1.0, 1.0)], 8, rng=np.random.default_rng(3))
-    seated = np.bincount([s.teammate for s in plan], minlength=4)
+    seated = np.bincount([s.teammate for s in plan], weights=[s.count for s in plan], minlength=4)
     assert list(seated) == [2, 2, 2, 2]
+
+
+def test_plan_seatings_never_repeats_a_pairing():
+    matrix = np.eye(4) + 0.1
+    g, m, r = _uniform_roles(4)
+    pooled = _pooled(matrix, g, m, r)
+    plan = plan_seatings(pooled, EPSILON_TARGETS["mixed"], 20, rng=np.random.default_rng(3))
+    pairings = [(s.ego, s.teammate) for s in plan]
+    assert len(pairings) == len(set(pairings))
 
 
 def test_teammate_role_filter_excludes_br_columns():
@@ -155,8 +166,18 @@ def test_weighted_covers_teammates_exactly_and_equally():
     g, m, r = _uniform_roles(4)
     pooled = _pooled(matrix, g, m, r)
     plan = plan_weighted_seatings(pooled, 8, temperature=1.0, rng=np.random.default_rng(0))
-    seated = np.bincount([s.teammate for s in plan], minlength=4)
+    seated = np.bincount([s.teammate for s in plan], weights=[s.count for s in plan], minlength=4)
     assert list(seated) == [2, 2, 2, 2]
+
+
+def test_weighted_never_repeats_a_pairing():
+    matrix = np.array([[10.0, 0.0, 1.0], [0.0, 10.0, 1.0], [1.0, 1.0, 1.0]])
+    g, m, r = _uniform_roles(3)
+    pooled = _pooled(matrix, g, m, r)
+    plan = plan_weighted_seatings(pooled, 3000, temperature=1000.0, rng=np.random.default_rng(2))
+    pairings = [(s.ego, s.teammate) for s in plan]
+    assert len(pairings) == len(set(pairings))
+    assert sum(s.count for s in plan) == 3000
 
 
 def test_weighted_low_temperature_concentrates_on_the_argmax():
@@ -180,7 +201,8 @@ def test_weighted_high_temperature_approaches_uniform():
     g, m, r = _uniform_roles(3)
     pooled = _pooled(matrix, g, m, r)
     plan = plan_weighted_seatings(pooled, 3000, temperature=1000.0, rng=np.random.default_rng(2))
-    drawn_for_0 = np.bincount([s.ego for s in plan if s.teammate == 0], minlength=3)
+    for_0 = [s for s in plan if s.teammate == 0]
+    drawn_for_0 = np.bincount([s.ego for s in for_0], weights=[s.count for s in for_0], minlength=3)
     freqs = drawn_for_0 / drawn_for_0.sum()
     # Nowhere near collapsed onto one ego -- roughly a third each.
     np.testing.assert_allclose(freqs, [1 / 3, 1 / 3, 1 / 3], atol=0.05)
@@ -234,19 +256,22 @@ def test_weighted_temperature_is_portable_across_reward_scales():
         pooled_large, 500, temperature=0.2, rng=np.random.default_rng(5)
     )
 
-    assert [(s.ego, s.teammate) for s in plan_small] == [(s.ego, s.teammate) for s in plan_large]
+    small = [(s.ego, s.teammate, s.count) for s in plan_small]
+    large = [(s.ego, s.teammate, s.count) for s in plan_large]
+    assert small == large
 
 
 def test_load_pooled_round_trip(tmp_path):
-    from oaht_bench.population.pooled_crossplay import RosterEntry, save_pooled
+    from oaht_bench.population.members import Member
+    from oaht_bench.population.pooled_crossplay import save_pooled
 
     matrix = np.array([[0.9, 0.1], [0.2, 0.8]])
     roster = [
-        RosterEntry("fcp", 0, "self", params=None, policy_cls=None),
-        RosterEntry("brdiv", 3, "conf", params=None, policy_cls=None),
+        Member("fcp", 0, "self", params=None, policy_cls=None),
+        Member("brdiv", 3, "conf", params=None, policy_cls=None),
     ]
     path = save_pooled(matrix, roster, tmp_path / "pooled_crossplay.npz", meta={"env": "lbf"})
-    pooled = load_pooled(path)
+    pooled = load_pooled_matrix(path)
 
     np.testing.assert_allclose(pooled.matrix, matrix)
     assert list(pooled.generator) == ["fcp", "brdiv"]

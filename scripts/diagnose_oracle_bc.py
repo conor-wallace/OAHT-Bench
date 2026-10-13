@@ -49,7 +49,7 @@ def main() -> None:
     from oaht_bench.offline.runner import _resolve_dims
     from oaht_bench.offline.training import get_optimizer
     from oaht_bench.offline.utils import masked_accuracy, to_jax
-    from oaht_bench.population.pooled_crossplay import build_roster
+    from oaht_bench.population.loading import build_roster
 
     job = load_job(args.config)
     cfg = job.offline

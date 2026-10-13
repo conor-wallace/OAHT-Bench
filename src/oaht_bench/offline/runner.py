@@ -214,7 +214,7 @@ def _teammate_policies(batch, env, which: str = "held_out") -> list:
 
     Returns ``[(label, mate_params, policy_cls)]``.
     """
-    from oaht_bench.population.pooled_crossplay import build_roster
+    from oaht_bench.population.loading import build_roster
 
     meta = batch.meta
     if "held_out" in meta:

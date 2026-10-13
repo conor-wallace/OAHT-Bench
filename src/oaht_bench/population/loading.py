@@ -38,7 +38,7 @@ from oaht_bench.models.cnn_rnn_actor_critic_agent import (
 from oaht_bench.models.initialize_agents import _unwrap_obs_shape
 from oaht_bench.configs.job import TeammateGenerationJob
 from oaht_bench.envs.protocols import TrainingEnv
-from oaht_bench.population.members import get_member_params
+from oaht_bench.population.members import Member, get_member_params, released_members
 
 log = logging.getLogger(__name__)
 
@@ -343,8 +343,8 @@ class LoadedPopulation:
 #: they have no checkpoint and are heterogeneous (each member a different policy
 #: class), so they do not fit ``LoadedPopulation``'s "one ``policy_cls`` + a
 #: member-indexed param tree" shape. When added, they belong on the heterogeneous
-#: roster (:mod:`oaht_bench.population.pooled_crossplay`'s ``RosterEntry``, which
-#: already carries a per-member ``policy_cls``), not on this checkpoint dispatch.
+#: roster (:mod:`oaht_bench.population.members`'s ``Member``, which already
+#: carries a per-member ``policy_cls``), not on this checkpoint dispatch.
 _BUILDERS = {
     "fcp": get_fcp_population,
     "comedi": get_comedi_population,
@@ -380,17 +380,106 @@ def population_from_run(
     )
 
 
-def load_br_egos(br_dir: Path | str, env: TrainingEnv) -> dict:
-    """Map each teammate identity to its trained best-response ego.
+def _load_population(pop_dir: Path, env: TrainingEnv):
+    """Rebuild a released population the same way scoring and collection do."""
+    from oaht_bench.common.save_load_utils import load_train_run
+    from oaht_bench.configs import load_job
+
+    pop_dir = Path(pop_dir)
+    run_dir = pop_dir.parent.parent if pop_dir.name == "saved_train_run" else pop_dir
+    job = load_job(run_dir / "job.json")
+    out = load_train_run(str(artifact_dir(run_dir)))
+    return population_from_run(job, out, env), job
+
+
+def build_roster(population_dirs: list[Path], env: TrainingEnv, *, seed_index: int = 0) -> list[Member]:
+    """Flatten released populations into one roster of individual policies.
+
+    ``population_dirs`` are released run directories (``populations/<env>/<gen>/``),
+    one per generator. Each contributes its *released* members -- the converged
+    checkpoints for FCP, one per convention for the others (see
+    :func:`~oaht_bench.population.members.released_members`) -- as self / conf / br
+    policies.
+    """
+    roster: list[Member] = []
+    for pop_dir in population_dirs:
+        loaded, job = _load_population(pop_dir, env)
+        generator = job.generator.generator
+        for m in released_members(job, loaded.pop_size):
+            m = int(m)
+            if loaded.paired:
+                roster.append(
+                    Member(
+                        generator,
+                        m,
+                        "conf",
+                        get_member_params(loaded.params, m, seed_index=seed_index),
+                        loaded.policy_cls,
+                    )
+                )
+                roster.append(
+                    Member(
+                        generator,
+                        m,
+                        "br",
+                        get_member_params(loaded.partner_params, m, seed_index=seed_index),
+                        loaded.policy_cls,
+                    )
+                )
+            else:
+                roster.append(
+                    Member(
+                        generator,
+                        m,
+                        "self",
+                        get_member_params(loaded.params, m, seed_index=seed_index),
+                        loaded.policy_cls,
+                    )
+                )
+    return roster
+
+
+#: Roles that are designed teammates. A paired generator's own ``br`` role is
+#: excluded -- it was always excluded from being seated as a teammate, and now
+#: that ``ppo_br`` supplies the ego axis, it plays no other part in this matrix.
+_TEAMMATE_ROLES = ("self", "conf")
+
+
+def load_teammate_policies(
+    population_dirs: list[Path], env: TrainingEnv, *, seed_index: int = 0
+) -> list[Member]:
+    """The designed-teammate subset of :func:`build_roster` -- ``self``/``conf`` only.
+
+    This is the ``K``-sized identity list both the crossplay matrix and pooled
+    dataset collection index by: every teammate has exactly one entry here, and
+    (once ``ppo_br`` has been trained against it) exactly one dedicated best
+    response, so ego and teammate share this same index space.
+    """
+    return [
+        e
+        for e in build_roster(population_dirs, env, seed_index=seed_index)
+        if e.role in _TEAMMATE_ROLES
+    ]
+
+
+def load_ego_policies(br_dir: Path | str, env: TrainingEnv) -> list[Member]:
+    """Load every trained best-response ego, tagged with the teammate identity it
+    was trained for.
 
     Reads a ``ppo_br`` run (``br_manifest.json`` + the ``br_by_source`` artifact) and
-    returns ``{(generator, member, role): (ego_params, policy_cls)}`` so dataset
-    collection can seat the best-response ego for a given teammate. The artifact stores
-    one member-axis param stack per source population (they carry different architectures
-    in pooled mode); each manifest entry names its ``source_index`` and its ``pos`` on
-    that source's member axis, and ``policy_cls`` is that source population's (the BR is
-    warm-started from and shares its architecture). One ``ppo_br`` run can cover the whole
-    released roster, so collection needs a single ``br_population_path`` entry.
+    returns one :class:`~oaht_bench.population.members.Member` per manifest entry, in
+    manifest order -- not reordered or position-aligned with any teammate roster. Each
+    returned ``Member``'s ``generator``/``member``/``role`` is the *teammate's own*
+    identity (the one this ego is a dedicated best response for), while ``params``/
+    ``policy_cls`` are the ego's own. Callers needing identity-keyed lookup (e.g. "the
+    ego for teammate X") should build one via
+    :func:`~oaht_bench.population.members.index_by_identity` rather than assume order.
+    The artifact stores one member-axis param stack per source population (they carry
+    different architectures in pooled mode); each manifest entry names its
+    ``source_index`` and its ``pos`` on that source's member axis, and ``policy_cls`` is
+    that source population's (the BR is warm-started from and shares its architecture).
+    One ``ppo_br`` run can cover the whole released roster, so collection needs a single
+    ``br_population_path`` entry.
     """
     import json
 
@@ -414,11 +503,16 @@ def load_br_egos(br_dir: Path | str, env: TrainingEnv) -> dict:
             ).policy_cls
         return cls_cache[src_path]
 
-    egos = {}
+    egos = []
     for e in manifest:
         params = jax.tree.map(lambda leaf, p=e["pos"]: leaf[p], by_source[str(e["source_index"])])
-        egos[(e["generator"], int(e["member"]), e["role"])] = (
-            params,
-            _policy_cls(e["source_population_path"]),
+        egos.append(
+            Member(
+                e["generator"],
+                int(e["member"]),
+                e["role"],
+                params,
+                _policy_cls(e["source_population_path"]),
+            )
         )
     return egos

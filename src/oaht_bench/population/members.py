@@ -8,7 +8,38 @@ disagreeing about which policy an index refers to.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Any
+
 import jax
+
+
+@dataclass(frozen=True)
+class Member:
+    """One policy tagged with its provenance and seat role.
+
+    ``role`` is ``self`` for a homogeneous generator's self-play policy, or
+    ``conf``/``br`` for a paired generator's confederate / best response.
+    """
+
+    generator: str
+    member: int
+    role: str
+    params: Any
+    policy_cls: Any
+
+
+def index_by_identity(members: list[Member]) -> dict[tuple[str, int, str], Member]:
+    """Key a member list by its ``(generator, member, role)`` identity.
+
+    Loaders such as :func:`~oaht_bench.population.loading.load_teammate_policies`
+    and :func:`~oaht_bench.population.loading.load_ego_policies` return lists in
+    their own natural order (population order; manifest order) rather than
+    position-aligned with each other -- this is how a caller gets identity-keyed
+    lookup when it needs one, without either loader silently assuming the other's
+    order.
+    """
+    return {(m.generator, int(m.member), m.role): m for m in members}
 
 
 def get_member_params(params, index: int, *, seed_index: int = 0):

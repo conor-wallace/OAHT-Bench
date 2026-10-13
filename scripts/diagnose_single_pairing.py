@@ -161,7 +161,7 @@ def main() -> int:
     from oaht_bench.offline import get_trainer
     from oaht_bench.offline.evaluate import dataset_target_return, evaluate_agent_against
     from oaht_bench.offline.runner import _resolve_dims
-    from oaht_bench.population.pooled_crossplay import build_roster
+    from oaht_bench.population.loading import build_roster
 
     agents = {
         "bc": BcAgent,

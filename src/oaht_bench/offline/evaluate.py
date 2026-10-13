@@ -153,9 +153,9 @@ def crossplay_target_returns(pooled_matrix_path: str, teammates) -> dict:
     Raises if a teammate's identity isn't a column in the matrix -- a stale
     or mismatched matrix should fail loudly, not silently skip a teammate.
     """
-    from oaht_bench.dataset.construction.epsilon_sampler import load_pooled
+    from oaht_bench.dataset.construction.epsilon_sampler import load_pooled_matrix
 
-    pooled = load_pooled(pooled_matrix_path)
+    pooled = load_pooled_matrix(pooled_matrix_path)
     index = {
         (str(pooled.generator[i]), int(pooled.member[i]), str(pooled.role[i])): i
         for i in range(pooled.size)

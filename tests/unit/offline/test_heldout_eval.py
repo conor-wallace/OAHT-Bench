@@ -7,17 +7,17 @@ and never against a member that was in the training data.
 
 
 def _fake_roster():
-    from oaht_bench.population.pooled_crossplay import RosterEntry
+    from oaht_bench.population.members import Member
 
     return [
-        RosterEntry("brdiv", 0, "conf", "p_b0c", "clsB"),  # train
-        RosterEntry("brdiv", 0, "br", "p_b0b", "clsB"),  # train
-        RosterEntry("brdiv", 2, "conf", "p_b2c", "clsB"),  # TEST teammate
-        RosterEntry("brdiv", 2, "br", "p_b2b", "clsB"),  # TEST member but br -> not a teammate
-        RosterEntry("comedi", 1, "self", "p_c1", "clsC"),  # TEST teammate
-        RosterEntry("comedi", 3, "self", "p_c3", "clsC"),  # train
-        RosterEntry("fcp", 14, "self", "p_f14", "clsF"),  # TEST teammate
-        RosterEntry("fcp", 4, "self", "p_f4", "clsF"),  # train
+        Member("brdiv", 0, "conf", "p_b0c", "clsB"),  # train
+        Member("brdiv", 0, "br", "p_b0b", "clsB"),  # train
+        Member("brdiv", 2, "conf", "p_b2c", "clsB"),  # TEST teammate
+        Member("brdiv", 2, "br", "p_b2b", "clsB"),  # TEST member but br -> not a teammate
+        Member("comedi", 1, "self", "p_c1", "clsC"),  # TEST teammate
+        Member("comedi", 3, "self", "p_c3", "clsC"),  # train
+        Member("fcp", 14, "self", "p_f14", "clsF"),  # TEST teammate
+        Member("fcp", 4, "self", "p_f4", "clsF"),  # train
     ]
 
 
@@ -27,11 +27,11 @@ class _Batch:
 
 
 def test_heldout_selection_picks_test_self_conf_across_generators(monkeypatch):
-    import oaht_bench.population.pooled_crossplay as pc
+    import oaht_bench.population.loading as loading
     from oaht_bench.offline import runner
 
     roster = _fake_roster()
-    monkeypatch.setattr(pc, "build_roster", lambda dirs, env: roster)
+    monkeypatch.setattr(loading, "build_roster", lambda dirs, env: roster)
 
     batch = _Batch(
         {
@@ -52,15 +52,16 @@ def test_heldout_selection_picks_test_self_conf_across_generators(monkeypatch):
 
 
 def test_heldout_never_includes_a_train_member(monkeypatch):
-    import oaht_bench.population.pooled_crossplay as pc
+    import oaht_bench.population.loading as loading
     from oaht_bench.offline import runner
 
     roster = _fake_roster()
-    monkeypatch.setattr(pc, "build_roster", lambda dirs, env: roster)
-    batch = _Batch(
-        {"held_out": {"brdiv": [2], "comedi": [1], "fcp": [14]}, "populations": ["x"]}
-    )
-    members = {(lbl.split(":")[0], int(lbl.split(":")[1])) for lbl, *_ in runner._teammate_policies(batch, env=None)}
+    monkeypatch.setattr(loading, "build_roster", lambda dirs, env: roster)
+    batch = _Batch({"held_out": {"brdiv": [2], "comedi": [1], "fcp": [14]}, "populations": ["x"]})
+    members = {
+        (lbl.split(":")[0], int(lbl.split(":")[1]))
+        for lbl, *_ in runner._teammate_policies(batch, env=None)
+    }
     # the train members (brdiv0, comedi3, fcp4) must never surface as eval teammates
     assert ("brdiv", 0) not in members
     assert ("comedi", 3) not in members
@@ -70,18 +71,18 @@ def test_heldout_never_includes_a_train_member(monkeypatch):
 def test_single_population_falls_back_to_population_run(monkeypatch):
     """A split single-population dataset has no 'populations' list; the held-out
     branch must fall back to ['population_run']."""
-    import oaht_bench.population.pooled_crossplay as pc
+    import oaht_bench.population.loading as loading
     from oaht_bench.offline import runner
 
     seen = {}
 
     def fake_build_roster(dirs, env):
         seen["dirs"] = [str(d) for d in dirs]
-        from oaht_bench.population.pooled_crossplay import RosterEntry
+        from oaht_bench.population.members import Member
 
-        return [RosterEntry("brdiv", 2, "conf", "p", "cls")]
+        return [Member("brdiv", 2, "conf", "p", "cls")]
 
-    monkeypatch.setattr(pc, "build_roster", fake_build_roster)
+    monkeypatch.setattr(loading, "build_roster", fake_build_roster)
     batch = _Batch({"held_out": {"brdiv": [2]}, "population_run": "runs/brdiv_run"})
     teammates = runner._teammate_policies(batch, env=None)
     assert seen["dirs"] == ["runs/brdiv_run"]
