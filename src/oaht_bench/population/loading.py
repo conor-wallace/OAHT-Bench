@@ -21,6 +21,7 @@ from typing import Any, TypedDict
 
 import chex
 import jax
+import jax.numpy as jnp
 
 from oaht_bench.models.mlp_actor_critic_agent import (
     ActorWithConditionalCriticPolicy,
@@ -146,18 +147,43 @@ def get_mep_population(
 ) -> MepPopulation:
     '''Build the population from a completed MEP run.
 
-    Stage 1 only (see ``teammate_gen/mep.py``): unlike FCP, MEP does not
-    diversify via checkpoints, so this reads ``final_params`` directly rather
-    than flattening ``checkpoints`` -- the same shape ``get_comedi_population``
-    produces. MEP does not condition on population index, so its actor-type
-    dispatch mirrors ``get_fcp_population``'s (rnn/cnn_rnn/mlp), not the
-    conditional-critic policies CoMeDi/BRDiv/L-BRDiv use.
+    Stage 1 only (see ``teammate_gen/mep.py``): by default this reads
+    ``final_params`` directly, one member per population slot -- the same
+    shape ``get_comedi_population`` produces. MEP does not condition on
+    population index, so its actor-type dispatch mirrors
+    ``get_fcp_population``'s (rnn/cnn_rnn/mlp), not the conditional-critic
+    policies CoMeDi/BRDiv/L-BRDiv use.
+
+    ``gen.release_checkpoints`` (default ``False``) switches to FCP's
+    convention instead: flatten every saved checkpoint into its own population
+    member, matching MEP's own paper's practice ("we use multiple checkpoints
+    ... to form the final population"), which is how TIPR turns MEP's
+    population size 4 into 12-20 distinct opponent policies (App. F.1). MEP's
+    checkpoint array comes out of ``teammate_gen/mep.py`` shaped
+    ``(num_checkpoints, num_seeds, population_size, ...)`` -- checkpoints
+    *outermost*, since a single ``train()`` call already vmaps jointly over
+    ``(num_seeds, population_size)`` before checkpointing adds its own axis in
+    front -- the opposite leading-axis order from FCP's
+    ``(num_seeds, population_size, num_checkpoints, ...)``, so this moves the
+    checkpoint axis in before reshaping, rather than reusing FCP's reshape
+    directly. Flat index is ``member * num_checkpoints + checkpoint``, the same
+    convention ``released_members`` uses for FCP.
     '''
     gen = job.generator
-    mep_pop_size = gen.population_size
+    num_seeds = gen.num_seeds
 
-    # partner_params has shape (num_seeds, mep_pop_size, ...)
-    partner_params = out['final_params']
+    if gen.release_checkpoints:
+        mep_pop_size = gen.population_size * gen.num_checkpoints
+        # (num_checkpoints, num_seeds, population_size, ...) ->
+        # (num_seeds, population_size, num_checkpoints, ...)
+        reordered = jax.tree.map(lambda x: jnp.moveaxis(x, 0, 2), out['checkpoints'])
+        partner_params = jax.tree.map(
+            lambda x: x.reshape(num_seeds, mep_pop_size, *x.shape[3:]), reordered
+        )
+    else:
+        mep_pop_size = gen.population_size
+        # partner_params has shape (num_seeds, mep_pop_size, ...)
+        partner_params = out['final_params']
 
     if gen.actor_type == "rnn":
         partner_policy = RNNActorCriticPolicy(

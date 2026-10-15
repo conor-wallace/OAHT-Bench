@@ -117,8 +117,6 @@ def _collect_single(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
     ``population_path`` is a single run directory. Only 'expert' is implemented
     here; the ε variants need the pooled roster and go through pooled mode.
     """
-    print("Loading single population from ", job.population_path)
-    exit()
     loaded, gen_job = _load_population(job, env)
     num_seats = len(env.agents)
 
@@ -277,9 +275,6 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
     pop_dirs = [Path(p) for p in job.population_path]
     roster = load_teammate_policies(pop_dirs, env)
 
-    for entry in roster:
-        print(f"Roster entry: generator={entry.generator}, member={entry.member}, role={entry.role}")
-
     egos = load_ego_policies(job.br_population_path, env)
     egos_by_id = index_by_identity(egos)
     pooled_matrix = load_pooled_matrix(job.pooled_matrix_path)
@@ -321,14 +316,6 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
             allowed=split.train_indices,
         )
     num_seats = len(env.agents)
-
-    for seating in plan:
-        print(
-            f"Seating: ego={seating.ego}, teammate={seating.teammate}, "
-            f"epsilon={seating.epsilon:.3f}, target={seating.target:.3f}"
-        )
-
-    exit()
 
     def stream():
         # The plan carries at most one Seating per unique (ego, teammate) pairing

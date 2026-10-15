@@ -317,6 +317,17 @@ class MepConfig(GeneratorBase):
 
     generator: Literal["mep"] = "mep"
     actor_type: ActorType = "mlp"
+    release_checkpoints: bool = Field(
+        default=False,
+        description="Release every saved checkpoint (beginner/middle/.../best, "
+        "per MEP's own paper, §4: 'we use multiple checkpoints ... to form the "
+        "final population') as an independent population member, the same way "
+        "get_fcp_population flattens FCP's. Off by default: every existing MEP "
+        "population was trained with the shared num_checkpoints=5 default but "
+        "never read it, so flipping this on changes an existing population's "
+        "released size from population_size to population_size * num_checkpoints "
+        "-- re-score deliberately, not by changing this default.",
+    )
     total_timesteps: float = Field(default=1e6, gt=0, description="Per member trained.")
     population_entropy_coef: float = Field(
         default=0.010,
