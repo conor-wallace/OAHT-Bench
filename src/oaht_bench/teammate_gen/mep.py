@@ -273,7 +273,7 @@ class MepTrainer:
         runner_state, update_steps = update_runner_state
 
         env_step = partial(self._env_step, update_steps=update_steps)
-        runner_state, traj_batch = jax.lax.scan(
+        runner_state, (traj_batch, bonus_diag) = jax.lax.scan(
             env_step, runner_state, None, self.config.rollout_length
         )
 
@@ -335,6 +335,13 @@ class MepTrainer:
         condensed_metric["value_loss"] = loss_info[1][0].mean()
         condensed_metric["actor_loss"] = loss_info[1][1].mean()
         condensed_metric["entropy_loss"] = loss_info[1][2].mean()
+        # True per-step means over the whole rollout (every actor, every
+        # timestep) -- not episode-end-masked like the metrics above -- so
+        # the entropy bonus's magnitude can be read directly against the
+        # task reward's own per-step magnitude, instead of inferred from
+        # training behavior.
+        condensed_metric["population_entropy_bonus_mean"] = bonus_diag["entropy_bonus"].mean()
+        condensed_metric["task_reward_per_step_mean"] = bonus_diag["task_reward"].mean()
 
         return (runner_state, update_steps), condensed_metric
 
@@ -421,18 +428,25 @@ class MepTrainer:
 
         info = jax.tree.map(lambda x: x.reshape(self.config.num_actors), info)
 
+        task_reward = batchify(reward, self.env.agents, self.config.num_actors).squeeze()
         transition = Transition(
             batchify(new_done, self.env.agents, self.config.num_actors).squeeze(),
             action,
             value,
-            batchify(reward, self.env.agents, self.config.num_actors).squeeze() + entropy_bonus,
+            task_reward + entropy_bonus,
             log_prob,
             last_obs_batch,
             info,
             avail_actions,
         )
         runner_state = (train_state, new_env_state, new_obs, new_done, new_hstate, rng)
-        return runner_state, transition
+        # Per-step, every-actor diagnostic -- deliberately NOT routed through
+        # `info`/`_mask_and_mean`, which only average at episode-end steps
+        # (the right semantics for `returned_episode_returns` etc., but wrong
+        # here: the entropy bonus and task reward both apply every step, and
+        # comparing their per-step magnitudes is the point).
+        bonus_diag = {"entropy_bonus": entropy_bonus, "task_reward": task_reward}
+        return runner_state, (transition, bonus_diag)
 
     def _get_advantages(self, gae_and_next_value, transition):
         gae, next_value = gae_and_next_value
