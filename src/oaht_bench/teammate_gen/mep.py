@@ -311,6 +311,15 @@ class MepTrainer:
         mask = traj_batch.info.get("returned_episode", jnp.ones_like(traj_batch.reward))
         metric = jax.tree.map(lambda x: _mask_and_mean(x, mask), traj_batch.info)
         metric["update_steps"] = update_steps
+        # True per-step means over the whole rollout (every actor, every
+        # timestep) -- not episode-end-masked like the metrics above -- so
+        # the entropy bonus's magnitude can be read directly against the
+        # task reward's own per-step magnitude, instead of inferred from
+        # training behavior. Inserted here, before the callback, since that
+        # is what actually reaches metrics.jsonl -- condensed_metric below
+        # is a separate, later-built dict the callback never sees.
+        metric["population_entropy_bonus_mean"] = bonus_diag["entropy_bonus"].mean()
+        metric["task_reward_per_step_mean"] = bonus_diag["task_reward"].mean()
 
         jax.experimental.io_callback(self._callback, None, metric)
 
@@ -335,13 +344,9 @@ class MepTrainer:
         condensed_metric["value_loss"] = loss_info[1][0].mean()
         condensed_metric["actor_loss"] = loss_info[1][1].mean()
         condensed_metric["entropy_loss"] = loss_info[1][2].mean()
-        # True per-step means over the whole rollout (every actor, every
-        # timestep) -- not episode-end-masked like the metrics above -- so
-        # the entropy bonus's magnitude can be read directly against the
-        # task reward's own per-step magnitude, instead of inferred from
-        # training behavior.
-        condensed_metric["population_entropy_bonus_mean"] = bonus_diag["entropy_bonus"].mean()
-        condensed_metric["task_reward_per_step_mean"] = bonus_diag["task_reward"].mean()
+        # population_entropy_bonus_mean/task_reward_per_step_mean are already
+        # in condensed_metric via the metric.items() loop above, inserted
+        # into `metric` before the callback (see there for why).
 
         return (runner_state, update_steps), condensed_metric
 
