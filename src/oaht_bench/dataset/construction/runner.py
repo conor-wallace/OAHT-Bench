@@ -34,7 +34,11 @@ from oaht_bench.dataset.vault import VaultWriter
 from oaht_bench.envs import make_env
 from oaht_bench.envs.log_wrapper import LogWrapper
 from oaht_bench.population import artifact_dir, population_from_run, released_members
-from oaht_bench.population.loading import load_ego_policies, load_teammate_policies
+from oaht_bench.population.loading import (
+    load_ego_policies,
+    load_ego_policies_at_ratio,
+    load_teammate_policies,
+)
 from oaht_bench.population.members import index_by_identity
 
 log = logging.getLogger(__name__)
@@ -275,7 +279,11 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
     pop_dirs = [Path(p) for p in job.population_path]
     roster = load_teammate_policies(pop_dirs, env)
 
-    egos = load_ego_policies(job.br_population_path, env)
+    egos = (
+        load_ego_policies_at_ratio(job.br_population_path, env, ratio=job.ego_ratio)
+        if job.ego_ratio is not None
+        else load_ego_policies(job.br_population_path, env)
+    )
     egos_by_id = index_by_identity(egos)
     pooled_matrix = load_pooled_matrix(job.pooled_matrix_path)
     # Guard the emitted indices against a matrix computed for a different or
@@ -371,6 +379,7 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
         # Seat 0 is always the trained best-response for whichever teammate identity
         # the ε sampler drew as "ego", never a reused population policy.
         "br_population_path": job.br_population_path,
+        "ego_ratio": job.ego_ratio,
         "temperature": job.temperature if job.variant == "weighted" else None,
         # Train/test teammate split (§8). test_teammates are the held-out policies
         # online evaluation rolls the trained ego against; they never appear below.

@@ -84,6 +84,8 @@ from oaht_bench.teammate_gen.marl.lr_schedule import make_lr_schedule
 from oaht_bench.teammate_gen.marl.ppo_utils import (
     Transition,
     _create_minibatches,
+    _is_checkpoint_step,
+    _maybe_store_checkpoint,
     batchify,
     unbatchify,
 )
@@ -120,35 +122,6 @@ def population_entropy_bonus(member_log_probs: jnp.ndarray, coef: float) -> jnp.
 def _mask_and_mean(x, mask):
     """Mean of ``x`` over the entries where ``mask`` is true, else 0."""
     return jnp.where(mask, x, 0).sum() / jnp.maximum(1, mask.sum())
-
-
-def _is_checkpoint_step(update_steps, num_updates, num_checkpoints):
-    """True on update steps whose params should be snapshotted: ``num_checkpoints``
-    evenly spaced steps across training, plus always the final step (which may
-    not land exactly on that spacing)."""
-    ckpt_interval = num_updates // max(1, num_checkpoints - 1)
-    return jnp.logical_or(
-        jnp.equal(jnp.mod(update_steps - 1, ckpt_interval), 0),
-        jnp.equal(update_steps, num_updates),
-    )
-
-
-def _maybe_store_checkpoint(checkpoint_array, ckpt_idx, params, should_store):
-    """Write ``params`` into ``checkpoint_array[ckpt_idx]`` and advance ``ckpt_idx``
-    if ``should_store``, else leave both unchanged."""
-
-    def store(args):
-        _checkpoint_array, _ckpt_idx, _params = args
-        new_checkpoint_array = jax.tree.map(
-            lambda c_arr, p: c_arr.at[_ckpt_idx].set(p), _checkpoint_array, _params
-        )
-        return new_checkpoint_array, _ckpt_idx + 1
-
-    def skip(args):
-        _checkpoint_array, _ckpt_idx, _ = args
-        return _checkpoint_array, _ckpt_idx
-
-    return jax.lax.cond(should_store, store, skip, (checkpoint_array, ckpt_idx, params))
 
 
 class MepTrainer:

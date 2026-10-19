@@ -22,6 +22,7 @@ from typing import Any, TypedDict
 import chex
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from oaht_bench.models.mlp_actor_critic_agent import (
     ActorWithConditionalCriticPolicy,
@@ -532,6 +533,102 @@ def load_ego_policies(br_dir: Path | str, env: TrainingEnv) -> list[Member]:
     egos = []
     for e in manifest:
         params = jax.tree.map(lambda leaf, p=e["pos"]: leaf[p], by_source[str(e["source_index"])])
+        egos.append(
+            Member(
+                e["generator"],
+                int(e["member"]),
+                e["role"],
+                params,
+                _policy_cls(e["source_population_path"]),
+            )
+        )
+    return egos
+
+
+def _checkpoint_update_steps(num_updates: int, num_checkpoints: int) -> np.ndarray:
+    """The 1-indexed update steps ``make_br_train``'s ``_is_checkpoint_step`` stores a
+    checkpoint on, in storage order (ascending) -- mirrors that JAX condition in plain
+    numpy so a saved ``ego_return_curve`` can be read back without re-running training.
+    """
+    ckpt_interval = num_updates // max(1, num_checkpoints - 1)
+    steps = np.arange(1, num_updates + 1)
+    is_ckpt = ((steps - 1) % ckpt_interval == 0) | (steps == num_updates)
+    return steps[is_ckpt]
+
+
+def select_ratio_checkpoint(checkpoints, return_curve, *, ratio: float):
+    """Pick the checkpoint whose return against the fixed teammate is closest to
+    ``ratio`` of the fully-converged (final) return -- TIPR's Optimal Ratio ``ρ``.
+
+    ``checkpoints`` is one member's ``(num_checkpoints,) + params_shape`` pytree (the
+    leading axis in storage order, oldest first); ``return_curve`` is that same
+    member's ``(num_updates,)`` per-update return curve, as saved alongside it. At
+    ``ratio=1.0`` the target is the final return itself, which the last stored
+    checkpoint always matches exactly by construction (its update step is always
+    ``num_updates``) -- so this degenerates to selecting the last checkpoint, the same
+    one :func:`load_ego_policies` returns.
+    """
+    return_curve = np.asarray(return_curve)
+    num_updates = return_curve.shape[0]
+    num_checkpoints = jax.tree_util.tree_leaves(checkpoints)[0].shape[0]
+    steps = _checkpoint_update_steps(num_updates, num_checkpoints)
+    checkpoint_returns = return_curve[steps - 1]
+    target = ratio * return_curve[-1]
+    diffs = np.abs(checkpoint_returns - target)
+    # Ties broken toward the latest checkpoint (np.argmin keeps the first match
+    # otherwise), so ratio=1.0 -- whose target is return_curve[-1] exactly, a value
+    # every checkpoint can tie on verbatim when the curve is flat -- always resolves
+    # to the last checkpoint, not whichever flat run happens to come first.
+    idx = len(diffs) - 1 - int(np.argmin(diffs[::-1]))
+    return jax.tree.map(lambda c: c[idx], checkpoints)
+
+
+def load_ego_policies_at_ratio(br_dir: Path | str, env: TrainingEnv, *, ratio: float) -> list[Member]:
+    """Like :func:`load_ego_policies`, but seat a ρ-matched intermediate checkpoint
+    instead of the fully-converged best response -- TIPR's Optimal Ratio dataset
+    construction, where each dataset is built from a single, uniformly undertrained ego
+    rather than the converged BR. Requires the source ``ppo_br`` artifact to have been
+    trained with ``num_checkpoints > 1`` (it must carry ``checkpoints_by_source`` and
+    ``ego_return_curve_by_source``); raises clearly rather than silently falling back to
+    the converged BR if it wasn't.
+    """
+    import json
+
+    from oaht_bench.common.save_load_utils import load_train_run
+    from oaht_bench.configs import load_job
+
+    br_dir = Path(br_dir)
+    run_dir = br_dir.parent.parent if br_dir.name == "saved_train_run" else br_dir
+    manifest = json.loads((run_dir / "br_manifest.json").read_text())
+    saved = load_train_run(str(artifact_dir(run_dir)))
+    if "checkpoints_by_source" not in saved or "ego_return_curve_by_source" not in saved:
+        raise ValueError(
+            f"{run_dir} has no per-checkpoint artifact (checkpoints_by_source / "
+            "ego_return_curve_by_source) -- it was trained with num_checkpoints=1, so "
+            f"there is no intermediate checkpoint to select ratio={ratio} from. "
+            "Retrain this ppo_br run with num_checkpoints > 1 to use load_ego_policies_at_ratio."
+        )
+    checkpoints_by_source = saved["checkpoints_by_source"]
+    curve_by_source = saved["ego_return_curve_by_source"]
+
+    cls_cache: dict[str, Any] = {}
+
+    def _policy_cls(src_path: str):
+        if src_path not in cls_cache:
+            sr = Path(src_path)
+            sr = sr.parent.parent if sr.name == "saved_train_run" else sr
+            sj = load_job(sr / "job.json")
+            cls_cache[src_path] = population_from_run(
+                sj, load_train_run(str(artifact_dir(sr))), env
+            ).policy_cls
+        return cls_cache[src_path]
+
+    egos = []
+    for e in manifest:
+        src_idx, pos = str(e["source_index"]), e["pos"]
+        member_checkpoints = jax.tree.map(lambda leaf, p=pos: leaf[p], checkpoints_by_source[src_idx])
+        member_curve = np.asarray(curve_by_source[src_idx])[pos]
+        params = select_ratio_checkpoint(member_checkpoints, member_curve, ratio=ratio)
         egos.append(
             Member(
                 e["generator"],

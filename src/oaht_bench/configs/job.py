@@ -213,6 +213,19 @@ class DatasetCollectionJob(JobBase):
         "a competent partner for the wrong one. Both are worth having and they "
         "are not interchangeable — see §4.3.",
     )
+    ego_ratio: float | None = Field(
+        default=None,
+        gt=0.0,
+        le=1.0,
+        description="TIPR's Optimal Ratio rho: seat every teammate's ego at the "
+        "checkpoint whose return against that teammate is closest to this fraction "
+        "of the fully-converged best response's own return, instead of the converged "
+        "BR itself (see `mismatch_fraction`'s docstring for the rho vs. mismatch "
+        "distinction). None (default) keeps every existing job byte-for-byte "
+        "unaffected -- the converged BR via `load_ego_policies`. Only applies to "
+        "pooled mode's 'expert'-variant ego; requires `br_population_path` to point "
+        "at a `ppo_br` run trained with `num_checkpoints > 1`.",
+    )
     num_episodes: int = Field(gt=0)
     mirror_trajectories: bool = Field(
         default=False,

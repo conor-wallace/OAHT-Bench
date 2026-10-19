@@ -31,6 +31,8 @@ from oaht_bench.teammate_gen.marl.lr_schedule import make_lr_schedule
 from oaht_bench.teammate_gen.marl.ppo_utils import (
     Transition,
     _create_minibatches,
+    _is_checkpoint_step,
+    _maybe_store_checkpoint,
 )
 from oaht_bench.teammate_gen.marl.reward_shaping import add_shaped_reward
 
@@ -92,6 +94,9 @@ def make_br_train(runtime, env, ego_policy, teammate_policy, logger=None, progre
         train_state = TrainState.create(
             apply_fn=ego_policy.network.apply, params=ego_init_params, tx=tx
         )
+        checkpoint_array = jax.tree.map(
+            lambda x: jnp.zeros((config.num_checkpoints,) + x.shape, x.dtype), ego_init_params
+        )
 
         rng, reset_rng = jax.random.split(rng)
         obsv, env_state = jax.vmap(env.reset)(jax.random.split(reset_rng, n_envs))
@@ -126,7 +131,9 @@ def make_br_train(runtime, env, ego_policy, teammate_policy, logger=None, progre
                     jax.random.split(step_rng, n_envs), env_state, env_act
                 )
                 reward = add_shaped_reward(
-                    reward, info, env.agents,
+                    reward,
+                    info,
+                    env.agents,
                     horizon=config.ppo.reward_shaping_horizon,
                     global_env_step=upd * config.rollout_length * n_envs,
                 )
@@ -144,10 +151,30 @@ def make_br_train(runtime, env, ego_policy, teammate_policy, logger=None, progre
                     info,
                     avail[ego_name].astype(jnp.float32),
                 )
-                carry = (train_state, new_env_state, new_obs, new_done, new_ego_h, new_mate_h, upd, rng)
+                carry = (
+                    train_state,
+                    new_env_state,
+                    new_obs,
+                    new_done,
+                    new_ego_h,
+                    new_mate_h,
+                    upd,
+                    rng,
+                )
                 return carry, transition
 
-            (train_state, env_state, last_obs, last_done, ego_h, mate_h, upd, rng) = runner_state
+            (
+                train_state,
+                env_state,
+                last_obs,
+                last_done,
+                ego_h,
+                mate_h,
+                upd,
+                rng,
+                checkpoint_array,
+                ckpt_idx,
+            ) = runner_state
             carry, traj = jax.lax.scan(
                 _env_step,
                 (train_state, env_state, last_obs, last_done, ego_h, mate_h, upd, rng),
@@ -158,7 +185,13 @@ def make_br_train(runtime, env, ego_policy, teammate_policy, logger=None, progre
 
             avail = jax.lax.stop_gradient(jax.vmap(env.get_avail_actions)(env_state.env_state))
             _, last_val, _, _ = _ego_forward(
-                train_state.params, last_obs, last_done, avail, ego_h, jax.random.PRNGKey(0), ego_aux_id
+                train_state.params,
+                last_obs,
+                last_done,
+                avail,
+                ego_h,
+                jax.random.PRNGKey(0),
+                ego_aux_id,
             )
             last_val = last_val.squeeze()
 
@@ -201,7 +234,8 @@ def make_br_train(runtime, env, ego_policy, teammate_policy, logger=None, progre
                         gae = (mb_adv - mb_adv.mean()) / (mb_adv.std() + 1e-8)
                         actor_loss = -jnp.minimum(
                             ratio * gae,
-                            jnp.clip(ratio, 1.0 - config.ppo.clip_eps, 1.0 + config.ppo.clip_eps) * gae,
+                            jnp.clip(ratio, 1.0 - config.ppo.clip_eps, 1.0 + config.ppo.clip_eps)
+                            * gae,
                         ).mean()
                         entropy = pi.entropy().mean()
                         return (
@@ -232,7 +266,9 @@ def make_br_train(runtime, env, ego_policy, teammate_policy, logger=None, progre
                 return jnp.where(mask, x, 0).sum() / jnp.maximum(1, mask.sum())
 
             mask = traj.info.get("returned_episode", jnp.ones_like(traj.reward))
-            metric = {"ego_return": _mean(traj.info.get("returned_episode_returns", traj.reward), mask)}
+            metric = {
+                "ego_return": _mean(traj.info.get("returned_episode_returns", traj.reward), mask)
+            }
             # Tick the host-side progress bar once per update (fires once per update even
             # under the member vmap -- io_callback batches the lane axis), the same
             # mechanism ippo uses to stream from inside its device scan. The callback must
@@ -245,15 +281,43 @@ def make_br_train(runtime, env, ego_policy, teammate_policy, logger=None, progre
                     progress_callback()
 
                 jax.experimental.io_callback(_tick, None, upd)
-            runner_state = (train_state, env_state, last_obs, last_done, ego_h, mate_h, upd + 1, rng)
+            should_store = _is_checkpoint_step(upd + 1, config.num_updates, config.num_checkpoints)
+            checkpoint_array, ckpt_idx = _maybe_store_checkpoint(
+                checkpoint_array, ckpt_idx, train_state.params, should_store
+            )
+            runner_state = (
+                train_state,
+                env_state,
+                last_obs,
+                last_done,
+                ego_h,
+                mate_h,
+                upd + 1,
+                rng,
+                checkpoint_array,
+                ckpt_idx,
+            )
             return runner_state, metric
 
         init_done = {name: jnp.zeros((n_envs,), dtype=bool) for name in env.agents + ["__all__"]}
-        runner_state = (train_state, env_state, obsv, init_done, ego_h0, mate_h0, jnp.asarray(0), rng)
-        runner_state, metrics = jax.lax.scan(
-            _update_step, runner_state, None, config.num_updates
+        runner_state = (
+            train_state,
+            env_state,
+            obsv,
+            init_done,
+            ego_h0,
+            mate_h0,
+            jnp.asarray(0),
+            rng,
+            checkpoint_array,
+            jnp.asarray(0),
         )
-        return {"final_params": runner_state[0].params, "metrics": metrics}
+        runner_state, metrics = jax.lax.scan(_update_step, runner_state, None, config.num_updates)
+        return {
+            "final_params": runner_state[0].params,
+            "checkpoints": runner_state[8],
+            "metrics": metrics,
+        }
 
     return train
 
@@ -280,7 +344,9 @@ def _vmap_train_chunked(train, rngs, teammate_params, ego_init_params, ego_aux_i
         sl = slice(s, s + chunk)
         aux = None if ego_aux_ids is None else ego_aux_ids[sl]
         outs.append(
-            vtrain(rngs[sl], _tree_slice(teammate_params, sl), _tree_slice(ego_init_params, sl), aux)
+            vtrain(
+                rngs[sl], _tree_slice(teammate_params, sl), _tree_slice(ego_init_params, sl), aux
+            )
         )
     return jax.tree.map(lambda *xs: jnp.concatenate(xs, axis=0), *outs)
 
@@ -345,7 +411,7 @@ def _train_source(src_path, job, env, base, source_index, logger):
         rollout_length=job.env.rollout_length,
         num_envs=gen.num_envs,
         total_timesteps=gen.total_timesteps,
-        num_checkpoints=1,
+        num_checkpoints=gen.num_checkpoints,
         num_agents=base.num_agents,
         pop_size=loaded.pop_size,
     )
@@ -361,7 +427,11 @@ def _train_source(src_path, job, env, base, source_index, logger):
         dynamic_ncols=True,
     )
     train = make_br_train(
-        rt, env, loaded.policy_cls, loaded.policy_cls, logger=logger,
+        rt,
+        env,
+        loaded.policy_cls,
+        loaded.policy_cls,
+        logger=logger,
         progress_callback=lambda: bar.update(1),
     )
     rngs = jax.random.split(jax.random.PRNGKey(gen.train_seed + source_index), len(members))
@@ -371,7 +441,13 @@ def _train_source(src_path, job, env, base, source_index, logger):
         )
     finally:
         bar.close()
-    return result["final_params"], entries, loaded.policy_cls, result["metrics"]
+    return (
+        result["final_params"],
+        result["checkpoints"],
+        entries,
+        loaded.policy_cls,
+        result["metrics"],
+    )
 
 
 def run_ppo_br(job, logger):
@@ -406,10 +482,15 @@ def run_ppo_br(job, logger):
     if isinstance(sources, str):
         sources = [sources]
 
-    br_by_source, manifest, all_returns, first_cls = {}, [], [], None
+    br_by_source, checkpoints_by_source, ego_return_curve_by_source = {}, {}, {}
+    manifest, all_returns, first_cls = [], [], None
     for i, src_path in enumerate(sources):
-        br_params, entries, policy_cls, metrics = _train_source(src_path, job, env, base, i, logger)
+        br_params, checkpoints, entries, policy_cls, metrics = _train_source(
+            src_path, job, env, base, i, logger
+        )
         br_by_source[str(i)] = br_params
+        checkpoints_by_source[str(i)] = checkpoints
+        ego_return_curve_by_source[str(i)] = metrics["ego_return"]
         manifest.extend(entries)
         all_returns.append((entries, np.asarray(metrics["ego_return"])[:, -1]))
         first_cls = first_cls or policy_cls
@@ -432,7 +513,15 @@ def run_ppo_br(job, logger):
     # would not find the params. ppo_br is consumed straight from results/ (no release
     # step), so both must sit together there.
     run_dir = Path(job.run_dir()).resolve()
-    save_train_run({"br_by_source": br_by_source}, str(run_dir), savename="saved_train_run")
+    save_train_run(
+        {
+            "br_by_source": br_by_source,
+            "checkpoints_by_source": checkpoints_by_source,
+            "ego_return_curve_by_source": ego_return_curve_by_source,
+        },
+        str(run_dir),
+        savename="saved_train_run",
+    )
     (run_dir / "br_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
     population = AgentPopulation(pop_size=len(manifest), policy_cls=first_cls)
