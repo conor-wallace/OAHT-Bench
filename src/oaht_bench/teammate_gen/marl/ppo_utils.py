@@ -26,10 +26,30 @@ def unbatchify(x: jnp.ndarray, agent_list, num_envs, num_agents):
     return {a: x[i] for i, a in enumerate(agent_list)}
 
 
-def _is_checkpoint_step(update_steps, num_updates, num_checkpoints):
+def _is_checkpoint_step(update_steps, num_updates, num_checkpoints, evenly_spaced=False):
     """True on update steps whose params should be snapshotted: ``num_checkpoints``
     evenly spaced steps across training, plus always the final step (which may
-    not land exactly on that spacing)."""
+    not land exactly on that spacing).
+
+    ``evenly_spaced=True`` (default ``False``, reproducing the formula above
+    exactly) instead snapshots at ``num_checkpoints`` targets computed
+    directly from the already-known ``num_updates`` -- e.g. steps 30/60/90
+    for 3 checkpoints over 90 updates -- rather than ``num_checkpoints - 1``
+    equal-width segments measured from training start, which puts the first
+    checkpoint one update after random init: a near-identical snapshot every
+    member's checkpoint 0 otherwise shares regardless of
+    generator/population/coefficient (observed directly: a released
+    population's minimum pairwise KL divergence was 0.0000 with the default
+    spacing). Only MEP's own checkpoint call site may opt in;
+    ``population/loading.py``'s ``_checkpoint_update_steps`` independently
+    duplicates the formula below to recover each stored checkpoint's update
+    step for ``ppo_br``'s checkpoint-ratio selection without re-running
+    training, so that call site must never see ``evenly_spaced=True``."""
+    if evenly_spaced:
+        target_steps = jnp.asarray(
+            [(k * num_updates) // num_checkpoints for k in range(1, num_checkpoints + 1)]
+        )
+        return jnp.any(jnp.equal(update_steps, target_steps))
     ckpt_interval = num_updates // max(1, num_checkpoints - 1)
     return jnp.logical_or(
         jnp.equal(jnp.mod(update_steps - 1, ckpt_interval), 0),

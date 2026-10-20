@@ -344,6 +344,26 @@ class MepConfig(GeneratorBase):
         "MEP's population size 4 into TIPR's reported 12-20 distinct opponent "
         "policies (App. F.1).",
     )
+    evenly_spaced_checkpoints: bool = Field(
+        default=False,
+        description="Space release_checkpoints' num_checkpoints snapshots "
+        "directly across the full, already-known training length (e.g. "
+        "steps 30/60/90 for 3 checkpoints over 90 updates), instead of "
+        "num_checkpoints - 1 equal-width segments measured from training "
+        "start. False (default, byte-for-byte unchanged -- same "
+        "zero-means-off convention population_entropy_warmup already uses) "
+        "takes checkpoint 0 one update after random init, which every "
+        "member shares regardless of generator/population/coefficient -- a "
+        "near-identical snapshot across members that drags pairwise "
+        "diversity toward 0 between members otherwise meaningfully "
+        "different once trained (observed directly: a released "
+        "population's minimum pairwise KL divergence was 0.0000 at the "
+        "default spacing). Only affects MEP's own checkpoint call site --"
+        " ppo_br's checkpoint selection (population/loading.py's "
+        "_checkpoint_update_steps, which independently duplicates the "
+        "default formula to recover update steps without re-running "
+        "training) is untouched regardless of this setting.",
+    )
     total_timesteps: float = Field(default=1e6, gt=0, description="Per member trained.")
     population_entropy_coef: float = Field(
         default=0.010,

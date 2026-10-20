@@ -220,6 +220,20 @@ def build() -> TeammateGenerationJob:
         # all task learning in a controlled local run; 0.001 was the value
         # found, by direct trial, to actually let the population learn.
         population_entropy_coef=0.001,
+        # round_robin=True matches the reference's actual training cadence
+        # (confirmed by reading pbt_training() directly -- every PBT iteration
+        # visits each member once, in a random order, training that member
+        # alone for one PPO_RUN_TOT_TIMESTEPS chunk while every other member's
+        # params stay frozen), not this repo's own simultaneous-vmap scheme
+        # MepConfig defaults to. round_robin_chunk_timesteps left at
+        # MepConfig's own default (4e4, the reference's own
+        # PPO_RUN_TOT_TIMESTEPS value). Real cost: wall-clock time scales
+        # ~linearly with population_size under round_robin (members train
+        # strictly sequentially), so this run is expected to take roughly
+        # population_size=20x longer than the pre-round-robin runs at the
+        # same total_timesteps -- a real cost of matching the reference, not
+        # a regression.
+        round_robin=True,
         network=MlpNetwork(),  # hidden_dim=64 already matches SIZE_HIDDEN_LAYERS
         ppo=ppo,
     )

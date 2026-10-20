@@ -24,6 +24,7 @@
         "update_epochs": 8,
         "value_coef": 0.1
       },
+      "round_robin": true,
       "total_timesteps": 15000000.0
     },
     "job_type": "teammate_generation",

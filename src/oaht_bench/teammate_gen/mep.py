@@ -199,6 +199,7 @@ class MepTrainer:
         logger,
         population_entropy_coef,
         population_entropy_warmup=0.0,
+        evenly_spaced_checkpoints=False,
         progress_callback=None,
         gradient_accumulation_steps=1,
     ):
@@ -207,6 +208,7 @@ class MepTrainer:
         self.logger = logger
         self.population_entropy_coef = population_entropy_coef
         self.population_entropy_warmup = population_entropy_warmup
+        self.evenly_spaced_checkpoints = evenly_spaced_checkpoints
         self.progress_callback = progress_callback
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.policy, _ = initialize_agent(
@@ -529,7 +531,10 @@ class MepTrainer:
         )
         _, update_steps = update_runner_state
         should_store = _is_checkpoint_step(
-            update_steps, self.config.num_updates, self.config.num_checkpoints
+            update_steps,
+            self.config.num_updates,
+            self.config.num_checkpoints,
+            evenly_spaced=self.evenly_spaced_checkpoints,
         )
         checkpoint_array, ckpt_idx = _maybe_store_checkpoint(
             checkpoint_array, ckpt_idx, update_runner_state[0][0].params, should_store
@@ -850,6 +855,7 @@ def train_mep_members(
     population_entropy_coef: float,
     wandb_logger: RunLogger,
     population_entropy_warmup: float = 0.0,
+    evenly_spaced_checkpoints: bool = False,
     round_robin: bool = False,
     round_robin_chunk_timesteps: float = 4e4,
     gradient_accumulation_steps: int = 1,
@@ -872,6 +878,7 @@ def train_mep_members(
         logger=wandb_logger,
         population_entropy_coef=population_entropy_coef,
         population_entropy_warmup=population_entropy_warmup,
+        evenly_spaced_checkpoints=evenly_spaced_checkpoints,
         gradient_accumulation_steps=gradient_accumulation_steps,
     )
     if round_robin:
@@ -926,6 +933,7 @@ def run_mep(job: TeammateGenerationJob, wandb_logger: RunLogger) -> MepPopulatio
                     runtime=runtime,
                     population_entropy_coef=gen.population_entropy_coef,
                     population_entropy_warmup=gen.population_entropy_warmup,
+                    evenly_spaced_checkpoints=gen.evenly_spaced_checkpoints,
                     round_robin=gen.round_robin,
                     round_robin_chunk_timesteps=gen.round_robin_chunk_timesteps,
                     wandb_logger=wandb_logger,

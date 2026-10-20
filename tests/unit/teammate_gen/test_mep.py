@@ -174,6 +174,52 @@ def test_dynamic_index_update_round_trip_has_no_cross_member_aliasing():
                 assert float(updated[other]) == pytest.approx(float(population[other]))
 
 
+def test_is_checkpoint_step_evenly_spaced_false_matches_original_formula():
+    """``evenly_spaced=False`` (the default) must reproduce the pre-existing
+    formula exactly across the whole training range -- the backward-
+    compatibility guarantee ppo_br's checkpoint selection (which never
+    passes this kwarg) relies on, since _is_checkpoint_step is shared.
+    """
+    from oaht_bench.teammate_gen.marl.ppo_utils import _is_checkpoint_step
+
+    def original(update_steps, num_updates, num_checkpoints):
+        ckpt_interval = num_updates // max(1, num_checkpoints - 1)
+        return bool(
+            jnp.logical_or(
+                jnp.equal(jnp.mod(update_steps - 1, ckpt_interval), 0),
+                jnp.equal(update_steps, num_updates),
+            )
+        )
+
+    num_updates, num_checkpoints = 200, 3
+    for s in range(1, num_updates + 1):
+        assert bool(_is_checkpoint_step(s, num_updates, num_checkpoints)) == original(
+            s, num_updates, num_checkpoints
+        )
+        assert bool(
+            _is_checkpoint_step(s, num_updates, num_checkpoints, evenly_spaced=False)
+        ) == original(s, num_updates, num_checkpoints)
+
+
+def test_is_checkpoint_step_evenly_spaced_true_spans_the_full_known_range():
+    """``evenly_spaced=True`` must snapshot at exactly ``num_checkpoints``
+    targets computed directly from ``num_updates`` -- e.g. 30/60/90 for 3
+    checkpoints over 90 updates -- not ``num_checkpoints - 1`` segments
+    measured from training start (which puts the first checkpoint one
+    update after random init; observed directly: a released population's
+    minimum pairwise KL divergence was 0.0000 with the default spacing).
+    """
+    from oaht_bench.teammate_gen.marl.ppo_utils import _is_checkpoint_step
+
+    num_updates, num_checkpoints = 90, 3
+    triggers = [
+        s
+        for s in range(1, num_updates + 1)
+        if bool(_is_checkpoint_step(s, num_updates, num_checkpoints, evenly_spaced=True))
+    ]
+    assert triggers == [30, 60, 90]
+
+
 def _toy_gen(population_entropy_coef, *, population_size=2, num_envs=8, total_timesteps=1600):
     from oaht_bench.configs.teammate_gen import MepConfig
 
@@ -607,3 +653,58 @@ def test_round_robin_logs_member_idx_and_visits_every_member(tmp_path):
         assert count == num_pbt_iters, (
             f"member {member} visited {count} times, expected {num_pbt_iters}"
         )
+
+
+def test_evenly_spaced_checkpoints_separates_cross_member_checkpoint_zero(tmp_path):
+    """Reproduces the actual observed symptom at the parameter level: with
+    ``evenly_spaced_checkpoints=False`` (default), checkpoint 0 is captured
+    one update after random init for every member, so two *different*
+    members' checkpoint 0 are nearly identical in parameter space -- the
+    mechanism behind a real run's minimum pairwise KL divergence landing at
+    0.0000. ``evenly_spaced_checkpoints=True`` must make that cross-member
+    checkpoint-0 distance meaningfully larger, since each member has now
+    trained (and diverged via the population-entropy bonus) for a third of
+    training before its first snapshot is taken.
+    """
+    import numpy as np
+
+    from oaht_bench.common.save_load_utils import load_train_run
+    from oaht_bench.configs import get_preset
+    from oaht_bench.configs.job import TeammateGenerationJob
+    from oaht_bench.population import artifact_dir
+    from oaht_bench.teammate_gen.runner import run
+
+    env = get_preset("lbf_12x12").model_copy(update={"rollout_length": 8})
+
+    def cross_member_ckpt0_distance(evenly_spaced, label):
+        gen = _toy_gen(
+            population_entropy_coef=0.01, population_size=4, num_envs=4, total_timesteps=640
+        ).model_copy(
+            update={
+                "release_checkpoints": True,
+                "num_checkpoints": 3,
+                "evenly_spaced_checkpoints": evenly_spaced,
+            }
+        )
+        job = TeammateGenerationJob(
+            label=label, env=env, generator=gen, output_dir=str(tmp_path / label)
+        )
+        out = load_train_run(str(artifact_dir(run(job))))
+        # checkpoints: (num_seeds=1, population_size, num_checkpoints, param_dim)
+        ckpt0 = np.asarray(jax.tree_util.tree_leaves(out["checkpoints"])[0])[0, :, 0, :]
+        dists = [
+            float(np.linalg.norm(ckpt0[i] - ckpt0[j]))
+            for i in range(ckpt0.shape[0])
+            for j in range(i + 1, ckpt0.shape[0])
+        ]
+        return float(np.mean(dists))
+
+    default_spacing = cross_member_ckpt0_distance(False, "mep_evenly_spaced_off")
+    evenly_spaced = cross_member_ckpt0_distance(True, "mep_evenly_spaced_on")
+
+    assert evenly_spaced > default_spacing, (
+        f"evenly_spaced_checkpoints=True gave mean cross-member checkpoint-0 "
+        f"distance {evenly_spaced:.4f}, expected it to exceed the default "
+        f"spacing's {default_spacing:.4f} -- the fix should move checkpoint 0 "
+        f"out of the near-random-init region every member otherwise shares."
+    )
