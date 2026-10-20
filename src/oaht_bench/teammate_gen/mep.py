@@ -120,6 +120,37 @@ def population_entropy_bonus(member_log_probs: jnp.ndarray, coef: float) -> jnp.
     return -coef * pop_log_prob
 
 
+def population_entropy_coef_schedule(update_steps, num_updates, warmup_fraction, target_coef):
+    """Linear warmup: 0 at ``update_steps=0``, ``target_coef`` once
+    ``update_steps`` reaches ``warmup_fraction * num_updates``, held at
+    ``target_coef`` after.
+
+    The reference implementation applies its entropy-pool coefficient as a
+    flat constant for the whole run (confirmed directly from
+    ``baselines/baselines/ppo2/runner.py`` -- no warmup, no decay). It can get
+    away with that because Overcooked's task reward grows into a scale that
+    naturally dwarfs a small fixed bonus once competence is established; LBF's
+    bounded ~0.5 episode return does not, which is why
+    ``population_entropy_coef=1e-2`` (the paper's own value) was found to
+    dominate task reward by a stable ~19x for the *entire* run, not just
+    early on. A warmup keeps diversity pressure near zero while members are
+    still near-random (where "diversity" would just be initialization noise,
+    not real strategic difference) and ramps it in only once there is a
+    competent baseline to diverge from.
+
+    ``warmup_fraction <= 0`` returns ``target_coef`` unconditionally -- a
+    genuinely different, simpler code path, not a schedule that happens to
+    equal the constant, so every existing config (which never sets this) is
+    byte-for-byte unchanged. Matches ``ppo.lr_warmup``'s own
+    zero-means-off convention (``marl/lr_schedule.py``).
+    """
+    if warmup_fraction <= 0:
+        return target_coef
+    warmup_updates = jnp.maximum(1.0, warmup_fraction * num_updates)
+    frac = jnp.minimum(update_steps / warmup_updates, 1.0)
+    return frac * target_coef
+
+
 def _mask_and_mean(x, mask):
     """Mean of ``x`` over the entries where ``mask`` is true, else 0."""
     return jnp.where(mask, x, 0).sum() / jnp.maximum(1, mask.sum())
@@ -152,6 +183,7 @@ class MepTrainer:
         env,
         logger,
         population_entropy_coef,
+        population_entropy_warmup=0.0,
         progress_callback=None,
         gradient_accumulation_steps=1,
     ):
@@ -159,6 +191,7 @@ class MepTrainer:
         self.env = env
         self.logger = logger
         self.population_entropy_coef = population_entropy_coef
+        self.population_entropy_warmup = population_entropy_warmup
         self.progress_callback = progress_callback
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.policy, _ = initialize_agent(
@@ -319,6 +352,7 @@ class MepTrainer:
         # is a separate, later-built dict the callback never sees.
         metric["population_entropy_bonus_mean"] = bonus_diag["entropy_bonus"].mean()
         metric["task_reward_per_step_mean"] = bonus_diag["task_reward"].mean()
+        metric["population_entropy_coef_current"] = bonus_diag["entropy_coef_current"].mean()
 
         jax.experimental.io_callback(self._callback, None, metric)
 
@@ -343,8 +377,9 @@ class MepTrainer:
         condensed_metric["value_loss"] = loss_info[1][0].mean()
         condensed_metric["actor_loss"] = loss_info[1][1].mean()
         condensed_metric["entropy_loss"] = loss_info[1][2].mean()
-        # population_entropy_bonus_mean/task_reward_per_step_mean are already
-        # in condensed_metric via the metric.items() loop above, inserted
+        # population_entropy_bonus_mean/task_reward_per_step_mean/
+        # population_entropy_coef_current are already in condensed_metric via
+        # the metric.items() loop above, inserted
         # into `metric` before the callback (see there for why).
 
         return (runner_state, update_steps), condensed_metric
@@ -404,9 +439,13 @@ class MepTrainer:
             return member_pi.log_prob(action)
 
         member_log_probs = jax.vmap(_member_log_prob)(gathered_params)
-        entropy_bonus = population_entropy_bonus(
-            member_log_probs, self.population_entropy_coef
-        ).squeeze()
+        current_entropy_coef = population_entropy_coef_schedule(
+            update_steps,
+            self.config.num_updates,
+            self.population_entropy_warmup,
+            self.population_entropy_coef,
+        )
+        entropy_bonus = population_entropy_bonus(member_log_probs, current_entropy_coef).squeeze()
 
         action = action.squeeze()
         log_prob = log_prob.squeeze()
@@ -449,7 +488,11 @@ class MepTrainer:
         # (the right semantics for `returned_episode_returns` etc., but wrong
         # here: the entropy bonus and task reward both apply every step, and
         # comparing their per-step magnitudes is the point).
-        bonus_diag = {"entropy_bonus": entropy_bonus, "task_reward": task_reward}
+        bonus_diag = {
+            "entropy_bonus": entropy_bonus,
+            "task_reward": task_reward,
+            "entropy_coef_current": jnp.asarray(current_entropy_coef),
+        }
         return runner_state, (transition, bonus_diag)
 
     def _get_advantages(self, gae_and_next_value, transition):
@@ -536,6 +579,7 @@ def train_mep_members(
     runtime: PpoRuntime,
     population_entropy_coef: float,
     wandb_logger: RunLogger,
+    population_entropy_warmup: float = 0.0,
     gradient_accumulation_steps: int = 1,
 ) -> TrainOutput:
     """Single seed of training an MEP population. The population axis is
@@ -548,6 +592,7 @@ def train_mep_members(
         env,
         logger=wandb_logger,
         population_entropy_coef=population_entropy_coef,
+        population_entropy_warmup=population_entropy_warmup,
         gradient_accumulation_steps=gradient_accumulation_steps,
     )
     train_jit = jax.jit(jax.vmap(trainer.train, axis_name="population"))
@@ -590,6 +635,7 @@ def run_mep(job: TeammateGenerationJob, wandb_logger: RunLogger) -> MepPopulatio
                     population_size=gen.population_size,
                     runtime=runtime,
                     population_entropy_coef=gen.population_entropy_coef,
+                    population_entropy_warmup=gen.population_entropy_warmup,
                     wandb_logger=wandb_logger,
                     gradient_accumulation_steps=gen.gradient_accumulation_steps,
                 )

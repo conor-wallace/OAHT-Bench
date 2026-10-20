@@ -67,6 +67,35 @@ def test_maybe_store_best_tracks_the_true_running_maximum():
     assert float(best_params["w"]) == 3.0  # the first step to reach 0.9, not step 5's tie
 
 
+def test_population_entropy_coef_schedule_zero_warmup_returns_target_unconditionally():
+    """``warmup_fraction<=0`` is a genuinely different code path (returns the
+    plain ``target_coef`` straight back), not a schedule that happens to
+    evaluate to the constant -- the zero-means-off guarantee every existing
+    config (which never sets this field) relies on.
+    """
+    from oaht_bench.teammate_gen.mep import population_entropy_coef_schedule
+
+    for update_steps in (0, 1, 50, 1000):
+        got = population_entropy_coef_schedule(update_steps, 100, 0.0, 0.5)
+        assert got == 0.5
+
+
+def test_population_entropy_coef_schedule_ramps_linearly_then_holds():
+    from oaht_bench.teammate_gen.mep import population_entropy_coef_schedule
+
+    num_updates, warmup_fraction, target = 100, 0.2, 0.5  # warmup spans 20 updates
+
+    start = population_entropy_coef_schedule(0, num_updates, warmup_fraction, target)
+    mid = population_entropy_coef_schedule(10, num_updates, warmup_fraction, target)
+    end = population_entropy_coef_schedule(20, num_updates, warmup_fraction, target)
+    past = population_entropy_coef_schedule(80, num_updates, warmup_fraction, target)
+
+    assert float(start) == pytest.approx(0.0)
+    assert float(mid) == pytest.approx(0.25)
+    assert float(end) == pytest.approx(target)
+    assert float(past) == pytest.approx(target)  # held, never exceeds target
+
+
 def _toy_gen(population_entropy_coef, *, population_size=2, num_envs=8, total_timesteps=1600):
     from oaht_bench.configs.teammate_gen import MepConfig
 
@@ -273,3 +302,94 @@ def test_population_entropy_coef_raises_trained_population_entropy(tmp_path):
     treated_entropy = _mean_population_entropy_estimate(treated_job, treated_dir)
 
     assert treated_entropy > control_entropy
+
+
+def test_population_entropy_warmup_zero_is_byte_identical_to_unset(tmp_path):
+    """``population_entropy_warmup=0.0`` (explicit) must be a no-op -- the
+    backward-compatibility guarantee this field's default is supposed to
+    provide, checked on real training output (not just the schedule function
+    in isolation). Both runs use the same ``train_seed``, so the only
+    possible source of any divergence is the new field itself.
+    """
+    from oaht_bench.common.save_load_utils import load_train_run
+    from oaht_bench.configs import get_preset
+    from oaht_bench.configs.job import TeammateGenerationJob
+    from oaht_bench.population import artifact_dir
+    from oaht_bench.teammate_gen.runner import run
+
+    env = get_preset("lbf_12x12").model_copy(update={"rollout_length": 8})
+    default_gen = _toy_gen(population_entropy_coef=0.01, num_envs=4, total_timesteps=32)
+
+    default_job = TeammateGenerationJob(
+        label="mep_warmup_default",
+        env=env,
+        generator=default_gen,
+        output_dir=str(tmp_path / "default"),
+    )
+    default_out = load_train_run(str(artifact_dir(run(default_job))))
+
+    explicit_gen = default_gen.model_copy(update={"population_entropy_warmup": 0.0})
+    explicit_job = TeammateGenerationJob(
+        label="mep_warmup_explicit",
+        env=env,
+        generator=explicit_gen,
+        output_dir=str(tmp_path / "explicit"),
+    )
+    explicit_out = load_train_run(str(artifact_dir(run(explicit_job))))
+
+    np.testing.assert_array_equal(
+        np.asarray(default_out["metrics"]["returned_episode_returns"]),
+        np.asarray(explicit_out["metrics"]["returned_episode_returns"]),
+    )
+    default_leaves = jax.tree_util.tree_leaves(default_out["final_params"])
+    explicit_leaves = jax.tree_util.tree_leaves(explicit_out["final_params"])
+    for d, e in zip(default_leaves, explicit_leaves, strict=True):
+        np.testing.assert_array_equal(np.asarray(d), np.asarray(e))
+
+
+def test_population_entropy_warmup_ramps_the_logged_coefficient(tmp_path):
+    """On real training data: ``population_entropy_coef_current`` starts at 0,
+    rises monotonically, and reaches (and holds at) ``population_entropy_coef``
+    by the end of the configured warmup window.
+
+    Reads ``metrics.jsonl`` directly rather than the run's returned
+    ``out["metrics"]`` -- the latter is ``condensed_metric``, which averages
+    every key over episode-ending actor-steps only (right for
+    ``returned_episode_returns`` which is genuinely episode-scoped, but wrong
+    for this per-update scalar: it silently zeroes any update where no
+    episode happened to complete in that tiny rollout). ``metrics.jsonl`` is
+    written from the raw, unmasked ``metric`` dict via the
+    ``io_callback``/``log_metrics_intermediate`` path -- the same
+    distinction a prior session's logging bug turned on (see
+    ``_update_step``'s comment about where this insertion must happen).
+    """
+    import json
+
+    from oaht_bench.configs import get_preset
+    from oaht_bench.configs.job import TeammateGenerationJob
+    from oaht_bench.teammate_gen.runner import run
+
+    env = get_preset("lbf_12x12").model_copy(update={"rollout_length": 8})
+    target_coef = 0.01
+    gen = _toy_gen(
+        population_entropy_coef=target_coef, population_size=2, num_envs=4, total_timesteps=640
+    ).model_copy(update={"population_entropy_warmup": 0.5})
+    job = TeammateGenerationJob(
+        label="mep_warmup_e2e", env=env, generator=gen, output_dir=str(tmp_path)
+    )
+
+    run_dir = run(job)
+    rows = [
+        json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines() if line
+    ]
+    tag = "Train/population_entropy_coef_current"
+    by_step: dict[int, list[float]] = {}
+    for r in rows:
+        if tag in r:
+            by_step.setdefault(r["train_step"], []).append(r[tag])
+    coef_curve = np.array([np.mean(by_step[step]) for step in sorted(by_step)])
+
+    assert coef_curve[0] == pytest.approx(0.0, abs=1e-6)
+    assert coef_curve[-1] == pytest.approx(target_coef, abs=1e-6)
+    assert np.all(np.diff(coef_curve) >= -1e-8)  # monotone through the ramp, then flat
+    assert np.any(np.isclose(coef_curve, target_coef, atol=1e-6))  # genuinely reaches target

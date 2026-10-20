@@ -354,6 +354,23 @@ class MepConfig(GeneratorBase):
         "these are two different terms and both apply. Untuned; starts at the "
         "paper's own middle-of-sweep value (their Table 1).",
     )
+    population_entropy_warmup: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of training over which population_entropy_coef "
+        "linearly ramps from 0 up to its target value, instead of applying at "
+        "full strength from step 1. The reference implementation uses no "
+        "warmup (confirmed directly from its PPO2 fork -- a flat constant for "
+        "the whole run), which works there because Overcooked's task reward "
+        "grows into a scale that naturally dwarfs a small fixed bonus once "
+        "competence is established; LBF's bounded return does not, which is "
+        "why population_entropy_coef=1e-2 (the paper's own value) was found "
+        "to dominate task reward by a stable ~19x for the entire run rather "
+        "than fading as training progressed. 0 (default) keeps every "
+        "existing config byte-for-byte unchanged -- the same zero-means-off "
+        "convention ppo.lr_warmup already uses.",
+    )
     gradient_accumulation_steps: int = Field(
         default=1,
         ge=1,
