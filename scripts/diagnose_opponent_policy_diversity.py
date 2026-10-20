@@ -29,6 +29,25 @@ pi_j's action probabilities at those same observations.
 paper reports a "dissimilarity rate": the fraction of pairs whose KL exceeds
 1.0, as a one-number diversity summary (LBF: 80.56%).
 
+**OMIS's own Appendix G (papers/omis.pdf pp. 30-32) describes near-identical
+methodology for the same MEP mechanism but reports a different number: 66.25%
+for LBF, not TIPR's 80.56%.** Two concrete differences from TIPR's recipe,
+both directly checkable here:
+  - OMIS measures the FULL released population (10 Seen + 10 Unseen = 20 for
+    its own MEP population size), not a Seen-only subset -- 1000 episodes per
+    fixed opponent, 20 egos x 50 episodes each (TIPR: 1200 episodes, 12 egos x
+    100 each). Pass --include-unseen to match this; costs nothing extra to
+    try since ppo_br has no held-out concept at all (it trains a best
+    response against every member of its source population), so Unseen
+    members already have dedicated egos, same as Seen ones.
+  - OMIS's own text ("the state space of LBF is much smaller than PP and OC,
+    making it difficult for well-trained opponent policies to exhibit
+    significant behavioral diversity") suggests LBF specifically may have a
+    genuinely lower achievable ceiling than other environments under this
+    exact mechanism -- worth treating 66.25% as the more directly comparable
+    target for a from-scratch LBF replication, not 80.56%, given the
+    near-identical methodology otherwise.
+
 **This script.** Same procedure, against our own released MEP population and
 its dedicated ppo_br egos -- reusing the exact rollout machinery dataset
 collection uses (collect_episodes_batched), not a reimplementation. Defaults
@@ -38,6 +57,12 @@ publication-quality number once a quick pass looks interesting.
 
     uv run python scripts/diagnose_opponent_policy_diversity.py \\
         --population populations/lbf_9x9/mep \\
+        --br-population results/teammate_generation/ppo_br_lbf_9x9-<hash> \\
+        --dataset results/dataset_collection/pooled_lbf_9x9_tipr-<hash>
+
+    # OMIS's full-population methodology instead of TIPR's Seen-only one:
+    uv run python scripts/diagnose_opponent_policy_diversity.py \\
+        --population populations/lbf_9x9/mep --include-unseen \\
         --br-population results/teammate_generation/ppo_br_lbf_9x9-<hash> \\
         --dataset results/dataset_collection/pooled_lbf_9x9_tipr-<hash>
 """
@@ -52,11 +77,26 @@ import jax.numpy as jnp
 import numpy as np
 
 
-def _seen_roster(population_dirs, dataset_path, env, max_teammates):
-    """The Seen-Set (train) teammate roster -- :func:`load_teammate_policies`
-    filtered to members NOT recorded as held-out at collection time. Reads only
-    the vault's metadata (not the full episode data), matching
-    :func:`~oaht_bench.offline.evaluation._unseen_roster`'s approach."""
+def _seen_roster(population_dirs, dataset_path, env, max_teammates, *, include_unseen=False):
+    """The teammate roster to measure -- :func:`load_teammate_policies`, by
+    default filtered to members NOT recorded as held-out at collection time
+    (TIPR's Seen Set), matching
+    :func:`~oaht_bench.offline.evaluation._unseen_roster`'s approach.
+
+    ``include_unseen=True`` instead returns the *whole* released population
+    (Seen + Unseen together), matching OMIS's own Appendix G methodology
+    (papers/omis.pdf pp. 30-32) rather than TIPR's: OMIS computes its
+    dissimilarity rate over the full population (10 Seen + 10 Unseen = 20
+    for its own MEP-population size), not a Seen-only subset, and reports
+    66.25% for LBF under that methodology -- a materially different number
+    from TIPR's 80.56% despite near-identical appendix text, suggesting the
+    Seen-only restriction itself may explain part of the gap we've been
+    chasing against TIPR's figure specifically. ``ppo_br`` has no
+    held-out concept at all (ppo_br.py trains a best response against every
+    member of its source population) -- the Unseen members already have
+    dedicated egos the same way Seen ones do, so this needs no retraining,
+    just reading the already-released roster without the held_out filter.
+    """
     import types
 
     from oaht_bench.dataset.vault import VaultReader
@@ -64,14 +104,21 @@ def _seen_roster(population_dirs, dataset_path, env, max_teammates):
 
     roster = load_teammate_policies([Path(p) for p in population_dirs], env)
     meta = VaultReader(f"{dataset_path}/dataset.vlt").meta
-    held_out = {int(m) for ms in meta.get("held_out", {}).values() for m in ms}
-    seen = [m for m in roster if int(m.member) not in held_out]
-    if len(seen) < 2:
+    if include_unseen:
+        selected = roster
+    else:
+        held_out = {int(m) for ms in meta.get("held_out", {}).values() for m in ms}
+        selected = [m for m in roster if int(m.member) not in held_out]
+    if len(selected) < 2:
         raise ValueError(
-            f"only {len(seen)} Seen-Set teammates found (roster size {len(roster)}, "
-            f"{len(held_out)} held out) -- need at least 2 to compare."
+            f"only {len(selected)} teammates found (roster size {len(roster)}) -- "
+            f"need at least 2 to compare."
         )
-    return types.SimpleNamespace(meta=meta), seen[:max_teammates]
+    if max_teammates is None:
+        # Seen-only (TIPR) mode defaults to 12, its own Seen Set size; full-roster
+        # (OMIS) mode defaults to uncapped, since 20/20 is the point of that mode.
+        max_teammates = 12 if not include_unseen else len(selected)
+    return types.SimpleNamespace(meta=meta), selected[:max_teammates]
 
 
 def _collect_observation_sample(env, teammate, egos, *, episodes_per_ego, max_episode_steps, rng):
@@ -129,6 +176,7 @@ def diagnose(
     max_teammates: int,
     threshold: float,
     mat_out: Path | None,
+    include_unseen: bool = False,
 ) -> None:
     # env/job.json come from the dataset collection run, so this matches exactly
     # what that dataset was built against.
@@ -141,7 +189,9 @@ def diagnose(
     job = load_job(Path(dataset_path) / "job.json")
     env = LogWrapper(make_env(job.env.env_name, job.env.env_kwargs()))
 
-    _meta, teammates = _seen_roster(population_dirs, dataset_path, env, max_teammates)
+    _meta, teammates = _seen_roster(
+        population_dirs, dataset_path, env, max_teammates, include_unseen=include_unseen
+    )
     egos = load_ego_policies(br_population, env)
     egos_by_id = index_by_identity(egos)
     identities = [(t.generator, int(t.member), t.role) for t in teammates]
@@ -149,13 +199,18 @@ def diagnose(
     if missing:
         raise ValueError(
             f"ppo_br run {br_population!r} has no dedicated best response for "
-            f"{missing} -- must cover the whole Seen-Set roster 1:1."
+            f"{missing} -- must cover the whole roster 1:1 "
+            f"(ppo_br has no held-out concept, so this means the population itself "
+            f"changed since ppo_br was last trained, not an Unseen-member gap)."
         )
     ordered_egos = [egos_by_id[i] for i in identities]
 
     k = len(teammates)
+    roster_label = (
+        "Full roster (Seen+Unseen, OMIS Appendix G methodology)" if include_unseen else "Seen Set"
+    )
     print(
-        f"Seen Set: {k} teammates, {episodes_per_ego} episodes/ego x {k} egos = "
+        f"{roster_label}: {k} teammates, {episodes_per_ego} episodes/ego x {k} egos = "
         f"{episodes_per_ego * k} episodes sampled per teammate ({episodes_per_ego * k * k} total)\n"
     )
 
@@ -184,10 +239,12 @@ def diagnose(
     dissimilar = float(np.mean(offdiag > threshold))
     print(f"\n{k}x{k} pair-wise expected KL divergence matrix (Eq. 33):")
     print(f"  mean={offdiag.mean():.4f}  min={offdiag.min():.4f}  max={offdiag.max():.4f}")
-    print(
-        f"  dissimilarity rate (KL > {threshold}): {dissimilar * 100:.2f}%  "
-        f"[TIPR's own LBF figure: 80.56%]"
+    reference = (
+        "OMIS's own LBF figure (Appendix G, full population): 66.25%"
+        if include_unseen
+        else "TIPR's own LBF figure (Appendix D, Seen Set only): 80.56%"
     )
+    print(f"  dissimilarity rate (KL > {threshold}): {dissimilar * 100:.2f}%  [{reference}]")
 
     if mat_out:
         np.savez(
@@ -224,7 +281,20 @@ def main() -> int:
         default=10,
         help="TIPR uses 100; cost is n_teammates^2 * this.",
     )
-    ap.add_argument("--max-teammates", type=int, default=12, help="TIPR's Seen Set size.")
+    ap.add_argument(
+        "--max-teammates",
+        type=int,
+        default=None,
+        help="Default: 12 (TIPR's Seen Set size) normally, uncapped with --include-unseen.",
+    )
+    ap.add_argument(
+        "--include-unseen",
+        action="store_true",
+        help="Measure the full released population (Seen+Unseen), matching OMIS's "
+        "Appendix G methodology instead of TIPR's Seen-only Appendix D (66.25%% vs "
+        "80.56%% for LBF in the papers themselves). Needs no retraining -- ppo_br has "
+        "no held-out concept, so Unseen members already have dedicated egos.",
+    )
     ap.add_argument(
         "--threshold", type=float, default=1.0, help="Dissimilarity threshold (TIPR: 1.0)."
     )
@@ -240,6 +310,7 @@ def main() -> int:
         max_teammates=args.max_teammates,
         threshold=args.threshold,
         mat_out=args.mat_out,
+        include_unseen=args.include_unseen,
     )
     return 0
 
