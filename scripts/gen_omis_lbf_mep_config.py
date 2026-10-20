@@ -42,12 +42,35 @@ unchanged default, so `lbf_12x12`/`lbf_20x20` are untouched) and setting it
 here explicitly. `rollout_length` is left at 50 too since it's a reasonable
 PPO scan size on its own, not because it does anything to episode length.
 
-Caveat, stated once rather than repeated: our LBF is Jumanji's implementation
-(via jax-aht), not the original `lb-foraging` gym package OMIS actually uses.
-`LbfConfig` has no `force_coop`-style knob to control the solo-vs-cooperative
-eating rule the way the original package does, so this matches every
-*configurable* parameter exactly, not necessarily the underlying game
-mechanics bit-for-bit.
+Caveat, previously stated here but now resolved: our LBF is Jumanji's
+implementation (via jax-aht), not the original `lb-foraging` gym package OMIS
+actually uses, but `LbfConfig` DOES have a `force_coop` knob
+(`configs/env.py`), and checking OMIS's actual code
+(`~/Documents/Personal/Projects/OMIS/pretraining/gen_dataset.py`:
+`gym.make("Foraging-9x9-2p-5f-v2")`, no `-coop` suffix) shows they run with
+`force_coop=False` -- food levels sampled independently and randomly each
+episode (`lbforaging/foraging/environment.py::spawn_food`:
+`min_level = max_level if force_coop else 1`), not the fixed, deterministic
+"2 solo-eatable + 3 coop-required every episode" split `different_levels=True`
+imposes. An earlier version of this script set `different_levels=True`
+without `force_coop` (which only existed as a hardcoded `True` inside
+`make_env.py`, invisible to this config) specifically to work around
+force_coop=True's degenerate "every food needs every agent" case -- but that
+workaround is itself the mismatch: `different_levels=True`'s custom generator
+overwrites food levels unconditionally regardless of `force_coop`'s value, so
+it never actually produced OMIS's real stochastic difficulty mix. Fixed here
+by setting `force_coop=False, different_levels=False` -- the plain
+`RandomGenerator`'s own stochastic sampling, matching lb-foraging's mechanic
+(modulo one formula difference: Jumanji caps each food's level at the
+*sampled* agent levels' sum, lb-foraging at `max_player_level * num_players`
+regardless of the actual draw -- a minor, second-order gap, not the
+structural one). This was flagged as a candidate explanation for MEP's
+population staying far below TIPR's own reported LBF diversity
+(`diagnose_opponent_policy_diversity.py`) even after ruling out
+`population_size` and the population-entropy coefficient's magnitude/timing
+-- the task itself may have offered less genuinely-different-but-competent
+strategy space than OMIS's real environment does, independent of anything
+MEP's training mechanism controls.
 
 MEP hyperparameters are the reference implementation's own defaults
 (`ruizhaogit/maximum_entropy_population_based_training`,
@@ -154,7 +177,8 @@ def build() -> TeammateGenerationJob:
         grid_size=9,
         num_food=5,
         num_agents=2,
-        different_levels=True,
+        different_levels=False,  # see module docstring -- True ignores force_coop entirely
+        force_coop=False,  # matches OMIS's actual gym.make("Foraging-9x9-2p-5f-v2"), no "-coop" suffix
         fov=None,  # full observability -- the paper mentions no sight restriction
         rollout_length=50,  # PPO scan window size -- does NOT set episode length, see module docstring
         time_limit=50,  # OMIS's own horizon_per_ep_dict["lbf"] -- this is what actually sets it
@@ -163,13 +187,14 @@ def build() -> TeammateGenerationJob:
             "Approximately replicates OMIS's (Jing et al., NeurIPS 2024) own LBF "
             "setup for a population-replication experiment: 9x9 grid, 2 agents, 5 "
             "food, full observability, horizon=50 (their own "
-            "horizon_per_ep_dict['lbf']). Our LBF is Jumanji's implementation (via "
-            "jax-aht), not the lb-foraging gym package OMIS actually uses -- no "
-            "force_coop-style knob exists here to match the solo-vs-cooperative "
-            "eating rule exactly, so this matches every configurable parameter, not "
-            "necessarily the underlying game mechanics bit-for-bit. Not a "
-            "registered preset (see scripts/gen_omis_lbf_mep_config.py); not part "
-            "of the tiered benchmark matrix."
+            "horizon_per_ep_dict['lbf']), force_coop=False with stochastic "
+            "per-food levels (matches their actual "
+            "gym.make('Foraging-9x9-2p-5f-v2') -- no '-coop' suffix -- see module "
+            "docstring; an earlier version of this config used force_coop=True + "
+            "different_levels=True, a fixed-split approximation that does not "
+            "match). Not a registered preset (see "
+            "scripts/gen_omis_lbf_mep_config.py); not part of the tiered "
+            "benchmark matrix."
         ),
     )
 

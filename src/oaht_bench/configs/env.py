@@ -113,6 +113,20 @@ class LbfConfig(EnvConfigBase):
     grid_size: int = Field(ge=5, description="Jumanji requires grid_size >= 5.")
     num_food: int = Field(gt=0)
     different_levels: bool = True
+    force_coop: bool = Field(
+        default=True,
+        description="Forwarded to Jumanji's LBF generator. True (default, matches "
+        "every registered preset's existing tuned behavior) makes every food "
+        "item's level the sum of all agents' levels, so no food is ever "
+        "solo-eatable. False samples each food's level independently and "
+        "randomly (`jax-aht`'s `RandomGenerator.sample_levels`), matching "
+        "lb-foraging's own `force_coop=False` semantics -- OMIS's actual LBF "
+        "task (`gym.make('Foraging-9x9-2p-5f-v2')`, no `-coop` suffix) uses "
+        "this, not True. `different_levels=True`'s custom generator ignores "
+        "this flag entirely (it overwrites food levels with its own fixed "
+        "solo/coop split regardless), so set `different_levels=False` "
+        "alongside `force_coop=False` to actually get stochastic levels.",
+    )
     num_agents: int = Field(default=2, gt=0)
     fov: int | None = Field(
         default=None,
@@ -164,6 +178,7 @@ class LbfConfig(EnvConfigBase):
             "grid_size": self.grid_size,
             "num_food": self.num_food,
             "different_levels": self.different_levels,
+            "force_coop": self.force_coop,
             "num_agents": self.num_agents,
         }
         if self.fov is not None:
