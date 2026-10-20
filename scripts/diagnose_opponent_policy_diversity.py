@@ -189,6 +189,15 @@ def diagnose(
     job = load_job(Path(dataset_path) / "job.json")
     env = LogWrapper(make_env(job.env.env_name, job.env.env_kwargs()))
 
+    # NOT job.env.rollout_length -- that only sizes the PPO rollout-collection
+    # scan and is explicitly documented (configs/env.py's own EnvConfigBase
+    # docstring) as decoupled from the environment's real episode-termination
+    # horizon. For LBF, LbfConfig.time_limit is the field that actually reaches
+    # Jumanji's constructor; falling back to rollout_length only for env
+    # families with no such field (this script has only been run against LBF
+    # so far, so that fallback is unverified, not a confirmed-correct value).
+    max_episode_steps = getattr(job.env, "time_limit", None) or job.env.rollout_length
+
     _meta, teammates = _seen_roster(
         population_dirs, dataset_path, env, max_teammates, include_unseen=include_unseen
     )
@@ -224,7 +233,7 @@ def diagnose(
             t,
             ordered_egos,
             episodes_per_ego=episodes_per_ego,
-            max_episode_steps=job.env.rollout_length,
+            max_episode_steps=max_episode_steps,
             rng=rng,
         )
         probs.append([_policy_probs(other, obs, avail) for other in teammates])
