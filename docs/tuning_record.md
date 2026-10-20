@@ -2079,6 +2079,246 @@ dense per-event rewards easily summing to 50-100+ per episode).
 `total_timesteps=1.5e7` budget (not this diagnostic's smaller budget) is the
 final confirmation, left to the user.
 
+### Seventh: the real GPU run learned, but released-population diversity was far below TIPR's reported figure
+
+The full run (`population_size=20`, `population_entropy_coef=0.001`,
+`total_timesteps=1.5e7`) confirmed learning, closing the Sixth entry's open
+item. Built `scripts/diagnose_opponent_policy_diversity.py`, replicating
+TIPR Appendix D / Eq. 33 directly: pair-wise expected KL divergence between
+Seen-Set teammate policies, sampled via "the self-agent traverses through
+all the opponent policies" (every teammate's own dedicated `ppo_br` ego
+rolled out against every teammate, observations collected from the
+teammate's own seat). Result: **47.73% dissimilarity rate, against TIPR's
+reported 80.56% for LBF** — confirmed stable at both 10 and 100
+episodes/ego (not sampling noise).
+
+### Eighth: `population_size` is not the lever
+
+`population_size=5` with `release_best=true` (reaching 20 total released
+members the same way TIPR's "12 Seen + 8 Unseen" split does) gave
+**47.73%** — identical to the `population_size=20`, no-checkpointing run's
+**48.48%**. `min` KL did jump (≈0.005 → 0.454, eliminating near-duplicate
+members) but the aggregate dissimilarity rate barely moved either way.
+Ruled out `population_size` (and checkpoint-vs-independent-member
+structure) as the dominant lever.
+
+### Ninth: `population_entropy_coef` warmup — matches the reference exactly (no warmup exists there either), and doesn't rescue the paper's own coefficient
+
+Fetched the reference's actual PPO2 fork (`baselines/baselines/ppo2/runner.py`)
+directly: the entropy-pool coefficient is injected as a flat constant for the
+whole run — no warmup, no decay. It gets away with this on Overcooked because
+task reward grows into a scale (tens-to-hundreds per episode) that naturally
+dwarfs a small fixed bonus once competence is established; LBF's bounded
+~0.5 return never does, which is why `population_entropy_coef=1e-2` (the
+paper's own value) was found to dominate task reward by a stable ~19x for
+the *entire* run, not just early on.
+
+Implemented a linear warmup (`MepConfig.population_entropy_warmup`, 0 at
+step 1 ramping to the target by `warmup_fraction * num_updates`) on the
+theory that the paper's own coefficient might work if introduced gradually,
+after competence establishes, rather than applied at full strength from
+step 1. It doesn't: even with `warmup_fraction=0.5`, `coef=0.01` still
+collapsed a converging population (return climbing 0.04→0.30, then
+dropping back to ~0.05 once the ramp reached full strength) — warmup only
+*delays* the collapse, it doesn't prevent it. Confirms this is a magnitude
+problem, not a timing problem; `population_entropy_coef=0.001` (the Fifth
+entry's empirically-validated value) remains the only value that has ever
+let this population learn on LBF, warmup or not.
+
+### Tenth: the reference's PBT resample/mutate step is dead code; round-robin training cadence is the only real mechanism gap, and closing it barely moved the number either
+
+The working hypothesis after Ninth was "we're missing the reference's PBT
+selection step (kill the worst performer, replace with a mutated copy of
+the best)." Fetched both reference scripts
+(`pbt_model_pool_entropy_parallel.py` and `pbt_model_pool.py`) directly and
+grepped for the method that would implement it: `PBTAgent.explore_from()`
+is defined on the class but **never called** in `pbt_training()`, in either
+script. `RESAMPLE_PROB`/`MUTATION_FACTORS`/`HYPERPARAMS_TO_MUTATE` are
+declared config values threaded into the saved params dict and never read
+again — dead code, the same category as the `ENT_VERSION=1` default found
+dead earlier (Sixth).
+
+What the reference actually does, confirmed by reading `pbt_training()` and
+`update_model`/`create_model` (`baselines_utils.py`): every PBT iteration
+visits each population member exactly once, in a random order, running a
+self-contained PPO chunk (`PPO_RUN_TOT_TIMESTEPS`) for that member alone
+while every other member's params stay frozen for the visit's duration —
+sequential, not our repo's simultaneous-vmap-every-member-every-step
+scheme. Implemented as `MepConfig.round_robin` (opt-in, default `False`):
+`MepTrainer.train_round_robin` runs a nested scan (PBT iterations → a
+fresh random permutation of visits per iteration), extracting/writing back
+one member's `TrainState` at a time via `jax.lax.dynamic_index_in_dim`/
+`dynamic_update_slice_in_dim`, with the entropy bonus's reduction now
+excluding the currently-training member (`population_entropy_bonus`'s new
+`exclude_idx`, matching the reference's `pbt_population_copy.pop(idx0)`).
+Optimizer state and the per-member cumulative step counter persist across
+a member's non-consecutive visits — verified directly on real training
+output (`update_steps` running 0→99 with no gaps across 20 separate
+visits, not reset each time).
+
+Result: round-robin alone, measured the same way as Eighth, gave **51.52%**
+— barely different from the `population_size=20` simultaneous-vmap
+baseline's 48.48%. The training-cadence mismatch was real and worth fixing
+for fidelity to the reference, but it was not the dominant diversity lever
+either.
+
+### Eleventh: the environment itself was structurally wrong — `force_coop=True` didn't match OMIS's actual lb-foraging setup, and this was the single biggest lever found
+
+Checked OMIS's actual source directly
+(`~/Documents/Personal/Projects/OMIS/pretraining/gen_dataset.py`) rather
+than continuing to assume: `gym.make("Foraging-9x9-2p-5f-v2")` — no
+`-coop` suffix, i.e. `force_coop=False`. `lb-foraging`'s own
+`spawn_food` samples each food's level independently and randomly every
+episode when `force_coop` is off (`min_level = max_level if force_coop else
+1`), not a fixed split.
+
+Our config instead ran `force_coop=True` — hardcoded in `make_env.py` with
+no `LbfConfig` field to override it — plus a custom `different_levels=True`
+generator built to work around `force_coop=True`'s degenerate "every food
+needs every agent" case. That generator imposes a *fixed, deterministic*
+split every episode (exactly 2 solo-eatable + 3 coop-required food, just
+shuffled in position), not OMIS's genuinely stochastic per-episode mix. The
+task our population had been training on was structurally less varied than
+the real one, independent of anything MEP's own training mechanism
+controls.
+
+Added `LbfConfig.force_coop` (default `True`, so every other registered
+preset is unaffected), set `force_coop=False, different_levels=False` for
+the LBF-9x9 replication config specifically, verified `env.reset()` now
+shows food levels varying stochastically per episode instead of the old
+fixed split. Result: **48.48% → 53.03%** — the single most impactful
+change of this entire investigation, and the only one that moved the
+number by more than a couple of points.
+
+### Twelfth: checkpointing (even correctly spaced) nets negative, after fixing a real checkpoint-0 bug
+
+TIPR's own structure (`population_size=4`, checkpointed into ~20 released
+policies) had not yet been tested with `release_checkpoints=True` on the
+*fixed* environment. First attempt (`population_size=6`,
+`num_checkpoints=3`, `round_robin=True`) gave **30.30%** — a regression
+below the no-checkpointing round-robin baseline (51.52%), with `min=0.0000`
+in the KL matrix: two "different" teammates with essentially identical
+policies.
+
+Root cause: `_is_checkpoint_step`'s spacing formula
+(`marl/ppo_utils.py`) triggers checkpoint 0 one update after random
+initialization for *every* member — `(update_steps - 1) % ckpt_interval ==
+0` fires at `update_steps=1` regardless of generator, population size, or
+coefficient. Verified directly: for `num_updates=90, num_checkpoints=3` the
+actual trigger steps are `{1, 46, 90}`, not the `{30, 60, 90}` the
+function's own docstring implies ("evenly spaced steps across training").
+Every member's checkpoint 0 is a near-random snapshot nearly identical to
+every other member's — exactly the mechanism behind the observed
+near-zero-KL pair.
+
+Fixed by adding `evenly_spaced` to `_is_checkpoint_step` (default `False`,
+reproducing the original formula exactly — verified 0 mismatches across a
+full training range) and `MepConfig.evenly_spaced_checkpoints` (default
+`False`, threaded through the same way every other opt-in flag this session
+was). `True` computes the `num_checkpoints` target steps directly from the
+already-known `num_updates` — no extra tunable parameter needed.
+Deliberately does **not** change `_is_checkpoint_step`'s default behavior:
+`population/loading.py`'s `_checkpoint_update_steps` independently
+duplicates the original formula to recover each stored checkpoint's update
+step for `ppo_br`'s "Optimal Ratio ρ" checkpoint-selection mechanism
+without re-running training, so changing the default there would have
+silently broken that feature. Verified the fix works at the parameter
+level, not just the formula: an e2e test trains two populations with
+`release_checkpoints=True`, confirming `evenly_spaced_checkpoints=True`
+gives a measurably larger mean cross-member checkpoint-0 distance than the
+default spacing.
+
+Re-ran with the fix: **30.30% → 44.70%** — the fix worked exactly as
+designed, but the result is *still* worse than no checkpointing at all
+(51.52%/53.03%), and `min` was still 0.0000. The remaining collision isn't
+a timing artifact (mean actually rose to 1.0538, comparable to the
+no-checkpoint runs) — it's consistent with two members (or two checkpoints)
+converging toward the same near-optimal strategy, the "one dominant
+competent policy" ceiling this investigation kept running into from the
+start. **Conclusion: checkpointing, correctly spaced or not, is net
+negative for this task under MEP's mechanism as currently built** — closed,
+not pursued further this session.
+
+### Thirteenth: we were comparing against the wrong number — OMIS's own Appendix G reports 66.25% for LBF, not TIPR's 80.56%, under a different methodology
+
+Read OMIS's Appendix G (`papers/omis.pdf` pp. 30–32) directly rather than
+continuing to assume TIPR's figure was the only reference point. Its KL
+methodology is near-identical to TIPR's Appendix D — same Eq. 33, same MEP
+mechanism, same "self-agent traverses through all opponent policies"
+sampling — but it reports a materially different number for LBF: **66.25%**,
+not 80.56%. Its own explanation: *"the state space of LBF is much smaller
+than PP and OC, making it difficult for well-trained opponent policies to
+exhibit significant behavioral diversity"* — an admission, in the source
+paper itself, that LBF has a lower ceiling than other environments under
+this exact mechanism, independent of any tuning.
+
+Two concrete, checkable methodology differences from TIPR's recipe:
+OMIS measures the **full** released population (10 Seen + 10 Unseen = 20
+for its own MEP population size), not a Seen-only subset, with a different
+episode budget (1000 episodes/opponent, 20 egos × 50 episodes each, vs
+TIPR's 1200 episodes, 12 egos × 100 each). Also checked whether OMIS gives
+its own MEP hyperparameters (Section H.1) the way TIPR's Table F.1 does —
+it doesn't; the entire section is one paragraph deferring to "the same
+hyperparameters as this open-source code," no numbers given.
+
+Added `--include-unseen` to `diagnose_opponent_policy_diversity.py`,
+switching the roster from the held-out-filtered Seen Set to the full
+population and printing OMIS's 66.25% as the reference figure. Needed no
+retraining against existing artifacts: `ppo_br.py` has no held-out concept
+at all (it trains a best response against every member of its source
+population), so Unseen members already have dedicated egos the same way
+Seen ones do.
+
+### Fourteenth: measured against the corrected target, with everything combined — 56.32% vs OMIS's 66.25%
+
+Config: `force_coop=False` (Eleventh), `round_robin=True` (Tenth),
+`population_size=20`, no checkpointing (Twelfth's conclusion),
+`population_entropy_coef=0.001` (Fifth), `total_timesteps=5e6` (matching
+TIPR's own Table F.1 episode budget for LBF, not the Overcooked-calibrated
+`1.5e7` this investigation started from). Measured with `--include-unseen`
+(full 20×20 matrix, matching OMIS's methodology exactly): `mean=1.2878,
+min=0.4447` (healthy — no collision), `max=3.5379`, **dissimilarity rate
+56.32%, against OMIS's own 66.25%** — a ~10-point gap, against ~25–30-point
+gaps every TIPR-compared result produced across this whole investigation.
+
+Before trusting this for write-up, audited the diagnostic script itself
+end-to-end rather than taking the number at face value: agent-seat
+assignment (ego always seat 0, teammate always seat 1, matching TIPR's own
+Table F.1 convention; `ep.obs[1]`/`ep.avail_actions[1]` correctly pull the
+teammate's own observation stream), self-agent-traversal breadth (every
+fixed teammate rolled out against *every other* teammate's dedicated ego,
+not just its own), observation normalization (checked directly against the
+exact bug class found in TAO earlier this session — doesn't apply here;
+MEP/`ppo_br`'s MLP policy does zero observation preprocessing anywhere),
+and `hstate`/`done` handling (both accepted but genuinely unused by the
+MLP policy's forward pass, confirmed true no-ops) all check out.
+
+Found one real, previously-dormant bug in the process: the script used
+`job.env.rollout_length` (the PPO training scan window) as the rollout's
+episode-truncation length, instead of `job.env.time_limit` (the field that
+actually reaches the environment's constructor) — `configs/env.py`'s own
+`EnvConfigBase` docstring explicitly documents these as decoupled. For
+every LBF config exercised so far the two values happen to be equal
+(`rollout_length=50, time_limit=50`), so no previously-reported number in
+this investigation is actually corrupted by it — but it's the same failure
+shape as the Second entry's `rollout_length`/episode-horizon confusion, and
+would have silently truncated episodes and corrupted the KL sample the
+moment the two diverged (e.g. a PPO batch-size sweep touching
+`rollout_length` alone). Fixed to read `time_limit` directly.
+
+**Where this leaves the investigation**: of six independent, carefully
+isolated hypotheses tested end to end (population size, entropy-coefficient
+magnitude and warmup schedule, training cadence, environment mechanics,
+checkpoint spacing, and the comparison target/methodology itself), the
+environment fix was the only one that moved the dissimilarity rate by more
+than a couple of points on its own, and the methodology correction (full
+population, correct comparison figure) closed the rest of the apparent
+gap — not a flaw in MEP's own training mechanism. 56.32% against OMIS's
+66.25%, measured the same way OMIS measures theirs, is close enough to
+treat this as a validated replication rather than an open discrepancy.
+Checkpointing (Twelfth) is the one lever confirmed net-negative regardless
+of how it's spaced — left off (`release_checkpoints=False`) going forward.
+
 ## CoMeDi on LBF-9x9, and why it's the wrong environment to test adversarial-vs-non-adversarial generation
 
 Ran the same lbf_9x9 pipeline (identical PPO block, `population_size=20`,
