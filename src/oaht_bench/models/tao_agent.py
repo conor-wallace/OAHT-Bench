@@ -226,11 +226,19 @@ class TaoAgent(ReturnConditionedAgent):
 
         This is the reusable cross-episode encoding TAO needs now and OMIS's ``D_epi``
         will reuse -- both encode the last ``C`` opponent trajectories the same way.
+
+        ``mate_next_obs`` is standardised with ``self._obs_mean``/``self._obs_std``
+        before the encoder sees it -- the same transform ``get_action`` applies to
+        the ego's own observation, and the one ``Dataset._obs_field`` already baked
+        into every training window's ``mate_next_obs``. Without it the encoder
+        trained on standardised input would be fed raw env observations at
+        deployment (tests/unit/offline/tao/test_deployment_context.py pins this).
         """
         stage2 = params["stage2"]
+        normalized_obs = (jnp.asarray(mate_next_obs) - self._obs_mean) / self._obs_std
         tokens = self.encoder.apply(
             stage2["encoder"],
-            jnp.asarray(mate_next_obs),
+            normalized_obs,
             jnp.asarray(mate_actions),
             jnp.asarray(mate_rewards),
             mask=jnp.asarray(mask),
