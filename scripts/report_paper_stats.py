@@ -155,12 +155,20 @@ def eval_report_stats(report: dict, ceiling: float) -> dict[str, Any]:
     return out
 
 
-_SPARK_CHARS = " ▁▂▃▄▅▆▇█"
+#: No leading blank: every index here is a visible bar. A real value at the
+#: curve's minimum must never render identically to a NaN gap, or the two are
+#: impossible to tell apart by eye -- exactly the ambiguity an earlier version
+#: of this had (index 0 was " ", so the lowest real value in range rendered as
+#: a blank, indistinguishable from "no prediction that episode").
+_SPARK_CHARS = "▁▂▃▄▅▆▇█"
+_SPARK_NAN = "·"
 
 
 def _sparkline(values: list[float]) -> str:
     """Compact unicode trend visualization. NaN (no prediction that episode,
-    e.g. a zero-length episode) renders as a blank, not a false-zero bar."""
+    e.g. a zero-length episode) renders as ``_SPARK_NAN``, never one of the bar
+    characters -- so a gap always means "no episode produced a number", not
+    "this episode happened to be the curve's minimum"."""
     present = [v for v in values if not np.isnan(v)]
     if not present:
         return "(all nan)"
@@ -169,7 +177,7 @@ def _sparkline(values: list[float]) -> str:
     chars = []
     for v in values:
         if np.isnan(v):
-            chars.append(" ")
+            chars.append(_SPARK_NAN)
         else:
             idx = int(round((v - lo) / span * (len(_SPARK_CHARS) - 1)))
             chars.append(_SPARK_CHARS[idx])
