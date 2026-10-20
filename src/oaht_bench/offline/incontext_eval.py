@@ -230,8 +230,21 @@ def evaluate_incontext(
     For each teammate: reset the OCW, then for each episode re-encode the ego's context
     from the current OCW (swapped into ``stage2["context"]``), roll one episode, and
     append the teammate's stream. Returns ``(per_teammate_mean, per_teammate_curve,
-    per_teammate_ancillary_acc, ancillary_floor)`` -- the last two ``None`` unless
-    ``agent`` has a decoder (TAO; see :func:`_ancillary_mate_action_acc`).
+    per_teammate_ancillary_acc, ancillary_floor, per_teammate_ancillary_curve)`` -- the
+    last two ``None``/empty unless ``agent`` has a decoder (TAO; see
+    :func:`_ancillary_mate_action_acc`).
+
+    ``per_teammate_ancillary_curve`` is the direct diagnostic for "is in-context
+    adaptation doing anything": per-episode accuracy of the ancillary decoder reading
+    the OCW's pooled summary, in the same episode order as ``per_teammate_curve``.
+    An empty OCW (episode 1 against a teammate) still produces a prediction -- the
+    pooled summary of an all-zero, all-masked context, not a skipped computation --
+    so episode 1 is a real (likely poor, context-blind) number, not ``nan``; a
+    working mechanism should trend upward from there as the OCW fills across
+    episodes 2+. A flat or noisy curve with no trend means the encoder isn't using
+    additional opponent trajectories, independent of what the aggregate return says.
+    (``nan`` only appears for a literally zero-length episode -- see
+    :func:`_ancillary_mate_action_acc`, not an empty context.)
 
     ``target_returns`` is ``{label: target}`` (see
     :func:`~oaht_bench.offline.evaluate.resolve_target_returns`) -- set via
@@ -245,11 +258,13 @@ def evaluate_incontext(
     per_mean: dict[str, float] = {}
     per_curve: dict[str, list[float]] = {}
     per_ancillary: dict[str, float] = {} if probe else None
+    per_ancillary_curve: dict[str, list[float]] = {} if probe else None
     pooled_true = []
     for label, mate_params, mate_policy in teammates:
         agent.set_target_return(target_returns[label])
         ocw = OpponentContextWindow(ocw_size, max_episode_steps, obs_dim)
         curve: list[float] = []
+        acc_curve: list[float] = []
         ep_pred, ep_true = [], []
         for _ in range(num_episodes):
             rng, ep_rng = jax.random.split(rng)
@@ -277,10 +292,14 @@ def evaluate_incontext(
                 if pred is not None:
                     ep_pred.append(pred)
                     ep_true.append(true)
+                    acc_curve.append(float((pred == true).mean()))
+                else:
+                    acc_curve.append(float("nan"))
             ocw.append(*mate_stream)
         if probe and ep_pred:
             p, t = np.concatenate(ep_pred), np.concatenate(ep_true)
             per_ancillary[label] = float((p == t).mean())
+            per_ancillary_curve[label] = acc_curve
             pooled_true.append(t)
         per_curve[label] = curve
         per_mean[label] = float(np.mean(curve))
@@ -289,4 +308,4 @@ def evaluate_incontext(
     if probe and pooled_true:
         pooled = np.concatenate(pooled_true)
         ancillary_floor = float(np.bincount(pooled, minlength=agent.action_dim).max() / pooled.size)
-    return per_mean, per_curve, per_ancillary, ancillary_floor
+    return per_mean, per_curve, per_ancillary, ancillary_floor, per_ancillary_curve

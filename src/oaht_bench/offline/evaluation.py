@@ -165,10 +165,11 @@ def _score(
     if incontext:
         from oaht_bench.offline.incontext_eval import evaluate_incontext
 
-        seed_pt, seed_means, seed_anc, seed_anc_floor = [], [], [], []
+        seed_pt, seed_curves, seed_means = [], [], []
+        seed_anc, seed_anc_floor, seed_anc_curves = [], [], []
         for s in range(ns):
             p = all_params if ns == 1 else jax.tree.map(lambda x: x[s], all_params)  # noqa: B023
-            mean, _curve, ancillary, ancillary_floor = evaluate_incontext(
+            mean, curve, ancillary, ancillary_floor, ancillary_curve = evaluate_incontext(
                 agent,
                 p,
                 env,
@@ -181,13 +182,27 @@ def _score(
                 target_returns=target_returns,
             )
             seed_pt.append(mean)
+            seed_curves.append(curve)
             seed_means.append(float(np.mean(list(mean.values()))))
             if ancillary is not None:
                 seed_anc.append(ancillary)
                 seed_anc_floor.append(ancillary_floor)
+                seed_anc_curves.append(ancillary_curve)
         labels = list(seed_pt[0])
         per_teammate = {t: float(np.mean([m[t] for m in seed_pt])) for t in labels}
-        out = {"mean_return": float(np.mean(seed_means)), "per_teammate": per_teammate}
+        n_eps = int(job.num_episodes)
+        # Previously computed and discarded (named `_curve`). This is the direct
+        # "is in-context adaptation actually happening" diagnostic: a working
+        # mechanism climbs within each teammate's episode block as its OCW fills;
+        # a flat curve means it isn't, independent of the aggregate mean_return.
+        out = {
+            "mean_return": float(np.mean(seed_means)),
+            "per_teammate": per_teammate,
+            "adaptation_curve": [
+                float(np.mean([seed_curves[s][t][e] for s in range(ns) for t in labels]))
+                for e in range(n_eps)
+            ],
+        }
         # TAO's ancillary-decoder probe (docs/tuning_record.md) -- a DIFFERENT
         # information set from mate_action_acc (predicts from the teammate's own
         # observations + the pooled OCW context, which TAO already assumes
@@ -201,6 +216,22 @@ def _score(
                 np.mean(list(out["per_teammate_ancillary_mate_action_acc"].values()))
             )
             out["ancillary_mate_action_floor"] = float(np.mean(seed_anc_floor))
+            # Per-episode opponent-recognition accuracy -- the direct "is in-context
+            # adaptation doing anything" diagnostic. Episode 1 is a real (likely poor)
+            # number scored on the empty/all-zero OCW, not nan -- nan only appears for
+            # a literally zero-length episode.
+            out["ancillary_mate_action_acc_curve"] = [
+                float(
+                    np.nanmean(
+                        [
+                            seed_anc_curves[s][t][e]
+                            for s in range(len(seed_anc_curves))
+                            for t in anc_labels
+                        ]
+                    )
+                )
+                for e in range(n_eps)
+            ]
         return out
 
     from oaht_bench.offline.evaluate import evaluate_agent_against

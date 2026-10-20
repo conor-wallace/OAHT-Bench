@@ -42,7 +42,6 @@ from typing import Any
 
 import numpy as np
 
-
 # ---------------------------------------------------------------------------
 # Loading
 # ---------------------------------------------------------------------------
@@ -146,8 +145,47 @@ def eval_report_stats(report: dict, ceiling: float) -> dict[str, Any]:
                 if acc_key in d[split]:
                     entry[f"{split}_mate_acc"] = d[split][acc_key]
                     entry[f"{split}_mate_floor"] = d[split][floor_key]
+            # TAO/OMIS only (evaluate_incontext) -- per-episode curves diagnosing
+            # whether in-context adaptation is actually doing anything, not just
+            # whether the aggregate return looks reasonable.
+            for curve_key in ("adaptation_curve", "ancillary_mate_action_acc_curve"):
+                if curve_key in d[split]:
+                    entry[f"{split}_{curve_key}"] = d[split][curve_key]
         out[baseline] = entry
     return out
+
+
+_SPARK_CHARS = " ▁▂▃▄▅▆▇█"
+
+
+def _sparkline(values: list[float]) -> str:
+    """Compact unicode trend visualization. NaN (no prediction that episode,
+    e.g. a zero-length episode) renders as a blank, not a false-zero bar."""
+    present = [v for v in values if not np.isnan(v)]
+    if not present:
+        return "(all nan)"
+    lo, hi = min(present), max(present)
+    span = hi - lo or 1.0
+    chars = []
+    for v in values:
+        if np.isnan(v):
+            chars.append(" ")
+        else:
+            idx = int(round((v - lo) / span * (len(_SPARK_CHARS) - 1)))
+            chars.append(_SPARK_CHARS[idx])
+    return "".join(chars)
+
+
+def _curve_trend(values: list[float]) -> str:
+    """First-half vs second-half mean (nan-safe) -- "is this climbing" at a glance,
+    without reading every episode. Halves split on episode *count*, not value, so an
+    odd length puts the extra episode in the second half (closer to "fully adapted")."""
+    arr = np.asarray(values, dtype=float)
+    mid = len(arr) // 2
+    first = np.nanmean(arr[:mid]) if mid > 0 else float("nan")
+    second = np.nanmean(arr[mid:])
+    delta = second - first
+    return f"first-half={first:.4f} second-half={second:.4f} ({delta:+.4f})"
 
 
 # ---------------------------------------------------------------------------
@@ -196,15 +234,27 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     p.add_argument("--label", default="", help="Header label for this life cycle.")
-    p.add_argument("--crossplay", required=True, type=Path, help="ego x teammate crossplay .npz/.csv.")
+    p.add_argument(
+        "--crossplay", required=True, type=Path, help="ego x teammate crossplay .npz/.csv."
+    )
     p.add_argument("--eval-report", type=Path, help="evaluation_report.json")
-    p.add_argument("--population-crossplay", type=Path, help="population_crossplay.csv (training-time self/cross-play)")
+    p.add_argument(
+        "--population-crossplay",
+        type=Path,
+        help="population_crossplay.csv (training-time self/cross-play)",
+    )
     p.add_argument("--br-metrics", type=Path, help="ppo_br run's metrics.jsonl")
     p.add_argument("--dataset-summary", type=Path, help="dataset_summary.json")
     p.add_argument("--dataset-job", type=Path, help="dataset_collection job.json")
     p.add_argument("--teammate-gen-job", type=Path, help="teammate_generation job.json")
-    p.add_argument("--tikz-out", type=Path, help="Write bar-chart \\definecolor/\\addplot lines here.")
-    p.add_argument("--tikz-prefix", default="bar", help="Color-name prefix for --tikz-out (must be unique per figure).")
+    p.add_argument(
+        "--tikz-out", type=Path, help="Write bar-chart \\definecolor/\\addplot lines here."
+    )
+    p.add_argument(
+        "--tikz-prefix",
+        default="bar",
+        help="Color-name prefix for --tikz-out (must be unique per figure).",
+    )
     p.add_argument("--dat-out", type=Path, help="Write the normalized x y C matrix here.")
     p.add_argument("--json-out", type=Path, help="Also dump every computed number as JSON.")
     args = p.parse_args()
@@ -218,26 +268,32 @@ def main() -> None:
 
     print(f"=== {args.label or args.crossplay} ===")
     print(f"crossplay matrix: {cp['n']}x{cp['n']}, ceiling = {ceiling:.4f} at {cp['ceiling_cell']}")
-    print(f"  diagonal   mean={cp['diag_mean']:.4f}  min={cp['diag_min']:.4f} ({cp['diag_min_label']})"
-          f"  max={cp['diag_max']:.4f} ({cp['diag_max_label']})")
-    print(f"  offdiagonal mean={cp['offdiag_mean']:.4f}  min={cp['offdiag_min']:.4f}  max={cp['offdiag_max']:.4f}")
+    print(
+        f"  diagonal   mean={cp['diag_mean']:.4f}  min={cp['diag_min']:.4f} ({cp['diag_min_label']})"
+        f"  max={cp['diag_max']:.4f} ({cp['diag_max_label']})"
+    )
+    print(
+        f"  offdiagonal mean={cp['offdiag_mean']:.4f}  min={cp['offdiag_min']:.4f}  max={cp['offdiag_max']:.4f}"
+    )
 
     if args.population_crossplay:
         sp, xp, sep = load_population_crossplay(args.population_crossplay)
         report["population"] = {
-            "self_play_raw": sp, "self_play_norm": sp / ceiling,
-            "cross_play_raw": xp, "cross_play_norm": xp / ceiling,
+            "self_play_raw": sp,
+            "self_play_norm": sp / ceiling,
+            "cross_play_raw": xp,
+            "cross_play_norm": xp / ceiling,
             "separation_raw": sep,
         }
-        print(f"\npopulation self-play/cross-play (training-time, raw):")
-        print(f"  self-play  = {sp:.4f}  (norm {sp/ceiling:.4f})")
-        print(f"  cross-play = {xp:.4f}  (norm {xp/ceiling:.4f})")
+        print("\npopulation self-play/cross-play (training-time, raw):")
+        print(f"  self-play  = {sp:.4f}  (norm {sp / ceiling:.4f})")
+        print(f"  cross-play = {xp:.4f}  (norm {xp / ceiling:.4f})")
         print(f"  separation = {sep:.4f}")
 
     if args.br_metrics:
         br = load_br_mean_return(args.br_metrics)
         report["ppo_br_mean_return"] = {"raw": br, "norm": br / ceiling}
-        print(f"\nppo_br mean return (logged) = {br:.4f}  (norm {br/ceiling:.4f})")
+        print(f"\nppo_br mean return (logged) = {br:.4f}  (norm {br / ceiling:.4f})")
         print(f"  [crossplay-diagonal mean was {cp['diag_mean']:.4f} -- should closely match]")
 
     if args.dataset_summary:
@@ -246,14 +302,18 @@ def main() -> None:
         report["dataset"] = {**ds}
         if raw_ego is not None:
             report["dataset"]["mean_ego_return_norm"] = raw_ego / ceiling
-        print(f"\ndataset: {ds.get('episodes')} episodes, mean_length={ds.get('mean_length'):.2f}, "
-              f"mean_ego_return={raw_ego:.4f} (norm {raw_ego/ceiling:.4f})" if raw_ego is not None
-              else f"\ndataset: {ds}")
+        print(
+            f"\ndataset: {ds.get('episodes')} episodes, mean_length={ds.get('mean_length'):.2f}, "
+            f"mean_ego_return={raw_ego:.4f} (norm {raw_ego / ceiling:.4f})"
+            if raw_ego is not None
+            else f"\ndataset: {ds}"
+        )
 
     if args.dataset_job:
         dj = json.loads(args.dataset_job.read_text())["job"]
         report["dataset_job"] = {
-            k: dj.get(k) for k in ("num_episodes", "temperature", "holdout_per_generator", "variant")
+            k: dj.get(k)
+            for k in ("num_episodes", "temperature", "holdout_per_generator", "variant")
         }
         print(f"\ndataset collection config: {report['dataset_job']}")
 
@@ -270,11 +330,36 @@ def main() -> None:
         report["baselines"] = stats
         print(f"\nbaseline returns (raw -> normalized by ceiling {ceiling:.4f}):")
         for baseline, e in stats.items():
-            u_acc = f" mate_acc={e['unseen_mate_acc']:.4f}/floor={e['unseen_mate_floor']:.4f}" if "unseen_mate_acc" in e else ""
-            s_acc = f" mate_acc={e['seen_mate_acc']:.4f}/floor={e['seen_mate_floor']:.4f}" if "seen_mate_acc" in e else ""
-            print(f"  {baseline:8s} unseen raw={e['unseen_raw']:.4f} norm={e['unseen_norm']:.4f}{u_acc}")
+            u_acc = (
+                f" mate_acc={e['unseen_mate_acc']:.4f}/floor={e['unseen_mate_floor']:.4f}"
+                if "unseen_mate_acc" in e
+                else ""
+            )
+            s_acc = (
+                f" mate_acc={e['seen_mate_acc']:.4f}/floor={e['seen_mate_floor']:.4f}"
+                if "seen_mate_acc" in e
+                else ""
+            )
+            print(
+                f"  {baseline:8s} unseen raw={e['unseen_raw']:.4f} norm={e['unseen_norm']:.4f}{u_acc}"
+            )
             print(f"  {'':8s} seen   raw={e['seen_raw']:.4f} norm={e['seen_norm']:.4f}{s_acc}")
             print(f"  {'':8s} generalization_gap (raw) = {e['generalization_gap_raw']:.4f}")
+            # TAO/OMIS only -- is in-context adaptation actually doing anything,
+            # independent of what the aggregate return/mate_acc numbers above say.
+            for split in ("unseen", "seen"):
+                for curve_key, title in (
+                    ("adaptation_curve", "return"),
+                    ("ancillary_mate_action_acc_curve", "opponent-recognition acc"),
+                ):
+                    key = f"{split}_{curve_key}"
+                    if key not in e:
+                        continue
+                    vals = e[key]
+                    print(
+                        f"  {'':8s} {split} {title} curve ({len(vals)} ep): "
+                        f"{_sparkline(vals)}  {_curve_trend(vals)}"
+                    )
 
     if args.dat_out:
         emit_dat(matrix, ceiling, args.dat_out)

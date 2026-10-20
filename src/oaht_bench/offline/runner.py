@@ -323,10 +323,10 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
         from oaht_bench.offline.incontext_eval import evaluate_incontext
 
         seed_pt, seed_curves, seed_means = [], [], []
-        seed_ancillary, seed_ancillary_floor = [], []
+        seed_ancillary, seed_ancillary_floor, seed_ancillary_curves = [], [], []
         for s in range(ns):
             p = all_params if ns == 1 else jax.tree.map(lambda x: x[s], all_params)  # noqa: B023
-            mean, curve, ancillary, ancillary_floor = evaluate_incontext(
+            mean, curve, ancillary, ancillary_floor, ancillary_curve = evaluate_incontext(
                 agent,
                 p,
                 env,
@@ -344,6 +344,7 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
             if ancillary is not None:
                 seed_ancillary.append(ancillary)
                 seed_ancillary_floor.append(ancillary_floor)
+                seed_ancillary_curves.append(ancillary_curve)
         labels = list(seed_pt[0])
         per_teammate = {t: float(np.mean([m[t] for m in seed_pt])) for t in labels}
         n_eps = int(job.offline.eval_episodes)
@@ -374,6 +375,24 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
                 np.mean(list(out["per_teammate_ancillary_mate_action_acc"].values()))
             )
             out["ancillary_mate_action_floor"] = float(np.mean(seed_ancillary_floor))
+            # Per-episode opponent-recognition accuracy, averaged over teammates and
+            # seeds -- the direct "is in-context adaptation doing anything" diagnostic:
+            # a working mechanism trends upward from episode 1 (a real, likely poor
+            # number scored on the empty/all-zero OCW, not nan) as the OCW fills;
+            # flat/noisy means the encoder isn't using additional opponent
+            # trajectories, independent of what the aggregate return says.
+            out["ancillary_mate_action_acc_curve"] = [
+                float(
+                    np.nanmean(
+                        [
+                            seed_ancillary_curves[s][t][e]
+                            for s in range(len(seed_ancillary_curves))
+                            for t in anc_labels
+                        ]
+                    )
+                )
+                for e in range(n_eps)
+            ]
         return out
 
     def score(teammates, *, rng_base):

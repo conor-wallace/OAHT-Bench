@@ -149,3 +149,77 @@ def test_in_context_adaptation_shifts_the_predicted_action_toward_the_observed_o
 
     assert pred_0 == 0, "observing opponent 0's trajectories should predict action 0 (mirror)"
     assert pred_1 == 1, "observing opponent 1's trajectories should predict action 1 (mirror)"
+
+
+class _FixedActionPolicy:
+    """Always plays the same action, ignoring env state -- a synthetic opponent for
+    exercising evaluate_incontext's real env-rollout path end to end."""
+
+    def __init__(self, action):
+        self.action = action
+
+    def init_hstate(self, batch_size, aux_info=None):
+        return None
+
+    def get_action(
+        self, *, params, obs, done, avail_actions, hstate, rng, env_state=None, test_mode=False
+    ):
+        return jnp.array([self.action], dtype=jnp.int32), hstate
+
+
+def test_evaluate_incontext_produces_a_real_per_episode_curve_not_nan():
+    """Exercises evaluate_incontext itself (not just encode_ocw/act in isolation) --
+    the one piece of Eq. 6 the rest of this package deliberately bypasses, since it
+    needs a real env. Pins the 5-tuple return shape added when the per-episode
+    ancillary-accuracy curve was added, and that episode 1 (empty OCW) is a real
+    number, not nan -- nan only appears for a literally zero-length episode, a
+    mistake this test caught: an empty context still produces a prediction, just
+    likely a poor, context-blind one.
+    """
+    from oaht_bench.configs import get_preset
+    from oaht_bench.envs import make_env
+    from oaht_bench.envs.log_wrapper import LogWrapper
+    from oaht_bench.models.tao_agent import TaoAgent
+    from oaht_bench.offline.incontext_eval import evaluate_incontext
+
+    env_cfg = get_preset("lbf_12x12").model_copy(update={"rollout_length": 8})
+    env = LogWrapper(make_env(env_cfg.env_name, env_cfg.env_kwargs()))
+    obs_dim = int(env.observation_space(env.agents[1]).shape[0])
+    action_dim = int(env.action_space(env.agents[1]).n)
+    T, C, num_episodes = 6, 3, 4
+
+    w = _mirror_opponent_windows(obs_dim=obs_dim, action_dim=action_dim, T=T)
+    trainer, params = _train_tiny_tao(
+        w, obs_dim=obs_dim, action_dim=action_dim, context_trajectories=C, steps=150
+    )
+    # A deployment-configured agent sharing trainer's architecture (trainer.agent,
+    # built for training only, has no context_length/normalization for act()).
+    agent = TaoAgent(trainer.config, context_length=T, target_return=0.0, normalization=None)
+    agent.build_model()
+
+    teammates = [
+        ("opponent_0", None, _FixedActionPolicy(0)),
+        ("opponent_1", None, _FixedActionPolicy(1)),
+    ]
+    target_returns = {"opponent_0": 0.0, "opponent_1": 0.0}
+
+    mean, curve, ancillary, ancillary_floor, ancillary_curve = evaluate_incontext(
+        agent,
+        params,
+        env,
+        teammates,
+        max_episode_steps=env_cfg.rollout_length,
+        num_episodes=num_episodes,
+        ocw_size=C,
+        obs_dim=obs_dim,
+        rng=jax.random.PRNGKey(0),
+        target_returns=target_returns,
+    )
+
+    assert set(mean) == set(curve) == set(ancillary_curve) == {"opponent_0", "opponent_1"}
+    for label in ("opponent_0", "opponent_1"):
+        assert len(curve[label]) == num_episodes
+        assert len(ancillary_curve[label]) == num_episodes
+        # episode 1 (empty OCW) is a real prediction, not a skipped/nan one
+        assert not np.isnan(ancillary_curve[label][0])
+    assert 0.0 <= ancillary_floor <= 1.0
