@@ -371,6 +371,41 @@ class MepConfig(GeneratorBase):
         "existing config byte-for-byte unchanged -- the same zero-means-off "
         "convention ppo.lr_warmup already uses.",
     )
+    round_robin: bool = Field(
+        default=False,
+        description="Train the population the way the reference implementation "
+        "actually does, instead of this repo's own simultaneous-vmap scheme. "
+        "Confirmed by reading the reference's pbt_training() directly "
+        "(ruizhaogit/maximum_entropy_population_based_training): every PBT "
+        "iteration visits each member exactly once in a random order, running "
+        "a self-contained PPO chunk (round_robin_chunk_timesteps env-steps) for "
+        "that member alone while every other member's params stay frozen -- "
+        "not the simultaneous-vmap scheme this repo built (every member "
+        "updates every step, gathering every other member's *live* params via "
+        "jax.lax.all_gather). The reference's own PBTAgent.explore_from() "
+        "(resample-worst-and-mutate) is dead code -- defined but never called "
+        "in pbt_training() -- so this does NOT add any selection/mutation "
+        "step; it only matches the training *cadence*. False (default) keeps "
+        "every existing config byte-for-byte unchanged -- the same "
+        "zero-means-off convention population_entropy_warmup already uses. "
+        "Training time scales ~linearly with population_size when True "
+        "(members train strictly sequentially, one visit at a time), unlike "
+        "the vmap path's roughly population_size-independent wall-clock cost "
+        "-- a real cost of matching the reference, not an inefficiency to "
+        "tune away.",
+    )
+    round_robin_chunk_timesteps: float = Field(
+        default=4e4,
+        gt=0,
+        description="Env-steps trained per visit when round_robin=True -- the "
+        "reference's own PPO_RUN_TOT_TIMESTEPS default value, not an arbitrary "
+        "port (it's a real, tuned PBT-cadence parameter in the paper's own "
+        "code). num_pbt_iters = total_timesteps // round_robin_chunk_timesteps "
+        "(matching the reference's NUM_PBT_ITER formula once its "
+        "ITER_PER_SELECTION == POPULATION_SIZE cancels algebraically, since "
+        "total_timesteps here is already per-member like the reference's "
+        "TOTAL_STEPS_PER_AGENT). Unused when round_robin=False.",
+    )
     gradient_accumulation_steps: int = Field(
         default=1,
         ge=1,

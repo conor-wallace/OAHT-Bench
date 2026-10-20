@@ -101,7 +101,9 @@ log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-def population_entropy_bonus(member_log_probs: jnp.ndarray, coef: float) -> jnp.ndarray:
+def population_entropy_bonus(
+    member_log_probs: jnp.ndarray, coef: float, exclude_idx=None
+) -> jnp.ndarray:
     """MEP's Eq. 6/9 reward bonus: ``-coef * log(mean_k pi_k(a|s))``.
 
     ``member_log_probs`` is every population member's log-probability of the
@@ -114,8 +116,21 @@ def population_entropy_bonus(member_log_probs: jnp.ndarray, coef: float) -> jnp.
     disagree), and training against the wrong one silently optimizes a
     different objective than the paper's. Kept as a standalone function so
     this reduction is unit-testable independent of the training loop.
+
+    ``exclude_idx`` (``None`` by default, preserving the self-inclusive
+    reduction above exactly) excludes one member -- the one currently
+    training -- from the mean, matching the round-robin reference's
+    ``pbt_population_copy.pop(idx0)``: ``log(mean_{k != idx} pi_k(a|s))``
+    rather than ``log(mean_k pi_k(a|s))``. ``n`` is ``member_log_probs``'s
+    static leading-axis size, so this stays shape-static under ``jit`` even
+    though ``exclude_idx`` itself may be a traced scalar.
     """
     n = member_log_probs.shape[0]
+    if exclude_idx is not None:
+        mask_shape = (n,) + (1,) * (member_log_probs.ndim - 1)
+        exclude_mask = (jnp.arange(n) == exclude_idx).reshape(mask_shape)
+        member_log_probs = jnp.where(exclude_mask, -jnp.inf, member_log_probs)
+        n = n - 1
     pop_log_prob = jax.scipy.special.logsumexp(member_log_probs, axis=0) - jnp.log(n)
     return -coef * pop_log_prob
 
@@ -276,15 +291,242 @@ class MepTrainer:
             "best_score": best_score,
         }
 
+    def train_round_robin(self, rng, population_size, chunk_timesteps):
+        """Reference-matching training cadence (see ``MepConfig.round_robin``'s
+        docstring): every PBT iteration visits each of ``population_size``
+        members exactly once, in a random order, running a self-contained
+        PPO chunk of ``chunk_timesteps`` env-steps for that member alone
+        while every other member's params stay frozen for the visit's full
+        duration. Opt-in; ``train()`` (the simultaneous-vmap path) is
+        untouched and stays the default.
+
+        Unlike ``train()``, this method is NOT externally vmapped over
+        ``population_size`` -- it owns the whole population internally,
+        since the reference's round-robin schedule has no notion of
+        "every member at once" to vmap over.
+        """
+        chunk_updates = int(chunk_timesteps // self.config.rollout_length // self.config.num_envs)
+        if chunk_updates < 1:
+            raise ValueError(
+                f"round_robin_chunk_timesteps={chunk_timesteps:g} gives "
+                f"{chunk_updates} updates at rollout_length={self.config.rollout_length} "
+                f"and num_envs={self.config.num_envs}; each visit would be a no-op. "
+                f"Raise round_robin_chunk_timesteps above "
+                f"{self.config.rollout_length * self.config.num_envs}."
+            )
+        num_pbt_iters = int(self.config.total_timesteps // chunk_timesteps)
+        if num_pbt_iters < 1:
+            raise ValueError(
+                f"total_timesteps={self.config.total_timesteps:g} gives "
+                f"{num_pbt_iters} PBT iterations at "
+                f"round_robin_chunk_timesteps={chunk_timesteps:g}; training would "
+                f"be a no-op. Raise total_timesteps above {chunk_timesteps:g}."
+            )
+
+        rng, init_rng = jax.random.split(rng)
+        init_rngs = jax.random.split(init_rng, population_size)
+        init_params = jax.vmap(self.policy.init_params)(init_rngs)
+
+        # Same tx/schedule-building as train() verbatim -- one shared
+        # template, applied per member via vmap below. make_lr_schedule and
+        # the entropy-coef warmup both key off self.config.num_updates
+        # (~= num_pbt_iters * chunk_updates, up to integer-division
+        # rounding), the same per-member lifetime-budget meaning in both
+        # paths.
+        tx = optax.chain(
+            optax.clip_by_global_norm(self.config.ppo.max_grad_norm),
+            optax.adam(
+                learning_rate=make_lr_schedule(
+                    self.config.ppo,
+                    self.config.num_updates,
+                    accumulation_steps=self.gradient_accumulation_steps,
+                ),
+                eps=1e-5,
+            ),
+        )
+        if self.gradient_accumulation_steps > 1:
+            every_k = (
+                self.gradient_accumulation_steps
+                * self.config.ppo.update_epochs
+                * self.config.ppo.num_minibatches
+            )
+            tx = optax.MultiSteps(tx, every_k_schedule=every_k)
+
+        population_train_state = jax.vmap(
+            lambda p: TrainState.create(apply_fn=self.policy.network.apply, params=p, tx=tx)
+        )(init_params)
+
+        checkpoint_array = jax.vmap(self._init_ckpt_array)(population_train_state.params)
+        ckpt_idx = jnp.zeros((population_size,), dtype=jnp.int32)
+        best_params = jax.tree.map(jnp.zeros_like, population_train_state.params)
+        best_score = jnp.full((population_size,), -jnp.inf)
+        # Cumulative, cross-visit update counter per member -- NOT reset each
+        # visit. This is what makes checkpoint spacing, the entropy-coef
+        # warmup, and reward-shaping annealing see each member's true
+        # lifetime progress rather than restarting at 0 every chunk.
+        member_update_steps = jnp.zeros((population_size,), dtype=jnp.int32)
+
+        def extract(pytree, idx):
+            return jax.tree.map(
+                lambda x: jax.lax.dynamic_index_in_dim(x, idx, axis=0, keepdims=False), pytree
+            )
+
+        def write_back(full_pytree, idx, new_slice):
+            return jax.tree.map(
+                lambda full, new: jax.lax.dynamic_update_slice_in_dim(full, new[None], idx, axis=0),
+                full_pytree,
+                new_slice,
+            )
+
+        def visit(carry, idx):
+            (
+                population_train_state,
+                checkpoint_array,
+                ckpt_idx,
+                best_params,
+                best_score,
+                member_update_steps,
+                rng,
+            ) = carry
+
+            member_train_state = extract(population_train_state, idx)
+            member_ckpt = extract(checkpoint_array, idx)
+            member_ckpt_idx = extract(ckpt_idx, idx)
+            member_best_params = extract(best_params, idx)
+            member_best_score = extract(best_score, idx)
+            member_steps0 = extract(member_update_steps, idx)
+
+            # Fresh rollout state every visit -- matches the reference's own
+            # learn(..., total_timesteps=...) resetting its env internally
+            # each call. Only the model + optimizer state persist across a
+            # member's (non-consecutive) visits, mirroring the reference's
+            # create_model/update_model object-reuse split exactly; carrying
+            # population_size live env states when only one member trains
+            # per visit would be pure waste.
+            rng, env_rng, chunk_rng = jax.random.split(rng, 3)
+            reset_rngs = jax.random.split(env_rng, self.config.num_envs)
+            obsv, env_state = jax.vmap(self.env.reset, in_axes=(0,))(reset_rngs)
+            init_hstate = self.policy.init_hstate(self.config.num_actors)
+            init_done = {
+                k: jnp.zeros((self.config.num_envs,), dtype=bool)
+                for k in self.env.agents + ["__all__"]
+            }
+
+            update_runner_state = (
+                (member_train_state, env_state, obsv, init_done, init_hstate, chunk_rng),
+                member_steps0,
+            )
+            update_with_ckpt_runner_state = (
+                update_runner_state,
+                member_ckpt,
+                member_ckpt_idx,
+                member_best_params,
+                member_best_score,
+            )
+
+            # others_params is the FULL population array, static-shaped
+            # (population_size never shrinks) -- self_idx (traced) excludes
+            # this visit's own member from the entropy-bonus reduction via
+            # population_entropy_bonus's exclude_idx, matching the
+            # reference's pbt_population_copy.pop(idx0).
+            chunk_step = partial(
+                self._update_step_with_checkpoint,
+                others_params=population_train_state.params,
+                self_idx=idx,
+            )
+            new_runner_state, metric = jax.lax.scan(
+                chunk_step, update_with_ckpt_runner_state, xs=None, length=chunk_updates
+            )
+            (
+                new_update_runner_state,
+                new_ckpt,
+                new_ckpt_idx,
+                new_best_params,
+                new_best_score,
+            ) = new_runner_state
+            (new_member_train_state, _, _, _, _, _), new_steps = new_update_runner_state
+
+            population_train_state = write_back(population_train_state, idx, new_member_train_state)
+            checkpoint_array = write_back(checkpoint_array, idx, new_ckpt)
+            ckpt_idx = write_back(ckpt_idx, idx, new_ckpt_idx)
+            best_params = write_back(best_params, idx, new_best_params)
+            best_score = write_back(best_score, idx, new_best_score)
+            member_update_steps = write_back(member_update_steps, idx, new_steps)
+
+            new_carry = (
+                population_train_state,
+                checkpoint_array,
+                ckpt_idx,
+                best_params,
+                best_score,
+                member_update_steps,
+                rng,
+            )
+            return new_carry, metric
+
+        def pbt_iteration(carry, unused):
+            *state, rng = carry
+            rng, perm_rng = jax.random.split(rng)
+            # A fresh permutation per PBT iteration, drawn once -- the
+            # vectorized equivalent of the reference's
+            # pairs_to_train.pop(np.random.choice(...)) loop: every member
+            # visited exactly once per iteration, order resampled each time.
+            visit_order = jax.random.permutation(perm_rng, population_size)
+            iter_carry, metrics = jax.lax.scan(visit, (*state, rng), visit_order)
+            return iter_carry, metrics
+
+        init_carry = (
+            population_train_state,
+            checkpoint_array,
+            ckpt_idx,
+            best_params,
+            best_score,
+            member_update_steps,
+            rng,
+        )
+        final_carry, metrics = jax.lax.scan(
+            pbt_iteration, init_carry, xs=None, length=num_pbt_iters
+        )
+        (
+            population_train_state,
+            checkpoint_array,
+            ckpt_idx,
+            best_params,
+            best_score,
+            _member_update_steps,
+            _rng,
+        ) = final_carry
+
+        return {
+            "final_params": population_train_state.params,
+            # Shape (num_pbt_iters, population_size, chunk_updates) per
+            # field -- natural nested-scan stacking order, NOT grouped by
+            # member identity (a given (iter, slot) position visits a
+            # different member each iteration, per visit_order). This
+            # differs in *meaning* from train()'s (num_updates,)-per-member
+            # shape; metrics.jsonl (which carries the member_idx field added
+            # in _update_step) is the correct place to read a per-member
+            # curve, not this bulk array -- see module docstring.
+            "metrics": metrics,
+            "checkpoints": checkpoint_array,
+            "final_ckpt_idx": ckpt_idx,
+            "best_params": best_params,
+            "best_score": best_score,
+        }
+
     def _init_ckpt_array(self, params_pytree):
         num_ckpts = self.config.num_checkpoints
         return jax.tree.map(lambda x: jnp.zeros((num_ckpts,) + x.shape, x.dtype), params_pytree)
 
-    def _update_step_with_checkpoint(self, update_with_ckpt_runner_state, unused):
+    def _update_step_with_checkpoint(
+        self, update_with_ckpt_runner_state, unused, *, others_params=None, self_idx=None
+    ):
         (update_runner_state, checkpoint_array, ckpt_idx, best_params, best_score) = (
             update_with_ckpt_runner_state
         )
-        update_runner_state, metric = self._update_step(update_runner_state, None)
+        update_runner_state, metric = self._update_step(
+            update_runner_state, None, others_params=others_params, self_idx=self_idx
+        )
         _, update_steps = update_runner_state
         should_store = _is_checkpoint_step(
             update_steps, self.config.num_updates, self.config.num_checkpoints
@@ -301,10 +543,15 @@ class MepTrainer:
         runner_state = (update_runner_state, checkpoint_array, ckpt_idx, best_params, best_score)
         return runner_state, metric
 
-    def _update_step(self, update_runner_state, unused):
+    def _update_step(self, update_runner_state, unused, *, others_params=None, self_idx=None):
         runner_state, update_steps = update_runner_state
 
-        env_step = partial(self._env_step, update_steps=update_steps)
+        env_step = partial(
+            self._env_step,
+            update_steps=update_steps,
+            others_params=others_params,
+            self_idx=self_idx,
+        )
         runner_state, (traj_batch, bonus_diag) = jax.lax.scan(
             env_step, runner_state, None, self.config.rollout_length
         )
@@ -353,6 +600,14 @@ class MepTrainer:
         metric["population_entropy_bonus_mean"] = bonus_diag["entropy_bonus"].mean()
         metric["task_reward_per_step_mean"] = bonus_diag["task_reward"].mean()
         metric["population_entropy_coef_current"] = bonus_diag["entropy_coef_current"].mean()
+        # Only added on the round-robin path (self_idx is a real index there,
+        # None on the simultaneous path) -- keeps the simultaneous path's
+        # metric dict byte-for-byte unchanged, since every vmapped lane IS a
+        # member simultaneously there and "which member" isn't a meaningful
+        # per-step question the way it is once training visits one member
+        # at a time.
+        if self_idx is not None:
+            metric["member_idx"] = self_idx
 
         jax.experimental.io_callback(self._callback, None, metric)
 
@@ -364,7 +619,7 @@ class MepTrainer:
         n_episodes = mask.sum()
         condensed_metric = {}
         for key, val in metric.items():
-            if key == "update_steps":
+            if key in ("update_steps", "member_idx"):
                 condensed_metric[key] = val
             elif key == "returned_episode":
                 condensed_metric[key] = n_episodes.astype(jnp.float32)
@@ -389,7 +644,7 @@ class MepTrainer:
         if self.progress_callback is not None:
             self.progress_callback()
 
-    def _env_step(self, runner_state, unused, *, update_steps):
+    def _env_step(self, runner_state, unused, *, update_steps, others_params=None, self_idx=None):
         train_state, env_state, last_obs, last_done, last_hstate, rng = runner_state
 
         rng, act_rng = jax.random.split(rng, 2)
@@ -422,9 +677,22 @@ class MepTrainer:
         # log-prob of THIS already-sampled action at THIS observation,
         # reduce via log-mean-exp. See module docstring for why this
         # must not be mean-of-log-probs, and for the hstate reset.
-        gathered_params = jax.tree.map(
-            lambda x: jax.lax.all_gather(x, axis_name="population"), train_state.params
-        )
+        #
+        # ``others_params`` is None on the simultaneous-vmap path (today's
+        # behavior, unchanged): every lane's current params are gathered
+        # live via the named-axis collective. Round-robin (see
+        # ``train_round_robin``) has no population vmap to gather across --
+        # it passes the whole (static-shape, population_size-leading-axis)
+        # params array in directly, already a plain argument, and excludes
+        # the currently-training member (``self_idx``) from the reduction
+        # via ``population_entropy_bonus``'s ``exclude_idx``, matching the
+        # reference's ``pbt_population_copy.pop(idx0)``.
+        if others_params is None:
+            gathered_params = jax.tree.map(
+                lambda x: jax.lax.all_gather(x, axis_name="population"), train_state.params
+            )
+        else:
+            gathered_params = others_params
         zero_hstate = self.policy.init_hstate(self.config.num_actors)
 
         def _member_log_prob(member_params):
@@ -445,7 +713,9 @@ class MepTrainer:
             self.population_entropy_warmup,
             self.population_entropy_coef,
         )
-        entropy_bonus = population_entropy_bonus(member_log_probs, current_entropy_coef).squeeze()
+        entropy_bonus = population_entropy_bonus(
+            member_log_probs, current_entropy_coef, exclude_idx=self_idx
+        ).squeeze()
 
         action = action.squeeze()
         log_prob = log_prob.squeeze()
@@ -580,13 +850,22 @@ def train_mep_members(
     population_entropy_coef: float,
     wandb_logger: RunLogger,
     population_entropy_warmup: float = 0.0,
+    round_robin: bool = False,
+    round_robin_chunk_timesteps: float = 4e4,
     gradient_accumulation_steps: int = 1,
 ) -> TrainOutput:
-    """Single seed of training an MEP population. The population axis is
-    *named* (``axis_name="population"``) so the entropy bonus's
+    """Single seed of training an MEP population.
+
+    ``round_robin=False`` (default): the population axis is *named*
+    (``axis_name="population"``) so the entropy bonus's
     ``jax.lax.all_gather`` can synchronize every member's current params at
-    every step -- see module docstring."""
-    rngs = jax.random.split(rng, population_size)
+    every step -- see module docstring.
+
+    ``round_robin=True``: no population vmap at all --
+    ``MepTrainer.train_round_robin`` owns the whole population internally
+    and trains members sequentially, matching the reference's actual
+    training cadence (see ``MepConfig.round_robin``'s docstring).
+    """
     trainer = MepTrainer(
         runtime,
         env,
@@ -595,8 +874,19 @@ def train_mep_members(
         population_entropy_warmup=population_entropy_warmup,
         gradient_accumulation_steps=gradient_accumulation_steps,
     )
-    train_jit = jax.jit(jax.vmap(trainer.train, axis_name="population"))
-    out = train_jit(rngs)
+    if round_robin:
+        train_jit = jax.jit(
+            partial(
+                trainer.train_round_robin,
+                population_size=population_size,
+                chunk_timesteps=round_robin_chunk_timesteps,
+            )
+        )
+        out = train_jit(rng)
+    else:
+        rngs = jax.random.split(rng, population_size)
+        train_jit = jax.jit(jax.vmap(trainer.train, axis_name="population"))
+        out = train_jit(rngs)
     return out
 
 
@@ -636,6 +926,8 @@ def run_mep(job: TeammateGenerationJob, wandb_logger: RunLogger) -> MepPopulatio
                     runtime=runtime,
                     population_entropy_coef=gen.population_entropy_coef,
                     population_entropy_warmup=gen.population_entropy_warmup,
+                    round_robin=gen.round_robin,
+                    round_robin_chunk_timesteps=gen.round_robin_chunk_timesteps,
                     wandb_logger=wandb_logger,
                     gradient_accumulation_steps=gen.gradient_accumulation_steps,
                 )

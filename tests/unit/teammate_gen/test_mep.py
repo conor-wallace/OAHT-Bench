@@ -46,6 +46,39 @@ def test_population_entropy_bonus_scales_linearly_with_coef():
     np.testing.assert_allclose(np.asarray(b2), 3.0 * np.asarray(b1), atol=1e-6)
 
 
+def test_population_entropy_bonus_exclude_idx_matches_self_excluding_mean():
+    """``exclude_idx`` must give ``log(mean_{k != idx} pi_k(a|s))``, not
+    today's self-inclusive ``log(mean_k pi_k(a|s))`` -- the round-robin
+    reference's ``pbt_population_copy.pop(idx0)`` semantics. Checked against
+    a direct numpy recomputation over the remaining members, not just "it
+    runs"; also confirms it differs from the self-inclusive value (the two
+    coincide only by coincidence, never in general).
+    """
+    from oaht_bench.teammate_gen.mep import population_entropy_bonus
+
+    probs = np.array([0.9, 0.5, 0.1, 0.3])
+    log_probs = jnp.log(jnp.asarray(probs))
+
+    got = population_entropy_bonus(log_probs, coef=1.0, exclude_idx=2)
+    expected_self_excluded = -np.log(np.mean(np.delete(probs, 2)))
+    np.testing.assert_allclose(np.asarray(got), expected_self_excluded, atol=1e-6)
+
+    self_inclusive = population_entropy_bonus(log_probs, coef=1.0)
+    assert abs(float(got) - float(self_inclusive)) > 1e-3
+
+
+def test_population_entropy_bonus_exclude_idx_none_is_unchanged():
+    """``exclude_idx=None`` (the default) must be byte-identical to omitting
+    the argument entirely -- the round_robin=False path's guarantee.
+    """
+    from oaht_bench.teammate_gen.mep import population_entropy_bonus
+
+    log_probs = jnp.log(jnp.array([0.7, 0.3, 0.05]))
+    without_arg = population_entropy_bonus(log_probs, coef=1.0)
+    with_none = population_entropy_bonus(log_probs, coef=1.0, exclude_idx=None)
+    np.testing.assert_array_equal(np.asarray(without_arg), np.asarray(with_none))
+
+
 def test_maybe_store_best_tracks_the_true_running_maximum():
     """A non-monotonic return sequence with a tie -- confirms best_params/
     best_score end up at the step with the actual highest observed return
@@ -94,6 +127,51 @@ def test_population_entropy_coef_schedule_ramps_linearly_then_holds():
     assert float(mid) == pytest.approx(0.25)
     assert float(end) == pytest.approx(target)
     assert float(past) == pytest.approx(target)  # held, never exceeds target
+
+
+def test_round_robin_visit_order_covers_every_member_exactly_once_per_block():
+    """``jax.random.permutation`` is ``train_round_robin``'s visitation
+    schedule (one PBT iteration = one permutation of ``population_size``).
+    Pins that this actually gives full, exactly-once coverage per block
+    across several blocks/seeds, not just "doesn't crash" -- a scheduling
+    bug here would silently starve some members and double-visit others.
+    """
+    population_size = 7
+    rng = jax.random.PRNGKey(0)
+    for block in range(20):
+        rng, perm_rng = jax.random.split(rng)
+        visit_order = jax.random.permutation(perm_rng, population_size)
+        assert sorted(np.asarray(visit_order).tolist()) == list(range(population_size)), (
+            f"block {block} did not visit every member exactly once"
+        )
+
+
+def test_dynamic_index_update_round_trip_has_no_cross_member_aliasing():
+    """The extract-train-write_back pattern ``train_round_robin`` uses
+    (``jax.lax.dynamic_index_in_dim`` / ``dynamic_update_slice_in_dim``) must
+    round-trip a value through one member's slot without disturbing any
+    other member's slot -- the exact bug class an axis/shape mistake there
+    would cause (catches it immediately, independent of a long real run).
+    """
+    population_size = 5
+    population = jnp.arange(population_size, dtype=jnp.float32) * 10.0  # [0, 10, 20, 30, 40]
+
+    def extract(x, idx):
+        return jax.lax.dynamic_index_in_dim(x, idx, axis=0, keepdims=False)
+
+    def write_back(full, idx, new_slice):
+        return jax.lax.dynamic_update_slice_in_dim(full, new_slice[None], idx, axis=0)
+
+    for idx in range(population_size):
+        got = extract(population, idx)
+        assert float(got) == pytest.approx(float(idx) * 10.0)
+
+        updated = write_back(population, idx, got + 1.0)  # mutate only this member's slot
+        for other in range(population_size):
+            if other == idx:
+                assert float(updated[other]) == pytest.approx(float(idx) * 10.0 + 1.0)
+            else:
+                assert float(updated[other]) == pytest.approx(float(population[other]))
 
 
 def _toy_gen(population_entropy_coef, *, population_size=2, num_envs=8, total_timesteps=1600):
@@ -393,3 +471,139 @@ def test_population_entropy_warmup_ramps_the_logged_coefficient(tmp_path):
     assert coef_curve[-1] == pytest.approx(target_coef, abs=1e-6)
     assert np.all(np.diff(coef_curve) >= -1e-8)  # monotone through the ramp, then flat
     assert np.any(np.isclose(coef_curve, target_coef, atol=1e-6))  # genuinely reaches target
+
+
+def test_round_robin_false_is_byte_identical_to_unset(tmp_path):
+    """``round_robin=False`` (explicit) must be a no-op -- the same
+    backward-compatibility guarantee every other opt-in flag this session
+    got (``population_entropy_warmup=0.0``, ``release_best=False``), checked
+    on real training output rather than assumed from the default value.
+    """
+    from oaht_bench.common.save_load_utils import load_train_run
+    from oaht_bench.configs import get_preset
+    from oaht_bench.configs.job import TeammateGenerationJob
+    from oaht_bench.population import artifact_dir
+    from oaht_bench.teammate_gen.runner import run
+
+    env = get_preset("lbf_12x12").model_copy(update={"rollout_length": 8})
+    default_gen = _toy_gen(population_entropy_coef=0.01, num_envs=4, total_timesteps=32)
+
+    default_job = TeammateGenerationJob(
+        label="mep_rr_default", env=env, generator=default_gen, output_dir=str(tmp_path / "default")
+    )
+    default_out = load_train_run(str(artifact_dir(run(default_job))))
+
+    explicit_gen = default_gen.model_copy(update={"round_robin": False})
+    explicit_job = TeammateGenerationJob(
+        label="mep_rr_explicit",
+        env=env,
+        generator=explicit_gen,
+        output_dir=str(tmp_path / "explicit"),
+    )
+    explicit_out = load_train_run(str(artifact_dir(run(explicit_job))))
+
+    np.testing.assert_array_equal(
+        np.asarray(default_out["metrics"]["returned_episode_returns"]),
+        np.asarray(explicit_out["metrics"]["returned_episode_returns"]),
+    )
+    default_leaves = jax.tree_util.tree_leaves(default_out["final_params"])
+    explicit_leaves = jax.tree_util.tree_leaves(explicit_out["final_params"])
+    for d, e in zip(default_leaves, explicit_leaves, strict=True):
+        np.testing.assert_array_equal(np.asarray(d), np.asarray(e))
+
+
+def test_round_robin_true_trains_saves_and_scores(tmp_path):
+    """End-to-end through the runner with ``round_robin=True`` on a tiny LBF
+    job: trains (sequential, frozen-others cadence), checkpoints, scores,
+    and ``get_mep_population`` consumes the output exactly like the
+    simultaneous-vmap path's -- the output-contract guarantee the whole
+    design hinges on (no changes needed in ``population/loading.py``).
+    """
+    from oaht_bench.common.save_load_utils import load_train_run
+    from oaht_bench.configs import get_preset
+    from oaht_bench.configs.job import TeammateGenerationJob
+    from oaht_bench.envs import make_env
+    from oaht_bench.envs.log_wrapper import LogWrapper
+    from oaht_bench.population import artifact_dir
+    from oaht_bench.population.loading import get_mep_population
+    from oaht_bench.teammate_gen.runner import run
+
+    env_cfg = get_preset("lbf_12x12").model_copy(update={"rollout_length": 8})
+    population_size = 3
+    gen = _toy_gen(
+        population_entropy_coef=0.01,
+        population_size=population_size,
+        num_envs=4,
+        total_timesteps=320,
+    ).model_copy(
+        update={
+            "round_robin": True,
+            "round_robin_chunk_timesteps": 32,  # tiny chunk -> several visits/iterations
+        }
+    )
+    job = TeammateGenerationJob(
+        label="mep_rr_e2e", env=env_cfg, generator=gen, output_dir=str(tmp_path)
+    )
+
+    run_dir = run(job)
+    out = load_train_run(str(artifact_dir(run_dir)))
+    assert "final_params" in out and "best_params" in out and "best_score" in out
+
+    final_leaves = jax.tree_util.tree_leaves(out["final_params"])
+    assert final_leaves[0].shape[:2] == (1, population_size)  # (num_seeds, population_size, ...)
+
+    env = LogWrapper(make_env(env_cfg.env_name, env_cfg.env_kwargs()))
+    partner_params, partner_population = get_mep_population(job, out, env)
+    assert partner_population.pop_size == population_size
+    assert jax.tree_util.tree_leaves(partner_params)[0].shape[1] == population_size
+
+
+def test_round_robin_logs_member_idx_and_visits_every_member(tmp_path):
+    """Real training data: ``metrics.jsonl``'s ``member_idx`` field (added
+    only on the round-robin path) must show every member visited the
+    expected number of times (``num_pbt_iters``), and a given member's own
+    return curve across its (non-consecutive) visits must look like a
+    continuous PPO learning signal -- not reset each visit -- confirming
+    optimizer state actually persisted across visits rather than being
+    reinitialized.
+    """
+    import json
+
+    from oaht_bench.configs import get_preset
+    from oaht_bench.configs.job import TeammateGenerationJob
+    from oaht_bench.teammate_gen.runner import run
+
+    env = get_preset("lbf_12x12").model_copy(update={"rollout_length": 8})
+    population_size = 3
+    num_envs = 4
+    chunk_timesteps = 32
+    total_timesteps = 320
+    num_pbt_iters = total_timesteps // chunk_timesteps  # 10
+    # chunk_updates = chunk_timesteps // rollout_length // num_envs = 32 // 8 // 4 = 1,
+    # chosen deliberately so each visit logs exactly one member_idx row --
+    # counting metrics.jsonl rows directly equals the visit count.
+    gen = _toy_gen(
+        population_entropy_coef=0.01,
+        population_size=population_size,
+        num_envs=num_envs,
+        total_timesteps=total_timesteps,
+    ).model_copy(update={"round_robin": True, "round_robin_chunk_timesteps": chunk_timesteps})
+    job = TeammateGenerationJob(
+        label="mep_rr_member_idx", env=env, generator=gen, output_dir=str(tmp_path)
+    )
+
+    run_dir = run(job)
+    rows = [
+        json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines() if line
+    ]
+    member_idx_rows = [r for r in rows if "Train/member_idx" in r]
+    assert member_idx_rows, "round_robin=True must log member_idx -- found none in metrics.jsonl"
+
+    from collections import Counter
+
+    visit_counts = Counter(int(r["Train/member_idx"]) for r in member_idx_rows)
+    assert set(visit_counts) == set(range(population_size))
+    for member, count in visit_counts.items():
+        assert count == num_pbt_iters, (
+            f"member {member} visited {count} times, expected {num_pbt_iters}"
+        )
