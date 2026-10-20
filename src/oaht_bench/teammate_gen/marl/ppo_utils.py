@@ -55,6 +55,22 @@ def _maybe_store_checkpoint(checkpoint_array, ckpt_idx, params, should_store):
     return jax.lax.cond(should_store, store, skip, (checkpoint_array, ckpt_idx, params))
 
 
+def _maybe_store_best(best_params, best_score, params, score):
+    """Overwrite ``best_params``/``best_score`` with ``params``/``score`` iff
+    ``score > best_score``, else leave both unchanged.
+
+    Always the same slot -- unlike ``_maybe_store_checkpoint``'s advancing
+    index, this is a running max, not a sequence of snapshots, so a plain
+    ``jnp.where`` select suffices (no second side effect like index
+    advancement to branch a ``lax.cond`` on).
+    """
+    is_new_best = score > best_score
+    new_best_params = jax.tree.map(
+        lambda b, p: jnp.where(is_new_best, p, b), best_params, params
+    )
+    return new_best_params, jnp.where(is_new_best, score, best_score)
+
+
 def _create_minibatches(traj_batch, advantages, targets, init_hstate, num_actors, num_minibatches, perm_rng):
     """Create minibatches for PPO updates, where each leaf has shape 
         (num_minibatches, rollout_len, num_actors / num_minibatches, ...) 

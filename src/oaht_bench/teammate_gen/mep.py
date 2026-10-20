@@ -85,6 +85,7 @@ from oaht_bench.teammate_gen.marl.ppo_utils import (
     Transition,
     _create_minibatches,
     _is_checkpoint_step,
+    _maybe_store_best,
     _maybe_store_checkpoint,
     batchify,
     unbatchify,
@@ -207,7 +208,20 @@ class MepTrainer:
         )
         checkpoint_array = self._init_ckpt_array(train_state.params)
         ckpt_idx = 0
-        update_with_ckpt_runner_state = (update_runner_state, checkpoint_array, ckpt_idx)
+        # Continuously-tracked best-performing params (MEP reference's
+        # best_sparse_rew_avg mechanism, see module docstring) -- independent of
+        # and in addition to the evenly-spaced checkpoint_array above. Starts at
+        # -inf, like the reference, so the very first measured return always
+        # becomes the initial "best".
+        best_params = jax.tree.map(jnp.zeros_like, train_state.params)
+        best_score = jnp.asarray(-jnp.inf)
+        update_with_ckpt_runner_state = (
+            update_runner_state,
+            checkpoint_array,
+            ckpt_idx,
+            best_params,
+            best_score,
+        )
 
         runner_state, metrics = jax.lax.scan(
             self._update_step_with_checkpoint,
@@ -216,13 +230,17 @@ class MepTrainer:
             length=self.config.num_updates,
         )
 
-        update_runner_state, checkpoint_array, final_ckpt_idx = runner_state
+        update_runner_state, checkpoint_array, final_ckpt_idx, best_params, best_score = (
+            runner_state
+        )
 
         return {
             "final_params": update_runner_state[0][0].params,
             "metrics": metrics,
             "checkpoints": checkpoint_array,
             "final_ckpt_idx": final_ckpt_idx,
+            "best_params": best_params,
+            "best_score": best_score,
         }
 
     def _init_ckpt_array(self, params_pytree):
@@ -230,7 +248,9 @@ class MepTrainer:
         return jax.tree.map(lambda x: jnp.zeros((num_ckpts,) + x.shape, x.dtype), params_pytree)
 
     def _update_step_with_checkpoint(self, update_with_ckpt_runner_state, unused):
-        (update_runner_state, checkpoint_array, ckpt_idx) = update_with_ckpt_runner_state
+        (update_runner_state, checkpoint_array, ckpt_idx, best_params, best_score) = (
+            update_with_ckpt_runner_state
+        )
         update_runner_state, metric = self._update_step(update_runner_state, None)
         _, update_steps = update_runner_state
         should_store = _is_checkpoint_step(
@@ -239,7 +259,13 @@ class MepTrainer:
         checkpoint_array, ckpt_idx = _maybe_store_checkpoint(
             checkpoint_array, ckpt_idx, update_runner_state[0][0].params, should_store
         )
-        runner_state = (update_runner_state, checkpoint_array, ckpt_idx)
+        best_params, best_score = _maybe_store_best(
+            best_params,
+            best_score,
+            update_runner_state[0][0].params,
+            metric["returned_episode_returns"],
+        )
+        runner_state = (update_runner_state, checkpoint_array, ckpt_idx, best_params, best_score)
         return runner_state, metric
 
     def _update_step(self, update_runner_state, unused):

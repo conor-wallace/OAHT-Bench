@@ -319,14 +319,30 @@ class MepConfig(GeneratorBase):
     actor_type: ActorType = "mlp"
     release_checkpoints: bool = Field(
         default=False,
-        description="Release every saved checkpoint (beginner/middle/.../best, "
-        "per MEP's own paper, §4: 'we use multiple checkpoints ... to form the "
-        "final population') as an independent population member, the same way "
-        "get_fcp_population flattens FCP's. Off by default: every existing MEP "
+        description="Release every saved time-based checkpoint (evenly spaced "
+        "across training, num_checkpoints of them) as an independent population "
+        "member, the same way get_fcp_population flattens FCP's. Covers the "
+        "'beginner/middle/final' part of MEP's own paper practice (§4: 'we use "
+        "multiple checkpoints ... to form the final population'); release_best "
+        "below covers the other part. Off by default: every existing MEP "
         "population was trained with the shared num_checkpoints=5 default but "
         "never read it, so flipping this on changes an existing population's "
         "released size from population_size to population_size * num_checkpoints "
         "-- re-score deliberately, not by changing this default.",
+    )
+    release_best: bool = Field(
+        default=False,
+        description="Release each member's continuously-tracked best-performing "
+        "snapshot (measured return, not training step) as population_size more "
+        "members, independent of and additional to release_checkpoints -- the "
+        "other half of MEP's paper practice, matching the reference "
+        "implementation's best_sparse_rew_avg mechanism (see teammate_gen/mep.py's "
+        "module docstring). Off by default for the same re-score-deliberately "
+        "reason release_checkpoints is; both together give "
+        "population_size * (num_checkpoints + 1) released members, matching the "
+        "reference's 3-time-based-plus-1-best per-member structure that turns "
+        "MEP's population size 4 into TIPR's reported 12-20 distinct opponent "
+        "policies (App. F.1).",
     )
     total_timesteps: float = Field(default=1e6, gt=0, description="Per member trained.")
     population_entropy_coef: float = Field(

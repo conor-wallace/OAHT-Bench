@@ -13,6 +13,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 
 def test_population_entropy_bonus_is_log_mean_not_mean_log():
@@ -43,6 +44,27 @@ def test_population_entropy_bonus_scales_linearly_with_coef():
     b1 = population_entropy_bonus(log_probs, coef=1.0)
     b2 = population_entropy_bonus(log_probs, coef=3.0)
     np.testing.assert_allclose(np.asarray(b2), 3.0 * np.asarray(b1), atol=1e-6)
+
+
+def test_maybe_store_best_tracks_the_true_running_maximum():
+    """A non-monotonic return sequence with a tie -- confirms best_params/
+    best_score end up at the step with the actual highest observed return
+    (not the last step, and strict '>' means the first occurrence of a tied
+    max wins, not a later one silently overwriting it).
+    """
+    from oaht_bench.teammate_gen.marl.ppo_utils import _maybe_store_best
+
+    returns = [0.1, 0.5, 0.3, 0.9, 0.2, 0.9, 0.4]  # max 0.9 first at index 3, tied again at 5
+    # distinct "params" per step so we can tell which step actually won
+    params_per_step = [{"w": jnp.asarray(float(i))} for i in range(len(returns))]
+
+    best_params = {"w": jnp.asarray(-1.0)}
+    best_score = jnp.asarray(-jnp.inf)
+    for p, r in zip(params_per_step, returns, strict=True):
+        best_params, best_score = _maybe_store_best(best_params, best_score, p, jnp.asarray(r))
+
+    assert float(best_score) == pytest.approx(0.9)
+    assert float(best_params["w"]) == 3.0  # the first step to reach 0.9, not step 5's tie
 
 
 def _toy_gen(population_entropy_coef, *, population_size=2, num_envs=8, total_timesteps=1600):
@@ -78,6 +100,62 @@ def test_run_mep_trains_saves_and_scores(tmp_path):
     run_dir = run(job)
     assert (run_dir / "job.json").exists()
     assert artifact_dir(run_dir).exists()  # the checkpoint was written
+
+
+def test_run_mep_tracks_best_and_releases_it_independently_of_checkpoints(tmp_path):
+    """release_best=True adds population_size more members (each member's
+    continuously-tracked best-performing snapshot), independent of and in
+    addition to release_checkpoints -- both together give
+    population_size * (num_checkpoints + 1) released members, matching the
+    reference's 3-time-based-plus-1-best per-member structure (App. F.1).
+
+    Also confirms, on real training data (not just the synthetic
+    _maybe_store_best unit test), that best_score actually equals the true
+    maximum of the recorded per-update returns -- not just that the shapes
+    line up.
+    """
+    from oaht_bench.common.save_load_utils import load_train_run
+    from oaht_bench.configs import get_preset
+    from oaht_bench.configs.job import TeammateGenerationJob
+    from oaht_bench.envs import make_env
+    from oaht_bench.envs.log_wrapper import LogWrapper
+    from oaht_bench.population import artifact_dir
+    from oaht_bench.population.loading import get_mep_population
+    from oaht_bench.teammate_gen.runner import run
+
+    env_cfg = get_preset("lbf_12x12").model_copy(update={"rollout_length": 8})
+    population_size, num_checkpoints = 2, 3
+    gen = _toy_gen(
+        population_entropy_coef=0.01,
+        population_size=population_size,
+        num_envs=4,
+        total_timesteps=192,
+    ).model_copy(
+        update={
+            "release_checkpoints": True,
+            "release_best": True,
+            "num_checkpoints": num_checkpoints,
+        }
+    )
+    job = TeammateGenerationJob(
+        label="mep_best_e2e", env=env_cfg, generator=gen, output_dir=str(tmp_path)
+    )
+
+    run_dir = run(job)
+    out = load_train_run(str(artifact_dir(run_dir)))
+    assert "best_params" in out and "best_score" in out
+
+    # best_score must equal the true max of this member's own recorded returns,
+    # not merely have the right shape.
+    returns = np.asarray(out["metrics"]["returned_episode_returns"])  # (seeds, pop, num_updates)
+    best_score = np.asarray(out["best_score"])  # (seeds, pop)
+    np.testing.assert_allclose(best_score, returns.max(axis=-1), atol=1e-5)
+
+    env = LogWrapper(make_env(env_cfg.env_name, env_cfg.env_kwargs()))
+    partner_params, partner_population = get_mep_population(job, out, env)
+    expected_size = population_size * (num_checkpoints + 1)
+    assert partner_population.pop_size == expected_size
+    assert jax.tree_util.tree_leaves(partner_params)[0].shape[1] == expected_size
 
 
 def _mean_population_entropy_estimate(job, run_dir, *, num_probe_envs=16, seed=123):

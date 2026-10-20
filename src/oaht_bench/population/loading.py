@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 import chex
 import jax
@@ -61,6 +61,12 @@ class TrainOutput(TypedDict):
     checkpoints: chex.ArrayTree
     #: Index of the checkpoint selected as each member's final policy.
     final_ckpt_idx: chex.Array
+    #: MEP-specific: the continuously-tracked best-performing params per member
+    #: (MEP reference's best_sparse_rew_avg mechanism), not populated by every
+    #: generator sharing this TypedDict.
+    best_params: NotRequired[chex.ArrayTree]
+    #: MEP-specific: the measured return best_params was selected at.
+    best_score: NotRequired[chex.Array]
 
 
 def artifact_dir(run_dir: Path) -> Path:
@@ -156,19 +162,31 @@ def get_mep_population(
     policies CoMeDi/BRDiv/L-BRDiv use.
 
     ``gen.release_checkpoints`` (default ``False``) switches to FCP's
-    convention instead: flatten every saved checkpoint into its own population
-    member, matching MEP's own paper's practice ("we use multiple checkpoints
-    ... to form the final population"), which is how TIPR turns MEP's
-    population size 4 into 12-20 distinct opponent policies (App. F.1). MEP's
-    checkpoint array comes out of ``teammate_gen/mep.py`` shaped
-    ``(num_checkpoints, num_seeds, population_size, ...)`` -- checkpoints
-    *outermost*, since a single ``train()`` call already vmaps jointly over
-    ``(num_seeds, population_size)`` before checkpointing adds its own axis in
-    front -- the opposite leading-axis order from FCP's
+    convention instead: flatten every saved (evenly-spaced, time-based)
+    checkpoint into its own population member, matching MEP's own paper's
+    practice ("we use multiple checkpoints ... to form the final
+    population"). MEP's checkpoint array comes out of ``teammate_gen/mep.py``
+    shaped ``(num_checkpoints, num_seeds, population_size, ...)`` --
+    checkpoints *outermost*, since a single ``train()`` call already vmaps
+    jointly over ``(num_seeds, population_size)`` before checkpointing adds
+    its own axis in front -- the opposite leading-axis order from FCP's
     ``(num_seeds, population_size, num_checkpoints, ...)``, so this moves the
     checkpoint axis in before reshaping, rather than reusing FCP's reshape
     directly. Flat index is ``member * num_checkpoints + checkpoint``, the same
     convention ``released_members`` uses for FCP.
+
+    ``gen.release_best`` (default ``False``, independent of
+    ``release_checkpoints``) additionally releases each member's
+    continuously-tracked best-performing snapshot (``out['best_params']``,
+    the MEP reference's own ``best_sparse_rew_avg`` mechanism -- see
+    ``teammate_gen/mep.py``'s module docstring) as ``population_size`` more
+    members, appended after whatever ``release_checkpoints`` already
+    produced. Already shaped ``(num_seeds, population_size, ...)``, so no
+    reorder is needed the way ``checkpoints`` needs one. Both toggles
+    together give ``population_size * (num_checkpoints + 1)`` released
+    members -- the reference's exact per-member checkpoint-type count (3
+    time-based + 1 best) that turns MEP's population size 4 into TIPR's
+    reported 12-20 distinct opponent policies (App. F.1).
     '''
     gen = job.generator
     num_seeds = gen.num_seeds
@@ -185,6 +203,12 @@ def get_mep_population(
         mep_pop_size = gen.population_size
         # partner_params has shape (num_seeds, mep_pop_size, ...)
         partner_params = out['final_params']
+
+    if gen.release_best:
+        partner_params = jax.tree.map(
+            lambda a, b: jnp.concatenate([a, b], axis=1), partner_params, out['best_params']
+        )
+        mep_pop_size += gen.population_size
 
     if gen.actor_type == "rnn":
         partner_policy = RNNActorCriticPolicy(
