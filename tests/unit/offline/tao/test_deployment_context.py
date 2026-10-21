@@ -102,7 +102,7 @@ def test_encode_ocw_normalizes_observations_the_same_way_training_does():
     )
 
     # What encode_ocw actually feeds it: the identical raw trajectory, unnormalized.
-    got_context, _ = agent.encode_ocw(params, raw_obs, actions, rewards, mask, timesteps)
+    got_context = agent.encode_ocw(params, raw_obs, actions, rewards, mask, timesteps)["context"]
     got = got_context.reshape(C, T, cfg.network.hidden_dim)
 
     np.testing.assert_allclose(np.asarray(got), np.asarray(expected), atol=1e-5)

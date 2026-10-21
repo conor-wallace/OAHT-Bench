@@ -306,10 +306,10 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
     # gaps between baselines, so seeds are what make an ordering trustworthy.
     ns = int(job.num_seeds)
 
-    # TAO (and OMIS later) adapt across episodes via an Opponent Context Window, so
+    # TAO and OMIS both adapt across episodes via an Opponent Context Window, so
     # they evaluate through the sequential in-context path; the within-episode
     # baselines (BC/LIAM/MeLIBA) keep the parallel per-episode eval unchanged.
-    incontext = resolved.network.architecture in ("tao",)
+    incontext = resolved.network.architecture in ("tao", "omis")
 
     def _score_incontext(teammates, *, rng_base):
         """TAO/OMIS scoring: sequential episodes per teammate, OCW re-encoded each one.

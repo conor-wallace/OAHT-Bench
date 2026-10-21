@@ -65,9 +65,15 @@ def _job(tmp_path: Path, baseline: str, **overrides) -> TrainingJob:
     )
 
 
-@pytest.mark.parametrize("baseline", ["liam", "meliba", "omis", "tao"])
+@pytest.mark.parametrize("baseline", ["liam", "meliba", "tao"])
 def test_runner_trains_and_writes_parameters(tmp_path, baseline):
-    """Both baselines complete and leave a loadable artifact plus metrics."""
+    """Both baselines complete and leave a loadable artifact plus metrics.
+
+    OMIS is excluded from this parametrization for the same reason BC is
+    (see ``test_bc_stage_one_trains_nothing`` / ``test_omis_stage_one_trains_nothing``
+    below): both have a no-op ``train_stage_1`` and so never log a ``Stage1/``
+    tag, which this test's generic assertion requires.
+    """
     from oaht_bench.offline.runner import run
 
     run_dir = run(_job(tmp_path, baseline))
@@ -99,6 +105,27 @@ def test_bc_stage_one_trains_nothing(tmp_path):
     tags = {k for r in records for k in r if "/" in k}
     assert not any(t.startswith("Stage1/") for t in tags)
     assert "Stage2/action_accuracy" in tags
+
+
+def test_omis_stage_one_trains_nothing(tmp_path):
+    """OMIS's ``train_stage_1`` is a no-op (see its own docstring and
+    ``docs/tuning_record.md``'s record of the earlier, incorrect staged
+    version) -- pinned directly, the same way BC's is above.
+
+    Unlike BC, Stage 2 still has an imitator head, so both
+    ``action_accuracy`` (the actor) and ``imitator_accuracy`` (``mu_phi``)
+    must show up there.
+    """
+    from oaht_bench.offline.runner import run
+
+    run_dir = run(_job(tmp_path, "omis"))
+    assert (run_dir / "params.pkl").exists()
+
+    records = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
+    tags = {k for r in records for k in r if "/" in k}
+    assert not any(t.startswith("Stage1/") for t in tags)
+    assert "Stage2/action_accuracy" in tags
+    assert "Stage2/imitator_accuracy" in tags
 
 
 def test_bc_filters_to_the_top_quantile_of_episodes_by_return(tmp_path):
@@ -174,7 +201,7 @@ def test_runner_saves_parameters_before_reporting():
     assert src.index('params.pkl").open("wb")') < src.index("nonfatal(")
 
 
-@pytest.mark.parametrize("baseline", ["liam", "meliba", "omis", "tao"])
+@pytest.mark.parametrize("baseline", ["liam", "meliba", "tao"])
 def test_runner_logs_accuracies_and_evaluation_returns(tmp_path, baseline):
     """A falling loss is not evidence the policy plays.
 
@@ -182,6 +209,9 @@ def test_runner_logs_accuracies_and_evaluation_returns(tmp_path, baseline):
     (comparable across baselines in a way nats are not), teammate-action
     accuracy from the representation stage (whether the auxiliary task worked),
     and episode returns per teammate from real rollouts.
+
+    OMIS is excluded here too (see ``test_omis_logs_accuracies_and_evaluation_returns``
+    below) -- it has no representation stage to report a ``Stage1/`` accuracy from.
     """
     from oaht_bench.offline.runner import run
 
@@ -199,6 +229,30 @@ def test_runner_logs_accuracies_and_evaluation_returns(tmp_path, baseline):
     # This fixture's dataset carries no population, so rollouts cannot run. That
     # must be recorded as a skip with a reason rather than left as a null
     # indistinguishable from a crash.
+    summary = json.loads((run_dir / "training_summary.json").read_text())
+    assert summary["eval"] is None
+    assert "population_run" in summary["eval_skipped"]
+
+
+def test_omis_logs_accuracies_and_evaluation_returns(tmp_path):
+    """OMIS's analog of ``test_runner_logs_accuracies_and_evaluation_returns``:
+    the teammate-action accuracy (``mu_phi``) lands under ``Stage2/`` instead
+    of ``Stage1/``, since there is no separate representation stage to report
+    it from -- everything is one pass (see ``test_omis_stage_one_trains_nothing``).
+    """
+    from oaht_bench.offline.runner import run
+
+    job = _job(tmp_path, "omis")
+    job = job.model_copy(update={"offline": job.offline.model_copy(update={"eval_episodes": 1})})
+    run_dir = run(job)
+
+    records = [json.loads(line) for line in (run_dir / "metrics.jsonl").read_text().splitlines()]
+    tags = {k for r in records for k in r if "/" in k}
+
+    assert "Stage2/action_accuracy" in tags
+    assert "Stage2/imitator_accuracy" in tags
+    assert not any(t.startswith("Stage1/") for t in tags)
+
     summary = json.loads((run_dir / "training_summary.json").read_text())
     assert summary["eval"] is None
     assert "population_run" in summary["eval_skipped"]

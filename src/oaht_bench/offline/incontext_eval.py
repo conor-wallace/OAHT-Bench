@@ -1,24 +1,32 @@
 """Cross-episode in-context deployment eval for opponent-trajectory baselines.
 
-TAO (now) and OMIS (later) adapt to a teammate by accumulating its trajectories
+TAO and OMIS both adapt to a teammate by accumulating its trajectories
 *across episodes* into an Opponent Context Window (OCW) and re-conditioning on it --
 unlike BC/LIAM/MeLIBA, whose context is within-episode and resets each episode. So
 these two need a different eval shape: a teammate's episodes run **sequentially**, an
 OCW of the teammate's last ``C`` trajectories grows after each episode, and the ego's
-context is re-encoded from it before the next one (TAO: OPE -> z^-1). We report the
-**per-episode returns** (the adaptation curve) and their mean, so a within-episode
-baseline reads as a flat line and TAO should climb as the OCW fills.
+context is re-encoded from it before the next one (TAO: OPE -> z^-1; OMIS: D_epi's raw
+state/action pairs, no separate encoder). We report the **per-episode returns** (the
+adaptation curve) and their mean, so a within-episode baseline reads as a flat line and
+TAO/OMIS should climb as the OCW fills.
 
 Faithful to TAO's OOM assumption (paper App. J): the opponent's full trajectory is
 observable after each episode. The OCW holds the teammate's own ``(o^-1, a^-1, r^-1)``
 stream, collected from the rollout (the eval harness controls both seats). OMIS's
-``D_epi`` reuses this exact OCW; its within-episode ``D_step`` and decision-time
-search are additive and live in OMIS's own code.
+``D_epi`` reuses this exact OCW (:meth:`~oaht_bench.models.omis_agent.OmisAgent.encode_ocw`);
+its within-episode ``D_step`` is additive, accumulated here in
+:func:`rollout_one_episode` (not the OCW -- D_step resets every episode, D_epi does
+not) and threaded through :meth:`~oaht_bench.models.omis_agent.OmisAgent.get_action_with_mate_history`.
+Decision-time search stays out of scope (``omis_search``, :mod:`oaht_bench.offline.omis`).
 
 The OCW logic lives entirely here: :class:`OpponentContextWindow` accumulates the
-teammate stream, the eval re-encodes it via the agent's ``encode_ocw`` and swaps the
-result into ``params["stage2"]["context"]``, so the agent's ``act`` forward is
-unchanged (it just reads whatever context sits in ``stage2``).
+teammate stream, and the eval re-encodes it via the agent's ``encode_ocw``, merging the
+result into ``params["stage2"]`` (:func:`_context_params`). TAO's ``act`` reads
+``context``/``context_mask`` straight off ``stage2``, so its forward is unchanged by
+this; OMIS's ``act`` takes the equivalent ``epi_state``/``epi_mate_actions``/``epi_mask``
+as explicit kwargs instead (see that method's own docstring for why), so
+``get_action_with_mate_history`` reads them back out of ``stage2`` itself before
+calling ``act``.
 """
 
 from __future__ import annotations
@@ -87,14 +95,19 @@ class OpponentContextWindow:
 
 
 def _context_params(agent, params, ocw: OpponentContextWindow):
-    """A copy of ``params`` with ``stage2["context"]`` re-encoded from ``ocw``.
+    """A copy of ``params`` with the OCW's re-encoding merged into ``stage2``.
 
-    The agent's ``act`` reads ``params["stage2"]["context"]``; swapping it here is how a
-    static-context method becomes an in-context one without touching the forward pass.
+    ``encode_ocw`` returns a dict rather than a fixed tuple because what it
+    produces differs by agent: TAO's is a pre-encoded ``(context,
+    context_mask)`` pair the policy cross-attends to; OMIS's ``D_epi`` has no
+    separate encoder (Sec. 4.1/Fig. 1 is one shared backbone), so it is the
+    three raw ``(epi_state, epi_mate_actions, epi_mask)`` arrays the backbone
+    reads directly. Either way, swapping the result into ``stage2`` is how a
+    static-context method becomes an in-context one without touching the
+    forward pass -- the agent's ``act`` just reads whatever sits there.
     """
     no, ac, rw, ts, mk = ocw.arrays()
-    context, context_mask = agent.encode_ocw(params, no, ac, rw, mk, ts)
-    stage2 = {**params["stage2"], "context": context, "context_mask": context_mask}
+    stage2 = {**params["stage2"], **agent.encode_ocw(params, no, ac, rw, mk, ts)}
     return {**params, "stage2": stage2}
 
 
@@ -124,6 +137,11 @@ def rollout_one_episode(
     reward = {k: jnp.zeros(1) for k in env.agents}
     hstate_0 = ego_agent.init_hstate(1, aux_info={"agent_id": 0})
     hstate_1 = mate_policy.init_hstate(1, aux_info={"agent_id": 1})
+    # OMIS's D_step: the opponent's own action history, within this episode only
+    # (resets every episode, unlike D_epi's cross-episode OCW) -- additive to the
+    # shared ContextWindow rather than a field on it (see
+    # OmisAgent.get_action_with_mate_history's own docstring for why).
+    uses_d_step = hasattr(ego_agent, "get_action_with_mate_history")
 
     ego_return = 0.0
     mate_no, mate_a, mate_r, mate_ts, mate_avail = [], [], [], [], []
@@ -138,22 +156,42 @@ def rollout_one_episode(
             axis=-1,
         )
         rng, a0, a1, sr = jax.random.split(rng, 4)
-        act_0, hstate_0 = ego_agent.get_action(
-            params=params_ep,
-            obs=obs["agent_0"].reshape(1, 1, -1),
-            done=done["agent_0"].reshape(1, 1),
-            avail_actions=avail_0,
-            hstate=hstate_0,
-            rng=a0,
-            aux_obs=(
-                act_onehot["agent_0"].reshape(1, 1, -1),
-                joint_act_onehot,
-                reward["agent_0"].reshape(1, 1, -1),
-            ),
-            env_state=env_state,
-            test_mode=False,
-            reward=reward["agent_0"].reshape(1, 1, -1),
-        )
+        if uses_d_step:
+            # a^{-1}_{t-1}, ..., left-padded to K -- mate_a holds exactly the
+            # opponent's actions through step t-1 at this point (this step's is
+            # appended below, after both agents have acted).
+            K = ego_agent.context_length
+            history = mate_a[-K:]
+            # -10: the same "no action yet" sentinel training's `_shift_right`
+            # uses (offline/omis.py) -- not 0, which is a real action id.
+            window = [-10] * (K - len(history)) + history
+            act_0, hstate_0 = ego_agent.get_action_with_mate_history(
+                params=params_ep,
+                obs=obs["agent_0"].reshape(1, 1, -1),
+                done=done["agent_0"].reshape(1, 1),
+                avail_actions=avail_0,
+                hstate=hstate_0,
+                rng=a0,
+                mate_action_window=window,
+                reward=reward["agent_0"].reshape(1, 1, -1),
+            )
+        else:
+            act_0, hstate_0 = ego_agent.get_action(
+                params=params_ep,
+                obs=obs["agent_0"].reshape(1, 1, -1),
+                done=done["agent_0"].reshape(1, 1),
+                avail_actions=avail_0,
+                hstate=hstate_0,
+                rng=a0,
+                aux_obs=(
+                    act_onehot["agent_0"].reshape(1, 1, -1),
+                    joint_act_onehot,
+                    reward["agent_0"].reshape(1, 1, -1),
+                ),
+                env_state=env_state,
+                test_mode=False,
+                reward=reward["agent_0"].reshape(1, 1, -1),
+            )
         act_1, hstate_1 = mate_policy.get_action(
             params=mate_params,
             obs=obs["agent_1"].reshape(1, 1, -1),

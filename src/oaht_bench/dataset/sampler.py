@@ -125,6 +125,12 @@ def sample_stage2(
         "mask": windows.mask[decoder_idx],
         "ego_avail": windows.ego_avail[decoder_idx],
         "teammate_id": windows.teammate_id[decoder_idx],
+        # The decoder window's own teammate-action stream -- unused by TAO
+        # (whose opponent conditioning is entirely the cross-attended
+        # `context_*` fields below), but it's what OMIS's D_step and
+        # imitator label are built from (see omis.py).
+        "mate_actions": windows.mate_actions[decoder_idx],
+        "mate_avail": windows.mate_avail[decoder_idx],
     }
     # Concatenate the C fragments along time: (batch, C, T, ...) -> (batch, C*T, ...)
     for key, out in (

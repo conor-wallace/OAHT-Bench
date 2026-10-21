@@ -23,26 +23,50 @@ Sources, in the priority this port was written against:
    ``μ_φ``, critic ``V_ω`` over shared in-context data ``D`` (Eqs. 3–5); search is
    the ``|A|×M×L`` rollout of Eqs. 6–10.
 
-**What the offline adaptation changes, and why it is honest.** The actor
-therefore conditions on the ego history only, not on live teammate actions:
-OMIS's perfect-information opponent-action input is dropped so the baseline is
-evaluated on the **same information set** as LIAM and MeLIBA (the shared
-rollout in :mod:`oaht_bench.offline.evaluate` is ego-stream only, and fairness
-requires OMIS not see what the others cannot). The opponent-conditioning
-survives through the shared representation, which is trained -- jointly with
-the actor, matching the reference -- to imitate the teammate and value the
-best response.
+**All three heads condition on D_t^k, matching Eqs. 3-5 -- not simplified
+away.** An earlier version of this port dropped OMIS's opponent-action
+conditioning entirely ("ego-stream-only, same information set as LIAM and
+MeLIBA"), on a fairness argument: the shared rollout in
+:mod:`oaht_bench.offline.evaluate` is ego-stream only, and OMIS seeing what
+the others cannot would be an unfair comparison. That was a real divergence
+from the paper rather than an equivalent simplification, and was reverted
+once a real experiment surfaced it -- the paper's actual design makes
+*every* forward-baseline comparison TAO-shaped: OMIS adapts in-context the
+same way TAO does, just through one shared backbone (Fig. 1) rather than
+TAO's separate-encoder-plus-cross-attention, so it is evaluated through
+:mod:`oaht_bench.offline.incontext_eval` alongside TAO, not through the
+ego-stream-only rollout LIAM/MeLIBA use. ``D_t^k = (D_epi^k, D_step^k)``
+(Sec. 4.1): ``D_step`` is the current episode's own opponent-action history,
+threaded through training as the (label-shifted, see :func:`_shift_right`)
+``mate_actions`` field already in every window; ``D_epi`` is ``C`` past
+episodes against the same opponent (Appendix C), reusing
+:func:`~oaht_bench.dataset.sampler.sample_stage2`'s ``context_mate_*``
+fields -- built for TAO, teammate-agnostic, and directly applicable here.
+Both are new, off-by-default capabilities on the shared
+:class:`~oaht_bench.models.backbone.GPT2Model` (see that module's own
+docstring for the token-layout design); :meth:`OmisAgent.act`'s docstring
+explains how deployment supplies them where the ordinary, every-baseline
+:class:`~oaht_bench.models.return_conditioned_agent.ContextWindow` cannot.
 
-**Two calls, one joint optimization.** :class:`BaseAhtTrainer`'s
+**One real training call, not two.** :class:`BaseAhtTrainer`'s
 ``train_stage_1() -> train_stage_2(stage1_params)`` contract is shared with
 LIAM/MeLIBA/TAO, whose stage 2 trains a policy against a *frozen* stage-1
-representation. OMIS has no such freeze: both calls optimise the *same*
-``{backbone, heads}`` parameter tree against the *same* joint loss, stage 2
-simply continuing from stage 1's checkpoint at a different learning
-rate/step budget (``stage1_learning_rate``/``steps`` vs.
-``stage2_learning_rate``/``steps``) -- a two-phase schedule within one
-training run, not two stages with different objectives. :meth:`OmisAgent.act`
-reads the final, most-trained parameters from ``stage2``.
+representation -- the reason that contract takes two calls at all. OMIS has
+no such freeze (no `stop_gradient` anywhere in :func:`omis_joint_loss`), so
+there is nothing for a first stage to produce. An earlier version of this
+file still ran real gradient steps in both calls anyway -- continuing the
+same parameters from `stage1_steps`/`stage1_learning_rate` into
+`stage2_steps`/`stage2_learning_rate` -- but those are TAO's fields
+(`configs/job.py`'s `OfflineTrainingConfig` docstring: "Defaults are TAO's"),
+inherited from when OMIS genuinely *was* staged like LIAM/MeLIBA (a bug,
+fixed and recorded in `docs/tuning_record.md`); keeping the two-call shape
+after the loss became joint was leftover plumbing, not something the paper's
+one-phase pretraining (Appendix H.2 gives one set of hyperparameters, no
+stage split) asked for. ``train_stage_1`` now returns ``{}`` immediately,
+mirroring :meth:`~oaht_bench.offline.bc.BcTrainer.train_stage_1`'s
+established precedent for exactly this situation; all training happens in
+``train_stage_2``, once, under ``stage2_learning_rate``/``stage2_steps``.
+:meth:`OmisAgent.act` reads the resulting parameters from ``stage2``.
 
 **Search is left open.** Both search components are trained and saved — the
 imitator (opponent rollouts) and the critic (leaf values). Adding search later is
@@ -57,9 +81,10 @@ import jax
 import jax.numpy as jnp
 import optax
 
+from oaht_bench.dataset.sampler import sample_stage2
 from oaht_bench.models.omis_agent import OmisAgent
 from oaht_bench.offline.registry import BaseAhtTrainer
-from oaht_bench.offline.utils import mask_logits, sample_window_batch
+from oaht_bench.offline.utils import mask_logits, to_jax
 
 
 def _masked_accuracy(logits, labels, mask) -> jnp.ndarray:
@@ -69,6 +94,23 @@ def _masked_accuracy(logits, labels, mask) -> jnp.ndarray:
     return (correct * m).sum() / jnp.maximum(m.sum(), 1.0)
 
 
+def _shift_right(mate_actions):
+    """``D_step``'s opponent-action history at position ``t`` is
+    ``a^{-1,k}_{t-1}``, not ``a^{-1,k}_t`` -- the imitator's label at ``t`` is
+    the raw, unshifted ``batch["mate_actions"][:, t]``, so feeding the same
+    tensor as the backbone's conditioning input would let the label leak into
+    its own input. Position 0 has no history yet: filled with ``-10``, the
+    same "no action" sentinel ``ContextWindow.ctx_act`` already uses
+    (``models/return_conditioned_agent.py``) -- not ``0``, which is a real
+    action id and would read as "the opponent played action 0" rather than
+    "unknown". ``jax.nn.one_hot`` maps any out-of-range index (negative
+    included) to an all-zero row, so the backbone sees a clean "nothing here"
+    token instead of a spurious action.
+    """
+    filler = jnp.full_like(mate_actions[:, :1], -10)
+    return jnp.concatenate([filler, mate_actions[:, :-1]], axis=1)
+
+
 def omis_joint_loss(
     params, backbone, heads, batch, *, vf_coef=0.5, oppo_pi_coef=0.8, rngs=None, train: bool = True
 ):
@@ -76,6 +118,14 @@ def omis_joint_loss(
     reference's ``nn_trainer.py``: ``act_loss + vf_coef * value_loss +
     oppo_pi_coef * oppo_pi_loss``. All three heads read the *same* embedding
     and are differentiated together; nothing here is ``stop_gradient``-ed.
+
+    The embedding conditions on ``D_t^k = (D_epi^k, D_step^k)`` (Eqs. 3-5),
+    not just the ego stream: ``D_step`` is the batch's own (shifted)
+    ``mate_actions``, and ``D_epi`` is the ``context_mate_*`` fields
+    :func:`~oaht_bench.dataset.sampler.sample_stage2` already builds (``C``
+    past episodes against the same teammate, Appendix C) -- the same
+    cross-episode context TAO's encoder cross-attends to, fed here as a
+    prepended block through the shared backbone instead.
 
     ``act_loss``/``oppo_pi_loss`` are the categorical negative log-likelihood
     of the ego action and the teammate action respectively; ``value_loss`` is
@@ -90,6 +140,10 @@ def omis_joint_loss(
         batch["ego_actions"],
         timesteps=batch["timesteps"],
         mask=batch["mask"],
+        mate_actions=_shift_right(batch["mate_actions"]),
+        epi_state=batch["context_mate_next_obs"],
+        epi_mate_actions=batch["context_mate_actions"],
+        epi_mask=batch["context_mask"],
         train=train,
         rngs=rngs,
     )
@@ -147,14 +201,16 @@ def omis_search(*args, **kwargs):
 
 
 class OmisTrainer(BaseAhtTrainer):
-    """OMIS (without search), trained jointly across the two-call contract.
+    """OMIS (without search), trained in one real pass.
 
     One ``{backbone, heads}`` parameter tree, one combined loss
-    (:func:`omis_joint_loss`) -- unlike LIAM/MeLIBA/TAO's staged,
-    frozen-representation training. ``train_stage_1`` initialises and runs the
-    first optimisation phase; ``train_stage_2`` continues optimising the *same*
-    parameters, not a fresh policy against a frozen encoder. ``vf_coef``/
-    ``oppo_pi_coef`` are OMIS-specific and read from the top-level config.
+    (:func:`omis_joint_loss`), unlike LIAM/MeLIBA/TAO's staged,
+    frozen-representation training. ``train_stage_1`` is a no-op, matching
+    :meth:`~oaht_bench.offline.bc.BcTrainer.train_stage_1`'s precedent for a
+    baseline with nothing for a representation stage to do; all optimisation
+    happens in ``train_stage_2``, under ``stage2_learning_rate``/
+    ``stage2_steps``. ``vf_coef``/``oppo_pi_coef`` are OMIS-specific and read
+    from the top-level config.
     """
 
     name = "omis"
@@ -166,7 +222,15 @@ class OmisTrainer(BaseAhtTrainer):
         self.agent.build_model()
 
     def _sample_batch(self, _step):
-        return sample_window_batch(self.dataset.windows, self.np_rng, self.config.batch_size)
+        return to_jax(
+            sample_stage2(
+                self.dataset.windows,
+                self.dataset.index,
+                self.np_rng,
+                batch_size=self.config.batch_size,
+                context_trajectories=self.config.context_trajectories,
+            )
+        )
 
     def _loss(self, p, b, rngs, frozen):
         return omis_joint_loss(
@@ -180,6 +244,19 @@ class OmisTrainer(BaseAhtTrainer):
         )
 
     def train_stage_1(self):
+        """No separate representation stage -- OMIS trains one joint
+        objective in a single pass (see :func:`omis_joint_loss`'s own
+        docstring: "nothing here is `stop_gradient`-ed"), so there is nothing
+        for a first stage to produce. Mirrors
+        :meth:`~oaht_bench.offline.bc.BcTrainer.train_stage_1`'s established
+        no-op rather than running the shared step loop for zero steps, which
+        would leave an empty ``Stage1/`` block in the metrics that reads as a
+        bug, not a design choice.
+        """
+        return {}
+
+    def train_stage_2(self, stage1_params):
+        del stage1_params  # unused: nothing from a first stage to continue.
         init_batch = self._sample_batch(0)
         self.rng, k = jax.random.split(self.rng)
 
@@ -192,6 +269,10 @@ class OmisTrainer(BaseAhtTrainer):
                 init_batch["ego_actions"],
                 timesteps=init_batch["timesteps"],
                 mask=init_batch["mask"],
+                mate_actions=_shift_right(init_batch["mate_actions"]),
+                epi_state=init_batch["context_mate_next_obs"],
+                epi_mate_actions=init_batch["context_mate_actions"],
+                epi_mask=init_batch["context_mask"],
             )
             embedding = self.agent.backbone.apply(
                 backbone_params,
@@ -200,6 +281,10 @@ class OmisTrainer(BaseAhtTrainer):
                 init_batch["ego_actions"],
                 timesteps=init_batch["timesteps"],
                 mask=init_batch["mask"],
+                mate_actions=_shift_right(init_batch["mate_actions"]),
+                epi_state=init_batch["context_mate_next_obs"],
+                epi_mate_actions=init_batch["context_mate_actions"],
+                epi_mask=init_batch["context_mask"],
             )
             heads_params = self.agent.heads.init(k2, embedding)
             return {"backbone": backbone_params, "heads": heads_params}
@@ -209,16 +294,6 @@ class OmisTrainer(BaseAhtTrainer):
         return self._run_stage(
             self._loss,
             params,
-            self._sample_batch,
-            learning_rate=self.config.stage1_learning_rate,
-            steps=self.config.stage1_steps,
-            prefix="Stage1",
-        )
-
-    def train_stage_2(self, stage1_params):
-        return self._run_stage(
-            self._loss,
-            stage1_params,
             self._sample_batch,
             learning_rate=self.config.stage2_learning_rate,
             steps=self.config.stage2_steps,

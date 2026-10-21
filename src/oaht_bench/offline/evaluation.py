@@ -321,7 +321,7 @@ def run(job) -> Path:
         )
         seen_pool = _teammate_policies(dataset.batch, env, which="train")
         ns = int(ckpt_job.num_seeds)
-        incontext = ckpt_job.offline.network.architecture == "tao"
+        incontext = ckpt_job.offline.network.architecture in ("tao", "omis")
         # Conditioning target per teammate (TAO's own OPPO_TARGET convention,
         # applied to every baseline -- see resolve_target_returns), always
         # normalised by *this checkpoint's* own training scale regardless of

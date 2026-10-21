@@ -29,10 +29,30 @@ paper, which does not mention them:
 * Feed-forward **128 nodes, ReLU**; every other hidden layer **32 nodes, no
   activation**; modality-specific layers **32 nodes, no activation**.
 
-``use_cross_attention`` is the one switch: TAO keeps it and feeds the opponent
+``use_cross_attention`` is one switch: TAO keeps it and feeds the opponent
 embedding in as key/value; LIAM and MeLIBA drop it and attach an auxiliary head
-instead. That is precisely how Appendix F describes them, so it is the only
-axis this module exposes.
+instead. That is precisely how Appendix F describes them.
+
+OMIS needs two more, from its own paper (Sec. 4.1, Eqs. 3-5; Appendix C,
+F): its actor, opponent imitator, and critic all condition on in-context
+data ``D_t^k = (D_epi^k, D_step^k)``, not just ``(G_t, o_t, a_t)``.
+``D_step^k`` is the current episode's own opponent-action history up to the
+current step -- a 4th per-timestep token (``mate_actions``), interleaved
+into the main sequence the same way ``a_t`` already is.  ``D_epi^k`` is
+``{(s̃_h, ã^{-1,k}_h)}_{h=1}^H``, built from ``C`` *past* episodes against the
+same opponent (Appendix C: sample ``C`` trajectories, concatenate
+consecutive segments) -- a block of ``H`` ``(state, opponent-action)`` pairs
+*prepended* to the whole sequence (Appendix F's literal token order),
+fed through the same causal self-attention rather than a second
+encoder-plus-cross-attention tower the way TAO's context is (OMIS's own
+Fig. 1 is one shared backbone, not two). Both are off by ``None`` defaults,
+checked with plain ``is None`` (a trace-time, not data-dependent, branch) --
+every existing consumer (LIAM, MeLIBA, TAO) gets the identical graph it gets
+today. Combining ``use_cross_attention`` with ``D_epi`` is not forbidden (the
+two are orthogonal by construction -- one adds cross-attention K/V, the
+other lengthens the self-attention sequence) but is untested: no baseline
+needs both, the same "not a deployable method" caveat ``num_teammates``
+already carries in prose rather than code.
 """
 
 from __future__ import annotations
@@ -122,9 +142,14 @@ class GPT2Model(nn.Module):
         context=None,
         context_mask=None,
         teammate_id=None,
+        mate_actions=None,
+        epi_state=None,
+        epi_mate_actions=None,
+        epi_mask=None,
         train: bool = False,
     ):
         B, T = obs.shape[0], obs.shape[1]
+        embed_t = nn.Embed(self.max_timesteps, self.hidden_dim)
 
         # Modality-specific linear layers, 32 nodes, no activation.
         g_tok = nn.Dense(self.hidden_dim)(rtg[..., None])
@@ -132,7 +157,7 @@ class GPT2Model(nn.Module):
         a_tok = nn.Dense(self.hidden_dim)(jax.nn.one_hot(actions, self.action_dim))
 
         # Episodic timestep encoding, added to every modality (Chen et al. 2021).
-        pos = nn.Embed(self.max_timesteps, self.hidden_dim)(timesteps)
+        pos = embed_t(timesteps)
         g_tok, o_tok, a_tok = g_tok + pos, o_tok + pos, a_tok + pos
 
         # Teammate-identity oracle: a per-teammate bias added to every token,
@@ -143,22 +168,70 @@ class GPT2Model(nn.Module):
             team = team[:, None, :]
             g_tok, o_tok, a_tok = g_tok + team, o_tok + team, a_tok + team
 
-        # Interleave to (G_0, o_0, a_0, G_1, o_1, a_1, ...).
-        x = jnp.stack([g_tok, o_tok, a_tok], axis=2).reshape(B, T * 3, self.hidden_dim)
+        # OMIS's D_step (Sec. 4.1): the opponent's own action at each timestep,
+        # a 4th token appended after a_tok so o_tok stays at a fixed relative
+        # offset (index 1) within its group regardless of group size -- the
+        # readout below does not need to special-case this.
+        group = 3
+        per_t_toks = [g_tok, o_tok, a_tok]
+        if mate_actions is not None:
+            m_tok = nn.Dense(self.hidden_dim)(jax.nn.one_hot(mate_actions, self.action_dim))
+            m_tok = m_tok + pos
+            if self.num_teammates > 0 and teammate_id is not None:
+                m_tok = m_tok + team
+            per_t_toks.append(m_tok)
+            group = 4
+
+        # Interleave to (G_0, o_0, a_0, [m_0], G_1, o_1, a_1, [m_1], ...).
+        x = jnp.stack(per_t_toks, axis=2).reshape(B, T * group, self.hidden_dim)
+
+        # OMIS's D_epi (Appendix C/F): H (state, opponent-action) pairs from
+        # C past episodes against the same opponent, prepended as their own
+        # block ahead of the main sequence -- Appendix F's literal token
+        # order, fed through the same causal blocks rather than a second
+        # encoder (unlike TAO's context, which cross-attends instead).
+        epi_len = 0
+        if epi_state is not None:
+            H = epi_state.shape[1]
+            epi_pos = embed_t(jnp.arange(H))[None]  # block-relative position, not episode time
+            epi_o_tok = nn.Dense(self.hidden_dim)(epi_state) + epi_pos
+            epi_a_tok = (
+                nn.Dense(self.hidden_dim)(jax.nn.one_hot(epi_mate_actions, self.action_dim))
+                + epi_pos
+            )
+            epi_tok = jnp.stack([epi_o_tok, epi_a_tok], axis=2).reshape(B, H * 2, self.hidden_dim)
+            x = jnp.concatenate([epi_tok, x], axis=1)
+            epi_len = H * 2
+
         # Reference `embed_ln`: LayerNorm on the stacked sequence, not per token
         # stream. Absent from the paper.
         x = nn.LayerNorm()(x)
+        N = x.shape[1]
 
-        attn_mask = nn.make_causal_mask(jnp.ones((B, T * 3)))
+        attn_mask = nn.make_causal_mask(jnp.ones((B, N)))
+        pad_parts = []
+        if epi_state is not None:
+            epi_pad = (
+                jnp.ones((B, epi_len), dtype=bool)
+                if epi_mask is None
+                else jnp.repeat(epi_mask.astype(bool), 2, axis=1)
+            )
+            pad_parts.append(epi_pad)
         if mask is not None:
-            # Each timestep contributes three tokens, so the padding mask has to
-            # be tripled to line up. Without this, real tokens attend to padding.
-            stacked = jnp.repeat(mask.astype(bool), 3, axis=1)
+            # Each timestep contributes `group` tokens, so the padding mask has
+            # to be repeated to line up. Without this, real tokens attend to padding.
+            pad_parts.append(jnp.repeat(mask.astype(bool), group, axis=1))
+        elif epi_state is not None:
+            # D_epi has a real mask but the main window doesn't -- still need a
+            # same-length all-valid fill so the two concatenate.
+            pad_parts.append(jnp.ones((B, T * group), dtype=bool))
+        if pad_parts:
+            stacked = jnp.concatenate(pad_parts, axis=1)
             attn_mask = nn.combine_masks(attn_mask, nn.make_attention_mask(stacked, stacked))
 
         cross_mask = None
         if context is not None and context_mask is not None:
-            q = jnp.ones((B, T * 3), dtype=bool)
+            q = jnp.ones((B, N), dtype=bool)
             cross_mask = nn.make_attention_mask(q, context_mask.astype(bool))
 
         for _ in range(self.num_blocks):
@@ -166,6 +239,8 @@ class GPT2Model(nn.Module):
                 x, context=context, causal_mask=attn_mask, cross_mask=cross_mask, train=train
             )
 
-        # Hidden states are read off the o_t positions: index 1 of each triple.
-        obs_hidden = x.reshape(B, T, 3, self.hidden_dim)[:, :, 1]
+        # Hidden states are read off the o_t positions: index 1 of each group,
+        # after slicing off the D_epi prefix (always 0 when D_epi is unused, so
+        # this reduces to today's `x.reshape(B, T, 3, hidden)[:, :, 1]` exactly).
+        obs_hidden = x[:, epi_len:].reshape(B, T, group, self.hidden_dim)[:, :, 1]
         return obs_hidden

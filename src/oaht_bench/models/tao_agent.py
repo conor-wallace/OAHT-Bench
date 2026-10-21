@@ -215,7 +215,7 @@ class TaoAgent(ReturnConditionedAgent):
         )
 
     def encode_ocw(self, params, mate_next_obs, mate_actions, mate_rewards, mask, timesteps):
-        """Encode an Opponent Context Window into ``(context, context_mask)`` for act.
+        """Encode an Opponent Context Window into ``{"context", "context_mask"}`` for act.
 
         Runs the OPE (``M_θe``) over the ``C`` opponent trajectory fragments in the
         OCW and reshapes to the single key/value sequence the ICD cross-attends to --
@@ -248,4 +248,4 @@ class TaoAgent(ReturnConditionedAgent):
         hidden = self.config.network.hidden_dim
         context = tokens.reshape(1, -1, hidden)
         context_mask = jnp.asarray(mask).reshape(1, -1)
-        return context, context_mask
+        return {"context": context, "context_mask": context_mask}

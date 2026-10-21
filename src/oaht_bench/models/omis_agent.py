@@ -13,17 +13,40 @@ hidden state through three separately-owned linear heads --
 ``predict_action``, ``predict_value``, ``predict_oppo_action`` -- trained
 end-to-end off one combined loss. That is what :class:`OmisBackbone` and
 :class:`OmisHeads` reproduce here, unlike LIAM/MeLIBA/TAO's genuinely staged,
-frozen-representation training. Deployed today this is ``OMIS w/o S`` -- the
-actor head alone, on the same ego-only information set as the other forward
-baselines.
+frozen-representation training. Deployed today this is ``OMIS w/o S`` --
+search (:func:`~oaht_bench.offline.omis.omis_search`) stays the deliberately
+open seam it always was.
+
+**Opponent-conditioned, matching the paper's Eqs. 3-5, not simplified away.**
+All three heads condition on ``D_t^k = (D_epi^k, D_step^k)`` (Sec. 4.1), not
+just the ego's own ``(s_t, a^{1,k,*}_t, G^{1,k,*}_t)`` -- an earlier version
+of this port dropped that conditioning entirely ("ego-stream-only, same
+information set as LIAM/MeLIBA"), which was a real divergence from the
+paper, not a faithful simplification; restored here. ``D_step`` (the current
+episode's own opponent-action history) and ``D_epi`` (``C`` past episodes
+against the same opponent, Appendix C) are the two new, off-by-default
+:class:`~oaht_bench.models.backbone.GPT2Model` capabilities -- see that
+module's own docstring for the token-layout design. :meth:`OmisAgent.act`'s
+four new keyword args all default to ``None``, reproducing the old
+ego-stream-only forward exactly when omitted: the generic
+:class:`~oaht_bench.models.return_conditioned_agent.ReturnConditionedAgent`
+deployment loop (shared with LIAM/MeLIBA/BC/TAO) has no field for the
+opponent's own actions and calls ``act`` without them, so the real,
+paper-faithful deployment goes through the bespoke
+:mod:`oaht_bench.offline.incontext_eval` path instead -- the same reason TAO
+needs a bespoke path (the generic loop can't express cross-episode context),
+not a new category of exception.
 """
 
 from __future__ import annotations
 
 import flax.linen as nn
+import jax
+import jax.numpy as jnp
 
 from oaht_bench.models.backbone import GPT2Model
-from oaht_bench.models.return_conditioned_agent import ReturnConditionedAgent
+from oaht_bench.models.masking import mask_logits
+from oaht_bench.models.return_conditioned_agent import ContextWindow, ReturnConditionedAgent
 
 
 class OmisBackbone(nn.Module):
@@ -39,13 +62,37 @@ class OmisBackbone(nn.Module):
     dropout: float = 0.1
 
     @nn.compact
-    def __call__(self, rtg, obs, actions, *, timesteps, mask=None, train: bool = False):
+    def __call__(
+        self,
+        rtg,
+        obs,
+        actions,
+        *,
+        timesteps,
+        mask=None,
+        mate_actions=None,
+        epi_state=None,
+        epi_mate_actions=None,
+        epi_mask=None,
+        train: bool = False,
+    ):
         return GPT2Model(
             action_dim=self.action_dim,
             hidden_dim=self.hidden_dim,
             use_cross_attention=False,
             dropout=self.dropout,
-        )(rtg, obs, actions, timesteps=timesteps, mask=mask, train=train)
+        )(
+            rtg,
+            obs,
+            actions,
+            timesteps=timesteps,
+            mask=mask,
+            mate_actions=mate_actions,
+            epi_state=epi_state,
+            epi_mate_actions=epi_mate_actions,
+            epi_mask=epi_mask,
+            train=train,
+        )
 
 
 class OmisHeads(nn.Module):
@@ -103,7 +150,30 @@ class OmisAgent(ReturnConditionedAgent):
         )
         self.heads = OmisHeads(action_dim=net.action_dim, hidden_dim=net.hidden_dim)
 
-    def act(self, params, rtg, obs, actions, *, timesteps, mask):
+    def act(
+        self,
+        params,
+        rtg,
+        obs,
+        actions,
+        *,
+        timesteps,
+        mask,
+        mate_actions=None,
+        epi_state=None,
+        epi_mate_actions=None,
+        epi_mask=None,
+    ):
+        """The base ``ReturnConditionedAgent.get_action`` deployment loop (shared
+        with LIAM/MeLIBA/BC/TAO) calls this without the four D_step/D_epi kwargs
+        below, since ``ContextWindow`` has no field for the opponent's own
+        action -- so they default to ``None``, giving the ego-stream-only
+        forward exactly as before. The paper-faithful deployment, with real
+        within-episode opponent actions and the cross-episode OCW, goes through
+        the bespoke :mod:`oaht_bench.offline.incontext_eval` path instead, the
+        same reason TAO needs a bespoke path rather than a change to the shared
+        base.
+        """
         embedding = self.backbone.apply(
             params["stage2"]["backbone"],
             rtg,
@@ -111,6 +181,10 @@ class OmisAgent(ReturnConditionedAgent):
             actions,
             timesteps=timesteps,
             mask=mask,
+            mate_actions=mate_actions,
+            epi_state=epi_state,
+            epi_mate_actions=epi_mate_actions,
+            epi_mask=epi_mask,
             train=False,
         )
         action_logits, _, _ = self.heads.apply(params["stage2"]["heads"], embedding)
@@ -133,3 +207,91 @@ class OmisAgent(ReturnConditionedAgent):
         )
         _, mate_logits, _ = self.heads.apply(params["stage2"]["heads"], embedding[:, -1])
         return mate_logits[0]
+
+    def encode_ocw(self, params, mate_next_obs, mate_actions, mate_rewards, mask, timesteps):
+        """The Opponent Context Window into ``D_epi``'s three raw arrays.
+
+        Same call signature as :meth:`~oaht_bench.models.tao_agent.TaoAgent.encode_ocw`
+        (:mod:`oaht_bench.offline.incontext_eval` calls either one the same way), but
+        there is no encoder pass: ``D_epi`` has no separate tower (Sec. 4.1/Fig. 1 is
+        one shared backbone), so this just reshapes the OCW's ``(C, T, ...)`` arrays
+        to the ``(1, C*T, ...)`` shape :class:`~oaht_bench.models.backbone.GPT2Model`
+        reads directly as ``epi_state``/``epi_mate_actions``/``epi_mask``.
+        ``mate_rewards`` is unused -- ``D_epi``'s pairs are ``(state, opponent-action)``
+        only (Appendix C), not reward; the argument stays for the shared call site.
+        """
+        del mate_rewards, timesteps
+        normalized_obs = (jnp.asarray(mate_next_obs) - self._obs_mean) / self._obs_std
+        return {
+            "epi_state": normalized_obs.reshape(1, -1, normalized_obs.shape[-1]),
+            "epi_mate_actions": jnp.asarray(mate_actions).reshape(1, -1),
+            "epi_mask": jnp.asarray(mask).reshape(1, -1),
+        }
+
+    def get_action_with_mate_history(
+        self, params, obs, done, avail_actions, hstate, rng, mate_action_window, *, reward=None
+    ):
+        """OMIS's own deployment step, with ``D_step`` threaded in.
+
+        Duplicates :meth:`ReturnConditionedAgent.get_action`'s window roll / return
+        decrement / sampling exactly; the one difference is the extra
+        ``mate_actions=mate_action_window`` passed into :meth:`act`, and that
+        ``D_epi`` (``epi_state``/``epi_mate_actions``/``epi_mask``) is read off
+        ``params["stage2"]``, where :mod:`oaht_bench.offline.incontext_eval` bakes
+        it once per episode via :meth:`encode_ocw` -- the same place TAO's
+        ``context`` lives, because both only change *between* episodes. ``D_step``
+        changes every step, which is exactly why it can't live in ``stage2`` the
+        same way and has to be threaded in here instead of through the shared,
+        every-baseline :class:`ContextWindow` (see the module docstring).
+
+        ``mate_action_window`` is ``(K,)`` int32, left-padded like ``hstate.ctx_act``:
+        position ``K-1`` holds the opponent's action one step *before* the current
+        one (``a^{-1}_{t-1}``), matching training's ``_shift_right`` convention
+        (``offline/omis.py``) -- not the opponent's action at the current step, which
+        is unknown until after this one is taken. Built and rolled by the caller
+        (:mod:`oaht_bench.offline.incontext_eval`), which already collects the
+        opponent's observed action stream for the OCW and is in the one position
+        that knows both agents' actions each step.
+        """
+        K = self.context_length
+        h = hstate
+        r = (
+            jnp.zeros((), jnp.float32)
+            if reward is None
+            else jnp.reshape(reward, (-1))[0].astype(jnp.float32)
+        )
+        rtg = h.rtg - r / self._rtg_scale
+
+        ctx_obs = jnp.roll(h.ctx_obs, -1, axis=0)
+        ctx_act = jnp.roll(h.ctx_act, -1)
+        ctx_rtg = jnp.roll(h.ctx_rtg, -1)
+        ctx_t = jnp.roll(h.ctx_t, -1)
+        ctx_mask = jnp.roll(h.ctx_mask, -1)
+
+        norm_obs = (jnp.reshape(obs, (-1)).astype(jnp.float32) - self._obs_mean) / self._obs_std
+        ctx_obs = ctx_obs.at[-1].set(norm_obs)
+        ctx_act = ctx_act.at[-1].set(jnp.int32(-10))
+        ctx_rtg = ctx_rtg.at[-1].set(rtg)
+        ctx_t = ctx_t.at[-1].set(jnp.minimum(h.step + 1, K * 64).astype(jnp.int32))
+        ctx_mask = ctx_mask.at[-1].set(True)
+
+        stage2 = params["stage2"]
+        logits = self.act(
+            params,
+            ctx_rtg[None],
+            ctx_obs[None],
+            ctx_act[None],
+            timesteps=ctx_t[None],
+            mask=ctx_mask[None],
+            mate_actions=jnp.asarray(mate_action_window, dtype=jnp.int32)[None],
+            epi_state=stage2.get("epi_state"),
+            epi_mate_actions=stage2.get("epi_mate_actions"),
+            epi_mask=stage2.get("epi_mask"),
+        )
+        avail = jnp.reshape(avail_actions, (-1)).astype(jnp.float32)
+        masked = mask_logits(logits[0, -1], avail)
+        action = jax.random.categorical(rng, masked).astype(jnp.int32)
+        ctx_act = ctx_act.at[-1].set(action)
+
+        new_hstate = ContextWindow(ctx_obs, ctx_act, ctx_rtg, ctx_t, ctx_mask, rtg, h.step + 1)
+        return action, new_hstate

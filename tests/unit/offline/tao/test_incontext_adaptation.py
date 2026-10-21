@@ -102,8 +102,7 @@ def _predicted_action(agent, params, ocw, *, T, obs_dim):
     the ego's predicted action off the last ("now") position.
     """
     no, ac, rw, ts, mk = ocw.arrays()
-    context, context_mask = agent.encode_ocw(params, no, ac, rw, mk, ts)
-    stage2 = {**params["stage2"], "context": context, "context_mask": context_mask}
+    stage2 = {**params["stage2"], **agent.encode_ocw(params, no, ac, rw, mk, ts)}
     params_ep = {**params, "stage2": stage2}
 
     ego_obs = jnp.zeros(
