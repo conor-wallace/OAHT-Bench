@@ -40,6 +40,8 @@ not a new category of exception.
 
 from __future__ import annotations
 
+from functools import partial
+
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
@@ -228,10 +230,20 @@ class OmisAgent(ReturnConditionedAgent):
             "epi_mask": jnp.asarray(mask).reshape(1, -1),
         }
 
+    @partial(jax.jit, static_argnums=(0,))
     def get_action_with_mate_history(
         self, params, obs, done, avail_actions, hstate, rng, mate_action_window, *, reward=None
     ):
         """OMIS's own deployment step, with ``D_step`` threaded in.
+
+        ``@jax.jit`` the same way the base class's ``get_action`` is
+        (``return_conditioned_agent.py``) -- this is called once per
+        environment step inside :mod:`oaht_bench.offline.incontext_eval`'s
+        Python rollout loop, so leaving it un-jitted would re-dispatch the
+        whole roll/backbone/sample sequence eagerly, op by op, every single
+        step instead of running one compiled call. ``mate_action_window``
+        must be a proper fixed-shape array at the call site (not a raw
+        Python list), or every step with new values would retrace.
 
         Duplicates :meth:`ReturnConditionedAgent.get_action`'s window roll / return
         decrement / sampling exactly; the one difference is the extra

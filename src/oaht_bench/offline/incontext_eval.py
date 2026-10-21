@@ -164,7 +164,11 @@ def rollout_one_episode(
             history = mate_a[-K:]
             # -10: the same "no action yet" sentinel training's `_shift_right`
             # uses (offline/omis.py) -- not 0, which is a real action id.
-            window = [-10] * (K - len(history)) + history
+            # A proper fixed-shape jnp array, not a raw Python list: this is a
+            # jitted call (get_action_with_mate_history), so a plain list
+            # would trace each entry as its own scalar leaf and risk a
+            # retrace every step instead of reusing one compiled executable.
+            window = jnp.asarray([-10] * (K - len(history)) + history, dtype=jnp.int32)
             act_0, hstate_0 = ego_agent.get_action_with_mate_history(
                 params=params_ep,
                 obs=obs["agent_0"].reshape(1, 1, -1),
