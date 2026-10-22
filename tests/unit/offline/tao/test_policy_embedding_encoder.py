@@ -2,7 +2,7 @@
 
 Left-padding conventions and the ``next_obs`` fusion shift are windowing
 properties, now pinned directly in ``tests/unit/dataset/test_windowing.py``
-(``window_slice``'s own tests) rather than here -- this file keeps only the
+(``window_slice_batch``'s own tests) rather than here -- this file keeps only the
 encoder architecture properties: AP pools over real timesteps only, and a
 fully-masked row (an empty Opponent Context Window slot) stays finite.
 """
@@ -20,7 +20,7 @@ _T = 6
 
 def _batch(n_rows=4, T=_T, obs_dim=5, seed=0):
     """Ragged: per-row valid length varies via ``mask``/``timesteps``, the
-    same left-padding convention ``window_slice`` uses."""
+    same left-padding convention ``window_slice_batch`` uses."""
     rng = np.random.default_rng(seed)
     lengths = [T - (i % 4) for i in range(n_rows)]
     mask = np.zeros((n_rows, T), dtype=bool)

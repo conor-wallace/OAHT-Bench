@@ -1,14 +1,33 @@
-"""Window a single episode slice on demand -- the one place this is implemented.
+"""Window many episode slices at once -- the one place this is implemented.
 
 Each baseline builds its own training batch (see ``offline/bc.py``,
-``offline/liam.py``, ``offline/tao.py``, ``offline/omis.py``): a loop over
-sampled ``(episode_id, t)`` pairs calling :func:`window_slice`, composed
-however that baseline's own paper describes its batch. This module holds only
-the two primitives every one of those loops needs and that aren't one-liners
-on data the episode store (:class:`~oaht_bench.dataset.schema.EpisodeBatch` or
+``offline/liam.py``, ``offline/tao.py``, ``offline/omis.py``): assemble the
+``(episode_id, t)`` pairs a sampling scheme calls for, then one call to
+:func:`window_slice_batch`, composed however that baseline's own paper
+describes its batch. This module holds only the primitives every one of
+those call sites needs and that aren't one-liners on data the episode store
+(:class:`~oaht_bench.dataset.schema.EpisodeBatch` or
 :class:`~oaht_bench.dataset.vault.VaultReader`) already exposes directly.
 
-``window_slice`` returns raw, un-normalized arrays -- observation and
+``window_slice_batch`` always takes arrays, even for a batch of one --
+there is no separate single-window function. The reason is
+``VaultReader.read_slices``'s own docstring: it issues every offset as a
+tensorstore future *before* awaiting any of them, so many windows are
+fetched concurrently rather than one blocking read at a time, which is "the
+single biggest lever on training throughput off a disk-backed vault." A
+per-window call defeats that -- not because concurrency and the OS page
+cache stop working, but because the *fixed* dispatch cost of entering
+``read_slices`` (building the index transform, scheduling the async read)
+is paid once per *call*, not once per *offset*. One call with ``N`` offsets
+pays that fixed cost once; ``N`` calls with one offset each pay it ``N``
+times and get none of the overlap. A baseline that looped this function
+once per row (an earlier version of this file did) turned an O(1)-per-step
+sampling cost into an O(batch_size) one -- and for OMIS, whose ``D_epi``
+fans out ``C`` more reads per row, that loop compounded into an O(batch_size
+* C) one. Keeping only the batched form closes the door on reintroducing
+that loop by accident.
+
+``window_slice_batch`` returns raw, un-normalized arrays -- observation and
 return-to-go normalization is the caller's job, via
 :meth:`~oaht_bench.dataset.dataset.Normalization.apply_obs`/``apply_rtg`` on
 the dataset's own ``norm``, kept separate so this module has no notion of a
@@ -33,9 +52,9 @@ def resolve_seats(source, mate: int | None = None) -> tuple[int, int]:
     plays against, inferred when there are exactly two agents, else required.
 
     The one place this ambiguity is resolved; :class:`~oaht_bench.dataset.
-    dataset.Dataset` calls it once at construction and :func:`window_slice`
-    calls it again per window (cheap -- no state to share) so it works from a
-    bare source too, not just through ``Dataset``.
+    dataset.Dataset` calls it once at construction and
+    :func:`window_slice_batch` calls it again per call (cheap -- no state to
+    share) so it works from a bare source too, not just through ``Dataset``.
     """
     ego = source.ego_index
     if mate is not None:
@@ -48,22 +67,32 @@ def resolve_seats(source, mate: int | None = None) -> tuple[int, int]:
     return ego, others[0]
 
 
-def _episode_length(source, episode_id: int) -> int:
+def _episode_lengths(source, episode_ids: np.ndarray) -> np.ndarray:
+    """``(length of episode_ids[i])_i`` -- one lookup into the store's own
+    (already-resident) length table, not a per-row call."""
     if hasattr(source, "episode_lengths"):
-        return int(np.asarray(source.episode_lengths())[episode_id])
-    return int(source.episodes[episode_id].length)
+        lengths = np.asarray(source.episode_lengths())
+    else:
+        lengths = np.asarray([e.length for e in source.episodes])
+    return lengths[episode_ids]
 
 
-def _read_raw(source, store_key: str, seat: int, episode_id: int, start: int, n: int) -> np.ndarray:
-    """The unpadded ``[start, start + n)`` slice of one field/seat -- read
-    concurrently off disk (``VaultReader.read_slices``) when the source is
-    disk-backed, else sliced directly from a resident ``EpisodeBatch``."""
+def _read_raw_batch(
+    source, store_key: str, seat: int, episode_ids: np.ndarray, starts: np.ndarray, ns: np.ndarray
+) -> list[np.ndarray]:
+    """The unpadded ``[start, start + n)`` slice of one field/seat, for every
+    row -- issued as ONE concurrent, awaited-together read when the source is
+    disk-backed (:meth:`~oaht_bench.dataset.vault.VaultReader.read_slices`),
+    else sliced directly from a resident ``EpisodeBatch`` (cheap either way;
+    looping there costs no I/O)."""
     if hasattr(source, "read_slices"):
-        offset = int(source.transition_offsets[episode_id]) + start
-        return source.read_slices(store_key, seat, np.asarray([offset]), np.asarray([n]))[0]
+        offsets = source.transition_offsets[episode_ids] + starts
+        return source.read_slices(store_key, seat, offsets, ns)
     attr = _STORE_ATTR[store_key]
-    episode = source.episodes[episode_id]
-    return np.asarray(getattr(episode, attr)[seat][start : start + n])
+    return [
+        np.asarray(getattr(source.episodes[int(ep)], attr)[seat][int(s) : int(s) + int(n)])
+        for ep, s, n in zip(episode_ids, starts, ns, strict=True)
+    ]
 
 
 def _pad(arr: np.ndarray, h: int, fill) -> np.ndarray:
@@ -74,57 +103,74 @@ def _pad(arr: np.ndarray, h: int, fill) -> np.ndarray:
     return np.concatenate([head, arr], axis=0)
 
 
-def _build_obs(source, seat, episode_id, start, n, h):
-    raw = _read_raw(source, "observations", seat, episode_id, start, n)
-    return _pad(raw, h, 0.0).astype(np.float32)
+def _pad_stack(slices: list[np.ndarray], h: int, fill) -> np.ndarray:
+    return np.stack([_pad(sl, h, fill) for sl in slices], axis=0)
 
 
-def _build_next_obs(source, seat, episode_id, start, n, h):
+def _build_obs(source, seat, episode_ids, starts, ns, h):
+    raw = _read_raw_batch(source, "observations", seat, episode_ids, starts, ns)
+    return _pad_stack(raw, h, 0.0).astype(np.float32)
+
+
+def _build_next_obs(source, seat, episode_ids, starts, ns, h):
     # Read one extra row so the shift is available, clamped at the episode end
     # (the last row repeats) -- matches concat(o[1:], o[-1:])[start:start+n].
-    length = _episode_length(source, episode_id)
-    read_n = min(n + 1, length - start)
-    raw = _read_raw(source, "observations", seat, episode_id, start, read_n)
-    nxt = raw[1 : 1 + n]
-    if nxt.shape[0] < n:
-        tail = np.repeat(raw[-1:], n - nxt.shape[0], axis=0)
-        nxt = np.concatenate([nxt, tail], axis=0)
-    return _pad(nxt, h, 0.0).astype(np.float32)
+    # read_n varies per row but that's still one read_slices call: counts is
+    # just another per-row array, the same as offsets.
+    lengths = _episode_lengths(source, episode_ids)
+    read_ns = np.minimum(ns + 1, lengths - starts)
+    raw = _read_raw_batch(source, "observations", seat, episode_ids, starts, read_ns)
+    slices = []
+    for r, n in zip(raw, ns, strict=True):
+        n = int(n)
+        nxt = r[1 : 1 + n]
+        if nxt.shape[0] < n:
+            tail = np.repeat(r[-1:], n - nxt.shape[0], axis=0)
+            nxt = np.concatenate([nxt, tail], axis=0)
+        slices.append(nxt)
+    return _pad_stack(slices, h, 0.0).astype(np.float32)
 
 
-def _build_rtg(source, seat, episode_id, start, n, h):
+def _build_rtg(source, seat, episode_ids, starts, ns, h):
     # Return-to-go needs rewards from the window start to the episode end;
     # reverse-cumsum gives rtg at each position, of which we keep the window.
-    length = _episode_length(source, episode_id)
-    raw = _read_raw(source, "rewards", seat, episode_id, start, length - start)
-    rtg = np.cumsum(raw[::-1])[::-1][:n]
-    return _pad(rtg, h, 0.0).astype(np.float32)
+    lengths = _episode_lengths(source, episode_ids)
+    raw = _read_raw_batch(source, "rewards", seat, episode_ids, starts, lengths - starts)
+    slices = [np.cumsum(r[::-1])[::-1][: int(n)] for r, n in zip(raw, ns, strict=True)]
+    return _pad_stack(slices, h, 0.0).astype(np.float32)
 
 
 def _build_int_field(store_key, fill):
-    def build(source, seat, episode_id, start, n, h):
-        raw = _read_raw(source, store_key, seat, episode_id, start, n)
-        return _pad(raw, h, fill)
+    def build(source, seat, episode_ids, starts, ns, h):
+        raw = _read_raw_batch(source, store_key, seat, episode_ids, starts, ns)
+        return _pad_stack(raw, h, fill)
 
     return build
 
 
-def _build_timesteps(source, seat, episode_id, start, n, h):
-    del source, seat, episode_id  # seat- and episode-independent
-    ts = np.arange(start + 1, start + n + 1, dtype=np.int32)
-    return _pad(ts, h, 0)
+def _build_timesteps(source, seat, episode_ids, starts, ns, h):
+    del source, seat, episode_ids  # seat- and episode-independent
+    return np.stack(
+        [
+            _pad(np.arange(int(s) + 1, int(s) + int(n) + 1, dtype=np.int32), h, 0)
+            for s, n in zip(starts, ns, strict=True)
+        ],
+        axis=0,
+    )
 
 
-def _build_mask(source, seat, episode_id, start, n, h):
-    del source, seat, episode_id, start  # seat- and start-independent
-    mask = np.zeros(h, dtype=bool)
-    mask[h - n :] = True
-    return mask
+def _build_mask(source, seat, episode_ids, starts, ns, h):
+    del source, seat, episode_ids, starts  # seat- and start-independent
+    out = np.zeros((len(ns), h), dtype=bool)
+    for row, n in enumerate(ns):
+        out[row, h - int(n) :] = True
+    return out
 
 
 #: Field name -> (seat role, builder). Mirrors the field set the production
-#: windowing used to expose as lazy properties, restructured as one function
-#: per window instead of a class with per-field lazy promises.
+#: windowing used to expose as lazy properties, restructured as plain
+#: functions over whole batches instead of a class with per-field lazy
+#: promises.
 _FIELDS = {
     "ego_obs": ("ego", _build_obs),
     "mate_obs": ("mate", _build_obs),
@@ -140,10 +186,15 @@ _FIELDS = {
 }
 
 
-def window_slice(
-    source, episode_id: int, t: int, h: int, fields, *, mate: int | None = None
+def window_slice_batch(
+    source, episode_ids, ts, h: int, fields, *, mate: int | None = None
 ) -> dict[str, np.ndarray]:
-    """The window ``[t - h, t)`` for `fields`, left-padded if ``t < h``.
+    """The window ``[t - h, t)`` for `fields`, for every ``(episode_id, t)``
+    pair in ``episode_ids``/``ts`` at once -- left-padded wherever ``t < h``.
+    Returns ``(len(episode_ids), h, ...)``-shaped arrays, one call per field
+    regardless of how many rows (see the module docstring for why that
+    matters: a single read per row here would undo ``read_slices``'s own
+    concurrency).
 
     ``source`` is the episode store -- a disk-backed
     :class:`~oaht_bench.dataset.vault.VaultReader` or an in-RAM
@@ -154,16 +205,20 @@ def window_slice(
     "mate_actions", "ego_avail", "mate_avail", "mate_rewards", "timesteps",
     "mask"}``. ``mate`` disambiguates the teammate seat when there are more
     than two agents; with exactly two it is inferred the same way
-    ``mate``/``ego`` are inferred everywhere else in this codebase.
+    ``mate``/``ego`` are inferred everywhere else in this codebase. A batch
+    of one row is just ``episode_ids=[episode_id], ts=[t]`` -- there is no
+    separate scalar form.
     """
     ego, resolved_mate = resolve_seats(source, mate)
-    start = max(0, t - h)
-    n = t - start
+    episode_ids = np.asarray(episode_ids)
+    ts = np.asarray(ts)
+    starts = np.maximum(0, ts - h)
+    ns = ts - starts
     out = {}
     for name in fields:
         role, build = _FIELDS[name]
         seat = {"ego": ego, "mate": resolved_mate, None: None}[role]
-        out[name] = build(source, seat, episode_id, start, n, h)
+        out[name] = build(source, seat, episode_ids, starts, ns, h)
     return out
 
 

@@ -21,9 +21,9 @@ from __future__ import annotations
 import numpy as np
 from conftest import MATE, decode
 
-from oaht_bench.dataset.windowing import window_slice
+from oaht_bench.dataset.windowing import window_slice_batch
 from oaht_bench.offline.omis import build_d_epi, build_d_step
-from oaht_bench.offline.tao import _anchor_and_cross
+from oaht_bench.offline.tao import _ANCHOR_FIELDS, _CROSS_FIELDS, _anchor_and_cross_indices
 
 
 def test_build_d_epi_context_is_the_same_teammate_from_a_different_episode(
@@ -41,10 +41,13 @@ def test_build_d_epi_context_is_the_same_teammate_from_a_different_episode(
     ds = deterministic_dataset(teammate_sequence)
     rng = np.random.default_rng(0)
 
-    for episode_id, teammate_id in enumerate(teammate_sequence):
-        d_epi = build_d_epi(ds, teammate_id, episode_id, rng, H=9, C=3)
-        for pos in np.flatnonzero(d_epi["mask"]):
-            agent, k, e, _t, _c = decode(d_epi["mate_obs"][pos, 0])
+    episode_ids = list(range(len(teammate_sequence)))
+    d_epi = build_d_epi(ds, teammate_sequence, episode_ids, rng, H=9, C=3)
+    for row, (episode_id, teammate_id) in enumerate(
+        zip(episode_ids, teammate_sequence, strict=True)
+    ):
+        for pos in np.flatnonzero(d_epi["mask"][row]):
+            agent, k, e, _t, _c = decode(d_epi["mate_obs"][row, pos, 0])
             assert agent == MATE
             assert k == teammate_id, "D_epi context must be the SAME teammate"
             assert e != episode_id, "must come from a DIFFERENT episode than the decoder's own"
@@ -59,10 +62,10 @@ def test_build_d_epi_fragments_are_consecutive_timesteps(deterministic_dataset):
     rng = np.random.default_rng(1)
     C, H = 3, 6
     h = H // C
-    d_epi = build_d_epi(ds, 1, 0, rng, H=H, C=C)
+    d_epi = build_d_epi(ds, [1], [0], rng, H=H, C=C)
 
-    fragments = d_epi["mate_actions"].reshape(C, h)
-    mask_fragments = d_epi["mask"].reshape(C, h)
+    fragments = d_epi["mate_actions"][0].reshape(C, h)
+    mask_fragments = d_epi["mask"][0].reshape(C, h)
     for frag, frag_mask in zip(fragments, mask_fragments, strict=True):
         real = frag[frag_mask]
         timesteps = [decode(v)[3] for v in real]
@@ -81,11 +84,15 @@ def test_anchor_and_cross_share_teammate_but_differ_in_episode(deterministic_dat
 
     for teammate_id in (1, 2):
         for _ in range(10):
-            anchor, cross = _anchor_and_cross(ds, teammate_id, h=6, rng=rng)
-            anchor_pos = np.flatnonzero(anchor["mask"])[0]
-            cross_pos = np.flatnonzero(cross["mask"])[0]
-            anchor_agent, anchor_k, anchor_e, _, _ = decode(anchor["mate_next_obs"][anchor_pos, 0])
-            cross_agent, cross_k, cross_e, _, _ = decode(cross["mate_obs"][cross_pos, 0])
+            ae, at, ce, ct = _anchor_and_cross_indices(ds, teammate_id, rng)
+            anchor = window_slice_batch(ds.batch, [ae], [at], 6, _ANCHOR_FIELDS, mate=MATE)
+            cross = window_slice_batch(ds.batch, [ce], [ct], 6, _CROSS_FIELDS, mate=MATE)
+            anchor_pos = np.flatnonzero(anchor["mask"][0])[0]
+            cross_pos = np.flatnonzero(cross["mask"][0])[0]
+            anchor_agent, anchor_k, anchor_e, _, _ = decode(
+                anchor["mate_next_obs"][0, anchor_pos, 0]
+            )
+            cross_agent, cross_k, cross_e, _, _ = decode(cross["mate_obs"][0, cross_pos, 0])
             assert anchor_agent == cross_agent == MATE
             assert anchor_k == cross_k == teammate_id
             assert cross_e != anchor_e
@@ -98,8 +105,7 @@ def test_build_d_step_reads_the_opponents_action_one_step_before(deterministic_d
     not just the shift's index arithmetic.
     """
     ds = deterministic_dataset([4, 4, 4], T=6)
-    window = window_slice(ds.batch, 0, 6, 6, ("mate_actions", "mate_obs"), mate=MATE)
-    batch = {k: v[None] for k, v in window.items()}  # a batch of one decoder window
+    batch = window_slice_batch(ds.batch, [0], [6], 6, ("mate_actions", "mate_obs"), mate=MATE)
 
     d_step = build_d_step(batch)
     shifted = d_step["mate_actions"]

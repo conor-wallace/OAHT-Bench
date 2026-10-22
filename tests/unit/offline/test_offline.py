@@ -25,12 +25,12 @@ _ACTION_DIM = 6
 def _batch(n_ep=4, T=_T, obs_dim=_OBS_DIM, action_dim=_ACTION_DIM, seed=0):
     """A window batch dict of the shape every baseline's ``_sample_batch``
     produces -- built directly rather than through
-    :func:`~oaht_bench.dataset.windowing.window_slice`, since these tests
+    :func:`~oaht_bench.dataset.windowing.window_slice_batch`, since these tests
     check model/loss properties, not windowing itself (see
     ``tests/unit/dataset/test_windowing.py`` for that).
 
     Ragged: per-row valid length varies via ``mask``/``timesteps``, the same
-    left-padding convention ``window_slice`` uses.
+    left-padding convention ``window_slice_batch`` uses.
     """
     rng = np.random.default_rng(seed)
     lengths = [T - (i % 4) for i in range(n_ep)]

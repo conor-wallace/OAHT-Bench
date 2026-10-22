@@ -14,7 +14,7 @@ teammate" (Appendix C) or "does OMIS's D_step shift really read timestep
 code into something a test asserts directly on real decoded values.
 
 Return-to-go is the one field this can't cover the same way:
-:func:`~oaht_bench.dataset.windowing.window_slice` computes it as a
+:func:`~oaht_bench.dataset.windowing.window_slice_batch` computes it as a
 reverse-cumulative-sum of *rewards*, so ``ego_rtg`` at position ``t`` is a
 sum of several different ``t'`` reward values, not a single invertible one.
 Rewards themselves stay per-step decodable; anything that needs RTG asserts
@@ -75,7 +75,7 @@ def expected_rtg(policy: int, episode: int, timestep: int, horizon: int) -> floa
 class DeterministicDataset:
     """A minimal stand-in for :class:`~oaht_bench.dataset.dataset.Dataset` --
     same ``batch``/``ego``/``mate``/``norm`` attributes, so a test calls
-    :func:`~oaht_bench.dataset.windowing.window_slice`/``teammate_episode_ids``
+    :func:`~oaht_bench.dataset.windowing.window_slice_batch`/``teammate_episode_ids``
     (or a baseline's own ``_sample_batch`` helpers) exactly as training code
     does, without a vault on disk to back a real ``Dataset``.
     """
@@ -128,14 +128,14 @@ def deterministic_dataset():
 
     ``teammate_sequence[e]`` is the teammate policy id for episode ``e`` --
     episode numbering is positional, matching ``member_ids``'s row order
-    (the ``episode_id`` every ``window_slice``/``teammate_episode_ids`` call
+    (the ``episode_id`` every ``window_slice_batch``/``teammate_episode_ids`` call
     takes). Episodes are exactly ``T`` steps unless ``episode_lengths`` is
     given (to exercise padding), and every action/observation/reward is
     ``encode(agent, teammate_sequence[e], e, t, channel)``.
 
     Returns a :class:`DeterministicDataset`, not a production ``Dataset``
     (there's no vault on disk to back one) -- a test calls the same
-    ``window_slice``/``teammate_episode_ids``/baseline ``_sample_batch``
+    ``window_slice_batch``/``teammate_episode_ids``/baseline ``_sample_batch``
     helpers training does, directly on its ``.batch``.
     """
 

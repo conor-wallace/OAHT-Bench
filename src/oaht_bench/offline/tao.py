@@ -36,7 +36,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from oaht_bench.dataset.windowing import enumerate_windows, teammate_episode_ids, window_slice
+from oaht_bench.dataset.windowing import enumerate_windows, teammate_episode_ids, window_slice_batch
 from oaht_bench.models.tao_agent import OpponentPolicyEncoder, TaoAgent
 from oaht_bench.offline.registry import BaseAhtTrainer
 from oaht_bench.offline.utils import mask_logits, normalize_window_batch, safe_cross_entropy, to_jax
@@ -63,63 +63,58 @@ def _random_t(batch, episode_id: int, rng: np.random.Generator) -> int:
     return int(rng.integers(1, length + 1))
 
 
-def _anchor_and_cross(dataset, teammate_id: int, h: int, rng: np.random.Generator):
-    """Stage 1's contrastive pair (Eq. 2): an anchor window of
-    ``teammate_id``'s play, and a window of the *same* teammate from a
-    *different* episode -- the cross trajectory the generative term is scored
-    against. Falls back to the anchor's own episode when the teammate appears
-    in only one (common with 1-4 episodes per teammate on these datasets).
+def _anchor_and_cross_indices(dataset, teammate_id: int, rng: np.random.Generator):
+    """Stage 1's contrastive pair (Eq. 2), as indices only: an anchor
+    ``(episode_id, t)`` of ``teammate_id``'s play, and a ``(episode_id, t)``
+    of the *same* teammate from a *different* episode -- the cross
+    trajectory the generative term is scored against. Falls back to the
+    anchor's own episode when the teammate appears in only one (common with
+    1-4 episodes per teammate on these datasets).
+
+    Index selection only, no disk I/O -- a caller collects many of these
+    across a whole batch and reads them all in one
+    :func:`~oaht_bench.dataset.windowing.window_slice_batch` call (see that
+    function's own docstring for why reading one row at a time here would
+    silently undo ``VaultReader.read_slices``'s concurrency).
     """
     episode_ids = teammate_episode_ids(dataset.batch, dataset.mate, teammate_id)
     anchor_episode_id = int(rng.choice(episode_ids))
-    anchor = window_slice(
-        dataset.batch,
-        anchor_episode_id,
-        _random_t(dataset.batch, anchor_episode_id, rng),
-        h,
-        _ANCHOR_FIELDS,
-        mate=dataset.mate,
-    )
+    anchor_t = _random_t(dataset.batch, anchor_episode_id, rng)
     other_episode_ids = episode_ids[episode_ids != anchor_episode_id]
     pool = other_episode_ids if other_episode_ids.size else episode_ids
     cross_episode_id = int(rng.choice(pool))
-    cross = window_slice(
-        dataset.batch,
-        cross_episode_id,
-        _random_t(dataset.batch, cross_episode_id, rng),
-        h,
-        _CROSS_FIELDS,
-        mate=dataset.mate,
-    )
-    return anchor, cross
+    cross_t = _random_t(dataset.batch, cross_episode_id, rng)
+    return anchor_episode_id, anchor_t, cross_episode_id, cross_t
 
 
-def _get_off_d_context(
-    dataset, teammate_id: int, exclude_episode_id: int, h: int, c: int, rng: np.random.Generator
-):
-    """GetOffD (stage 2's cross-attention context): ``c`` fragments of the
-    *same* teammate, each a full ``h``-length window from a *different*
-    episode than the decoder's own, concatenated along time into one context
-    of length ``c * h``. Unlike D_epi (``offline/omis.py``), TAO has no
+def _get_off_d_context(dataset, teammate_ids, exclude_episode_ids, h: int, c: int, rng):
+    """GetOffD (stage 2's cross-attention context), for a whole batch of
+    decoder rows at once: ``c`` fragments of the *same* teammate per row,
+    each a full ``h``-length window from a *different* episode than that
+    row's decoder window, concatenated along time into one context of
+    length ``c * h`` per row. Unlike D_epi (``offline/omis.py``), TAO has no
     independent fragment-length hyperparameter -- Appendix F's context is
     ``C`` whole windows, not sub-windows of some other size.
+
+    ``teammate_ids``/``exclude_episode_ids`` are arrays, one entry per
+    decoder row. Picking *which* episodes/positions is cheap index
+    bookkeeping and stays a Python loop; the actual reads are ONE
+    ``window_slice_batch`` call across every row's every fragment, not one
+    call per row or per fragment.
     """
-    episode_ids = teammate_episode_ids(dataset.batch, dataset.mate, teammate_id)
-    other_episode_ids = episode_ids[episode_ids != exclude_episode_id]
-    pool = other_episode_ids if other_episode_ids.size else episode_ids
-    chosen_episode_ids = rng.choice(pool, size=c, replace=pool.size < c)
-    fragments = [
-        window_slice(
-            dataset.batch,
-            int(episode_id),
-            _random_t(dataset.batch, int(episode_id), rng),
-            h,
-            _CONTEXT_FIELDS,
-            mate=dataset.mate,
-        )
-        for episode_id in chosen_episode_ids
-    ]
-    return {k: np.concatenate([f[k] for f in fragments]) for k in _CONTEXT_FIELDS}
+    episode_ids_flat, ts_flat = [], []
+    for teammate_id, exclude_episode_id in zip(teammate_ids, exclude_episode_ids, strict=True):
+        episode_ids = teammate_episode_ids(dataset.batch, dataset.mate, int(teammate_id))
+        other_episode_ids = episode_ids[episode_ids != exclude_episode_id]
+        pool = other_episode_ids if other_episode_ids.size else episode_ids
+        chosen = rng.choice(pool, size=c, replace=pool.size < c)
+        episode_ids_flat.extend(int(e) for e in chosen)
+        ts_flat.extend(_random_t(dataset.batch, int(e), rng) for e in chosen)
+    flat = window_slice_batch(
+        dataset.batch, episode_ids_flat, ts_flat, h, _CONTEXT_FIELDS, mate=dataset.mate
+    )
+    n = len(teammate_ids)
+    return {k: v.reshape(n, c * h, *v.shape[2:]) for k, v in flat.items()}
 
 
 def _masked_accuracy(logits, labels, mask) -> jnp.ndarray:
@@ -317,7 +312,7 @@ class TaoTrainer(BaseAhtTrainer):
 
     Unlike the ego-history baselines, TAO's encoder reads the *teammate* stream
     and its stages use structured batches: stage 1 draws contrastive batches
-    (positives per teammate) via :func:`_anchor_and_cross`, stage 2 draws windows
+    (positives per teammate) via :func:`_anchor_and_cross_indices`, stage 2 draws windows
     with a GetOffD context via :func:`_get_off_d_context`. Stage-2 parameters
     carry the encoder (from stage 1, frozen or fine-tuned per ``freeze_encoder``)
     alongside the policy.
@@ -361,16 +356,37 @@ class TaoTrainer(BaseAhtTrainer):
         wpt = min(max(2, round(self.config.batch_size / tpb)), 8)
         chosen = self.np_rng.choice(teammate_ids, size=tpb, replace=False)
 
-        anchors, crosses, teammate_col = [], [], []
+        anchor_episode_ids, anchor_ts, cross_episode_ids, cross_ts = [], [], [], []
+        teammate_col = []
         for teammate_id in chosen:
             for _ in range(wpt):
-                anchor, cross = _anchor_and_cross(self.dataset, int(teammate_id), h, self.np_rng)
-                anchors.append(anchor)
-                crosses.append(cross)
+                ae, at, ce, ct = _anchor_and_cross_indices(
+                    self.dataset, int(teammate_id), self.np_rng
+                )
+                anchor_episode_ids.append(ae)
+                anchor_ts.append(at)
+                cross_episode_ids.append(ce)
+                cross_ts.append(ct)
                 teammate_col.append(int(teammate_id))
 
-        batch = {k: np.stack([a[k] for a in anchors]) for k in _ANCHOR_FIELDS}
-        batch.update({f"cross_{k}": np.stack([c[k] for c in crosses]) for k in _CROSS_FIELDS})
+        anchors = window_slice_batch(
+            self.dataset.batch,
+            anchor_episode_ids,
+            anchor_ts,
+            h,
+            _ANCHOR_FIELDS,
+            mate=self.dataset.mate,
+        )
+        crosses = window_slice_batch(
+            self.dataset.batch,
+            cross_episode_ids,
+            cross_ts,
+            h,
+            _CROSS_FIELDS,
+            mate=self.dataset.mate,
+        )
+        batch = dict(anchors)
+        batch.update({f"cross_{k}": v for k, v in crosses.items()})
         batch["teammate_id"] = np.asarray(teammate_col, dtype=np.int32)
         return to_jax(normalize_window_batch(batch, self.dataset.norm))
 
@@ -382,32 +398,20 @@ class TaoTrainer(BaseAhtTrainer):
         rows = self.np_rng.choice(
             len(episode_ids), size=batch_size, replace=len(episode_ids) < batch_size
         )
+        row_episode_ids, row_ts = episode_ids[rows], ts[rows]
 
-        decoder = [
-            window_slice(
-                self.dataset.batch,
-                int(episode_ids[i]),
-                int(ts[i]),
-                h,
-                _DECODER_FIELDS,
-                mate=self.dataset.mate,
-            )
-            for i in rows
-        ]
-        teammate_ids = [
-            int(self.dataset.batch.member_ids[episode_ids[i], self.dataset.mate]) for i in rows
-        ]
-        contexts = [
-            _get_off_d_context(
-                self.dataset, teammate_ids[j], int(episode_ids[rows[j]]), h, c, self.np_rng
-            )
-            for j in range(len(rows))
-        ]
+        decoder = window_slice_batch(
+            self.dataset.batch, row_episode_ids, row_ts, h, _DECODER_FIELDS, mate=self.dataset.mate
+        )
+        teammate_ids = self.dataset.batch.member_ids[row_episode_ids, self.dataset.mate]
+        contexts = _get_off_d_context(
+            self.dataset, teammate_ids, row_episode_ids, h, c, self.np_rng
+        )
 
-        batch = {k: np.stack([d[k] for d in decoder]) for k in _DECODER_FIELDS}
+        batch = dict(decoder)
         batch["teammate_id"] = np.asarray(teammate_ids, dtype=np.int32)
         for key in _CONTEXT_FIELDS:
-            batch[f"context_{key}"] = np.stack([ctx[key] for ctx in contexts])
+            batch[f"context_{key}"] = contexts[key]
         return to_jax(normalize_window_batch(batch, self.dataset.norm))
 
     def train_stage_1(self):
@@ -541,19 +545,16 @@ class TaoTrainer(BaseAhtTrainer):
         h = self.config.context_length
         episode_ids, ts = self._pool
         n = min(c, len(episode_ids))
-        windows = [
-            window_slice(
+        batch = normalize_window_batch(
+            window_slice_batch(
                 self.dataset.batch,
-                int(episode_ids[i]),
-                int(ts[i]),
+                episode_ids[:n],
+                ts[:n],
                 h,
                 _CONTEXT_FIELDS,
                 mate=self.dataset.mate,
-            )
-            for i in range(n)
-        ]
-        batch = normalize_window_batch(
-            {k: np.stack([w[k] for w in windows]) for k in _CONTEXT_FIELDS}, self.dataset.norm
+            ),
+            self.dataset.norm,
         )
         tokens = self.agent.encoder.apply(
             encoder_params,

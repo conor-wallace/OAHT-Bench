@@ -93,9 +93,25 @@ def test_get_off_d_context_is_c_fragments_of_one_teammate():
     rng = np.random.default_rng(0)
     C, h, obs_dim = 5, 8, 5
 
-    ctx = _get_off_d_context(ds, teammate_id=1, exclude_episode_id=0, h=h, c=C, rng=rng)
-    assert ctx["mate_next_obs"].shape == (C * h, obs_dim)
-    assert ctx["mask"].shape == (C * h,)
+    ctx = _get_off_d_context(ds, teammate_ids=[1], exclude_episode_ids=[0], h=h, c=C, rng=rng)
+    assert ctx["mate_next_obs"].shape == (1, C * h, obs_dim)
+    assert ctx["mask"].shape == (1, C * h)
+
+
+def test_get_off_d_context_is_batched_across_many_decoder_rows_at_once():
+    """The same call with several rows' teammate_ids/exclude_episode_ids at
+    once must give each row its own independent C fragments, not the first
+    row's broadcast to every row."""
+    batch = _batch()
+    ds = SimpleNamespace(batch=batch, mate=1)
+    rng = np.random.default_rng(0)
+    C, h, obs_dim = 3, 8, 5
+
+    ctx = _get_off_d_context(
+        ds, teammate_ids=[0, 1, 2], exclude_episode_ids=[0, 2, 4], h=h, c=C, rng=rng
+    )
+    assert ctx["mate_next_obs"].shape == (3, C * h, obs_dim)
+    assert ctx["mask"].shape == (3, C * h)
 
 
 def test_get_off_d_context_draws_episodes_of_the_requested_teammate():
@@ -108,7 +124,7 @@ def test_get_off_d_context_draws_episodes_of_the_requested_teammate():
     for teammate_id in (0, 1, 2, 3):
         episode_ids = np.flatnonzero(batch.member_ids[:, 1] == teammate_id)
         for exclude in episode_ids:
-            _get_off_d_context(ds, teammate_id, int(exclude), h=h, c=C, rng=rng)
+            _get_off_d_context(ds, [teammate_id], [int(exclude)], h=h, c=C, rng=rng)
             for episode_id in rng.last_choice:
                 assert int(batch.member_ids[episode_id, 1]) == teammate_id
 
@@ -124,7 +140,7 @@ def test_get_off_d_context_trajectories_are_distinct_episodes():
     C, h = 5, 8
 
     for row in range(50):
-        _get_off_d_context(ds, teammate_id=0, exclude_episode_id=row % 10, h=h, c=C, rng=rng)
+        _get_off_d_context(ds, [0], [row % 10], h=h, c=C, rng=rng)
         episodes_seen = rng.last_choice.tolist()
         assert len(set(episodes_seen)) == C, (
             f"row {row}: expected {C} distinct episodes, got {episodes_seen}"

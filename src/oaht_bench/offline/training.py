@@ -33,7 +33,7 @@ class _Prefetcher:
     """Prepare each step's batch on a background thread, a few ahead.
 
     Each baseline's own ``_sample_batch`` reads its windows as concurrent disk
-    slices (see :func:`~oaht_bench.dataset.windowing.window_slice`); running it on
+    slices (see :func:`~oaht_bench.dataset.windowing.window_slice_batch`); running it on
     a background thread overlaps that I/O with the GPU step on the main thread --
     the PyTorch ``DataLoader(num_workers>0, prefetch_factor)`` pattern. tensorstore
     reads and XLA

@@ -287,7 +287,7 @@ class VaultReader:
     (observations/actions/avail) on disk.
 
     Windowing reads each window as a *direct contiguous slice*
-    (:meth:`read_slices`, via :func:`~oaht_bench.dataset.windowing.window_slice`),
+    (:meth:`read_slices`, via :func:`~oaht_bench.dataset.windowing.window_slice_batch`),
     concurrently across the minibatch -- there is no episode cache. The OS page cache
     handles reuse (the compressed vault is small enough to sit in it), which is both
     faster than a hand-rolled LRU for random-access training and free of a size knob.
@@ -296,7 +296,7 @@ class VaultReader:
     so these reads overlap the GPU step (the PyTorch ``DataLoader`` pattern).
 
     Quacks like ``EpisodeBatch`` for the fields :class:`~oaht_bench.dataset.dataset.Dataset`
-    and :func:`~oaht_bench.dataset.windowing.window_slice` read: ``ego_index``,
+    and :func:`~oaht_bench.dataset.windowing.window_slice_batch` read: ``ego_index``,
     ``num_agents``, ``num_episodes``, ``episodes`` (a lazy list), ``member_ids``,
     ``episode_returns()``, ``episode_lengths()`` and ``meta``.
     """

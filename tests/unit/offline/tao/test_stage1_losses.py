@@ -17,10 +17,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from oaht_bench.dataset.windowing import window_slice_batch
 from oaht_bench.models.masking import mask_logits
 from oaht_bench.models.tao_agent import AncillaryActionDecoder, OpponentPolicyEncoder
 from oaht_bench.offline import embedding_loss, supervised_contrastive
-from oaht_bench.offline.tao import _ANCHOR_FIELDS, _CROSS_FIELDS, _anchor_and_cross
+from oaht_bench.offline.tao import _ANCHOR_FIELDS, _CROSS_FIELDS, _anchor_and_cross_indices
 from oaht_bench.offline.utils import safe_cross_entropy
 
 
@@ -46,23 +47,32 @@ def _dataset(n_ep=8, T=16, obs_dim=5, teammates=(0, 1, 2, 3), seed=0):
 
 def _stage1_batch(ds, *, teammates_per_batch=3, windows_per_teammate=3, h=8, seed=0):
     """The same teammate-first contrastive batch ``TaoTrainer._stage1_batch``
-    builds, standalone -- a real stage-1 batch through ``_anchor_and_cross``."""
+    builds, standalone -- a real stage-1 batch through
+    ``_anchor_and_cross_indices`` + ``window_slice_batch``."""
     rng = np.random.default_rng(seed)
     teammate_ids = np.unique(ds.batch.member_ids[:, ds.mate])
     chosen = rng.choice(
         teammate_ids, size=min(teammates_per_batch, len(teammate_ids)), replace=False
     )
 
-    anchors, crosses, teammate_col = [], [], []
+    anchor_episode_ids, anchor_ts, cross_episode_ids, cross_ts, teammate_col = [], [], [], [], []
     for teammate_id in chosen:
         for _ in range(windows_per_teammate):
-            anchor, cross = _anchor_and_cross(ds, int(teammate_id), h, rng)
-            anchors.append(anchor)
-            crosses.append(cross)
+            ae, at, ce, ct = _anchor_and_cross_indices(ds, int(teammate_id), rng)
+            anchor_episode_ids.append(ae)
+            anchor_ts.append(at)
+            cross_episode_ids.append(ce)
+            cross_ts.append(ct)
             teammate_col.append(int(teammate_id))
 
-    batch = {k: np.stack([a[k] for a in anchors]) for k in _ANCHOR_FIELDS}
-    batch.update({f"cross_{k}": np.stack([c[k] for c in crosses]) for k in _CROSS_FIELDS})
+    anchors = window_slice_batch(
+        ds.batch, anchor_episode_ids, anchor_ts, h, _ANCHOR_FIELDS, mate=ds.mate
+    )
+    crosses = window_slice_batch(
+        ds.batch, cross_episode_ids, cross_ts, h, _CROSS_FIELDS, mate=ds.mate
+    )
+    batch = dict(anchors)
+    batch.update({f"cross_{k}": v for k, v in crosses.items()})
     batch["teammate_id"] = np.asarray(teammate_col, dtype=np.int32)
     return {k: jnp.asarray(v) for k, v in batch.items()}
 

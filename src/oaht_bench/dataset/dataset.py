@@ -3,7 +3,7 @@ episode store (:class:`~oaht_bench.dataset.vault.VaultReader`) plus the
 normalisation each baseline applies when it windows that store.
 
 Windowing itself has no class here: each baseline builds its own training
-batch with :func:`~oaht_bench.dataset.windowing.window_slice`/
+batch with :func:`~oaht_bench.dataset.windowing.window_slice_batch`/
 :func:`~oaht_bench.dataset.windowing.teammate_episode_ids`
 (:mod:`oaht_bench.dataset.windowing`), composed however that baseline's own
 paper describes its batch -- see ``offline/bc.py``, ``offline/liam.py``,

@@ -94,7 +94,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from oaht_bench.dataset.windowing import enumerate_windows, teammate_episode_ids, window_slice
+from oaht_bench.dataset.windowing import enumerate_windows, teammate_episode_ids, window_slice_batch
 from oaht_bench.models.omis_agent import OmisAgent
 from oaht_bench.offline.registry import BaseAhtTrainer
 from oaht_bench.offline.utils import mask_logits, normalize_window_batch, safe_cross_entropy, to_jax
@@ -137,39 +137,51 @@ def _random_t(batch, episode_id: int, rng: np.random.Generator) -> int:
     return int(rng.integers(1, length + 1))
 
 
-def build_d_epi(dataset, teammate_id: int, exclude_episode_id: int, rng, *, H: int, C: int):
-    """D_epi^k = {(s_h, a^{-1,k}_h)}_{h=1}^H -- Appendix C, verbatim: sample
-    the ids of ``C`` trajectories "from all historical games involving"
-    ``teammate_id`` (ANY ego policy, not necessarily the matching best
-    response -- :func:`teammate_episode_ids` makes no ego-identity
-    distinction), take a consecutive segment of length ``H // C`` from each,
-    concatenate. ``H``/``C`` are D_epi's own hyperparameters (paper: H=15,
-    C=3 on LBF) -- independent of the decoder window's own length, not
-    reused from it.
+def build_d_epi(dataset, teammate_ids, exclude_episode_ids, rng, *, H: int, C: int):
+    """D_epi^k = {(s_h, a^{-1,k}_h)}_{h=1}^H -- Appendix C, verbatim, for a
+    whole batch of decoder rows at once: sample the ids of ``C`` trajectories
+    "from all historical games involving" ``teammate_id`` (ANY ego policy,
+    not necessarily the matching best response -- :func:`teammate_episode_ids`
+    makes no ego-identity distinction), take a consecutive segment of length
+    ``H // C`` from each, concatenate. ``H``/``C`` are D_epi's own
+    hyperparameters (paper: H=15, C=3 on LBF) -- independent of the decoder
+    window's own length, not reused from it.
 
-    Falls back to including the decoder's own episode when the teammate
-    appears in too few *other* episodes to fill ``C`` without it (common
-    with 1-4 episodes per teammate on these datasets, see
-    ``tao._anchor_and_cross``'s identical fallback), and samples with
-    replacement in that case so D_epi is always exactly ``H`` long.
+    ``teammate_ids``/``exclude_episode_ids`` are arrays, one entry per
+    decoder row. Falls back to including that row's own episode when its
+    teammate appears in too few *other* episodes to fill ``C`` without it
+    (common with 1-4 episodes per teammate on these datasets, see
+    ``tao._anchor_and_cross_indices``'s identical fallback), and samples with
+    replacement in that case so every fragment is always filled.
+
+    D_epi's actual length is ``C * (H // C)``, not ``H`` itself, whenever
+    ``H`` doesn't divide evenly by ``C`` -- the paper's own LBF values
+    (``H=15, C=3``) do, but a config that doesn't still gets a consistent,
+    non-crashing result rather than one silently rounded up past what was
+    actually read.
+
+    Picking *which* episodes/positions is cheap index bookkeeping and stays
+    a Python loop, one row at a time; the actual reads are ONE
+    :func:`~oaht_bench.dataset.windowing.window_slice_batch` call across
+    every row's every fragment (``batch_size * C`` windows), not one call
+    per row or per fragment -- see that function's own docstring for why a
+    finer-grained loop here would silently undo ``VaultReader.read_slices``'s
+    concurrency.
     """
-    all_episode_ids = teammate_episode_ids(dataset.batch, dataset.mate, teammate_id)
-    other_episode_ids = all_episode_ids[all_episode_ids != exclude_episode_id]
-    pool = other_episode_ids if other_episode_ids.size else all_episode_ids
-    chosen_episode_ids = rng.choice(pool, size=C, replace=pool.size < C)
+    episode_ids_flat, ts_flat = [], []
+    for teammate_id, exclude_episode_id in zip(teammate_ids, exclude_episode_ids, strict=True):
+        all_episode_ids = teammate_episode_ids(dataset.batch, dataset.mate, int(teammate_id))
+        other_episode_ids = all_episode_ids[all_episode_ids != exclude_episode_id]
+        pool = other_episode_ids if other_episode_ids.size else all_episode_ids
+        chosen = rng.choice(pool, size=C, replace=pool.size < C)
+        episode_ids_flat.extend(int(e) for e in chosen)
+        ts_flat.extend(_random_t(dataset.batch, int(e), rng) for e in chosen)
     h = H // C
-    fragments = [
-        window_slice(
-            dataset.batch,
-            int(episode_id),
-            _random_t(dataset.batch, int(episode_id), rng),
-            h,
-            _D_EPI_FIELDS,
-            mate=dataset.mate,
-        )
-        for episode_id in chosen_episode_ids
-    ]
-    return {k: np.concatenate([f[k] for f in fragments]) for k in _D_EPI_FIELDS}
+    flat = window_slice_batch(
+        dataset.batch, episode_ids_flat, ts_flat, h, _D_EPI_FIELDS, mate=dataset.mate
+    )
+    n = len(teammate_ids)
+    return {k: v.reshape(n, C * h, *v.shape[2:]) for k, v in flat.items()}
 
 
 def _shift_right(x, fill):
@@ -328,38 +340,26 @@ class OmisTrainer(BaseAhtTrainer):
         rows = self.np_rng.choice(
             len(episode_ids), size=batch_size, replace=len(episode_ids) < batch_size
         )
+        row_episode_ids, row_ts = episode_ids[rows], ts[rows]
 
-        decoder = [
-            window_slice(
-                self.dataset.batch,
-                int(episode_ids[i]),
-                int(ts[i]),
-                h,
-                _DECODER_FIELDS,
-                mate=self.dataset.mate,
-            )
-            for i in rows
-        ]
-        teammate_ids = [
-            int(self.dataset.batch.member_ids[episode_ids[i], self.dataset.mate]) for i in rows
-        ]
-        d_epis = [
-            build_d_epi(
-                self.dataset,
-                teammate_ids[j],
-                int(episode_ids[rows[j]]),
-                self.np_rng,
-                H=self.config.epi_length,
-                C=self.config.context_trajectories,
-            )
-            for j in range(len(rows))
-        ]
+        decoder = window_slice_batch(
+            self.dataset.batch, row_episode_ids, row_ts, h, _DECODER_FIELDS, mate=self.dataset.mate
+        )
+        teammate_ids = self.dataset.batch.member_ids[row_episode_ids, self.dataset.mate]
+        d_epi = build_d_epi(
+            self.dataset,
+            teammate_ids,
+            row_episode_ids,
+            self.np_rng,
+            H=self.config.epi_length,
+            C=self.config.context_trajectories,
+        )
 
-        batch = {k: np.stack([d[k] for d in decoder]) for k in _DECODER_FIELDS}
+        batch = dict(decoder)
         batch["teammate_id"] = np.asarray(teammate_ids, dtype=np.int32)
-        batch["epi_mate_obs"] = np.stack([e["mate_obs"] for e in d_epis])
-        batch["epi_mate_actions"] = np.stack([e["mate_actions"] for e in d_epis])
-        batch["epi_mask"] = np.stack([e["mask"] for e in d_epis])
+        batch["epi_mate_obs"] = d_epi["mate_obs"]
+        batch["epi_mate_actions"] = d_epi["mate_actions"]
+        batch["epi_mask"] = d_epi["mask"]
         return to_jax(normalize_window_batch(batch, self.dataset.norm))
 
     def _loss(self, p, b, rngs, frozen):

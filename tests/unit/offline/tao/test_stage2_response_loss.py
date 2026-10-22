@@ -17,7 +17,7 @@ import numpy as np
 import optax
 import pytest
 
-from oaht_bench.dataset.windowing import enumerate_windows, window_slice
+from oaht_bench.dataset.windowing import enumerate_windows, window_slice_batch
 from oaht_bench.models.tao_agent import OpponentPolicyEncoder, TaoNetwork
 from oaht_bench.offline import tao_policy_loss
 from oaht_bench.offline.tao import _CONTEXT_FIELDS, _DECODER_FIELDS, _get_off_d_context
@@ -77,23 +77,18 @@ def _stage2_batch(ds, *, batch_size=6, context_trajectories=3, h=_T, seed=0):
     rng = np.random.default_rng(seed)
     episode_ids, ts = enumerate_windows(ds.batch, h=h, stride=h)
     rows = rng.choice(len(episode_ids), size=batch_size, replace=len(episode_ids) < batch_size)
+    row_episode_ids, row_ts = episode_ids[rows], ts[rows]
 
-    decoder = [
-        window_slice(ds.batch, int(episode_ids[i]), int(ts[i]), h, _DECODER_FIELDS, mate=ds.mate)
-        for i in rows
-    ]
-    teammate_ids = [int(ds.batch.member_ids[episode_ids[i], ds.mate]) for i in rows]
-    contexts = [
-        _get_off_d_context(
-            ds, teammate_ids[j], int(episode_ids[rows[j]]), h, context_trajectories, rng
-        )
-        for j in range(len(rows))
-    ]
+    decoder = window_slice_batch(
+        ds.batch, row_episode_ids, row_ts, h, _DECODER_FIELDS, mate=ds.mate
+    )
+    teammate_ids = ds.batch.member_ids[row_episode_ids, ds.mate]
+    contexts = _get_off_d_context(ds, teammate_ids, row_episode_ids, h, context_trajectories, rng)
 
-    batch = {k: np.stack([d[k] for d in decoder]) for k in _DECODER_FIELDS}
+    batch = dict(decoder)
     batch["teammate_id"] = np.asarray(teammate_ids, dtype=np.int32)
     for key in _CONTEXT_FIELDS:
-        batch[f"context_{key}"] = np.stack([ctx[key] for ctx in contexts])
+        batch[f"context_{key}"] = contexts[key]
     return {k: jnp.asarray(v) for k, v in batch.items()}
 
 

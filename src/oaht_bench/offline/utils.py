@@ -1,10 +1,9 @@
 from typing import Any
 
 import jax.numpy as jnp
-import numpy as np
 import optax
 
-from oaht_bench.dataset.windowing import window_slice
+from oaht_bench.dataset.windowing import window_slice_batch
 
 # mask_logits moved to the model layer (models/masking.py) so the return-conditioned
 # agents can mask at inference without models importing offline; re-exported here so
@@ -59,9 +58,10 @@ def safe_cross_entropy(logits, labels, mask) -> jnp.ndarray:
 
 def normalize_window_batch(batch: dict, norm) -> dict:
     """Apply the dataset's observation/return-to-go normalisation to a window
-    batch built from raw :func:`~oaht_bench.dataset.windowing.window_slice` reads.
+    batch built from raw :func:`~oaht_bench.dataset.windowing.window_slice_batch`
+    reads.
 
-    ``window_slice`` itself returns unnormalized data (it has no notion of a
+    ``window_slice_batch`` itself returns unnormalized data (it has no notion of a
     particular dataset's statistics -- see ``windowing.py``'s module
     docstring), so every baseline's ``_sample_batch`` applies this once, after
     stacking. Keys are matched by suffix (``*_obs`` -> ``norm.apply_obs``,
@@ -90,13 +90,14 @@ def sample_window_batch(dataset, pool, h: int, np_rng, batch_size: int, fields) 
     The ego-history baselines (BC, LIAM, MeLIBA) all sample the same way: a
     uniform draw of windows with no cross trajectory and no contrastive
     structure. Each call draws a fresh minibatch, so a caller looping steps
-    ignores the training step index.
+    ignores the training step index. One :func:`window_slice_batch` call for
+    the whole minibatch, not one per row -- see that function's own
+    docstring for why a per-row loop here would silently undo
+    ``VaultReader.read_slices``'s concurrency.
     """
     episode_ids, ts = pool
     rows = np_rng.choice(len(episode_ids), size=batch_size, replace=False)
-    windows = [
-        window_slice(dataset.batch, int(episode_ids[i]), int(ts[i]), h, fields, mate=dataset.mate)
-        for i in rows
-    ]
-    batch = {k: np.stack([w[k] for w in windows]) for k in fields}
+    batch = window_slice_batch(
+        dataset.batch, episode_ids[rows], ts[rows], h, fields, mate=dataset.mate
+    )
     return to_jax(normalize_window_batch(batch, dataset.norm))
