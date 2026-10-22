@@ -36,15 +36,28 @@ same way TAO does, just through one shared backbone (Fig. 1) rather than
 TAO's separate-encoder-plus-cross-attention, so it is evaluated through
 :mod:`oaht_bench.offline.incontext_eval` alongside TAO, not through the
 ego-stream-only rollout LIAM/MeLIBA use. ``D_t^k = (D_epi^k, D_step^k)``
-(Sec. 4.1): ``D_step`` is the current episode's own opponent-action history,
-threaded through training as the (label-shifted, see :func:`_shift_right`)
-``mate_actions`` field already in every window; ``D_epi`` is ``C`` past
-episodes against the same opponent (Appendix C), reusing
-:func:`~oaht_bench.dataset.sampler.sample_stage2`'s ``context_mate_*``
-fields -- built for TAO, teammate-agnostic, and directly applicable here.
+(Sec. 4.1): ``D_step`` is the decoder window's own opponent *action* history
+(Eq. 2 reads as a (state, action) pair, but the reference's
+``GPTModel.forward`` has exactly one observation tensor -- the ego's own,
+already in the backbone's standard stream -- and loads only opponent
+*actions* for the main sequence, confirmed at the data layer by
+``get_batch``/``load_dataset`` in ``OMIS/pretraining/utils.py``; see
+``models/backbone.py``'s own docstring for the full citation trail), built
+by :func:`build_d_step` from the batch's own (label-shifted, see
+:func:`_shift_right`) ``mate_actions``; ``D_epi`` is ``C`` past episodes
+against the same opponent (Appendix C), and here the state half is real --
+the reference's ``prompt_states`` carries the opponent's own observation,
+because D_epi reads *other* episodes with no current ego state to reuse --
+built by :func:`build_d_epi` directly from the episode store via
+:func:`~oaht_bench.dataset.windowing.teammate_episode_ids` -- its own
+``H``/``C`` sizing, independent of TAO's GetOffD context even though both
+select "C trajectories of the same teammate" (see ``tao.py``'s
+``_get_off_d_context`` for the one that isn't).
 Both are new, off-by-default capabilities on the shared
 :class:`~oaht_bench.models.backbone.GPT2Model` (see that module's own
-docstring for the token-layout design); :meth:`OmisAgent.act`'s docstring
+docstring for the token-layout design, including the reference's agent-role
+and separate-D_epi-timestep embeddings, also ported here for the same
+fidelity-to-the-released-model reason); :meth:`OmisAgent.act`'s docstring
 explains how deployment supplies them where the ordinary, every-baseline
 :class:`~oaht_bench.models.return_conditioned_agent.ContextWindow` cannot.
 
@@ -79,12 +92,32 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-import optax
+import numpy as np
 
-from oaht_bench.dataset.sampler import sample_stage2
+from oaht_bench.dataset.windowing import enumerate_windows, teammate_episode_ids, window_slice
 from oaht_bench.models.omis_agent import OmisAgent
 from oaht_bench.offline.registry import BaseAhtTrainer
-from oaht_bench.offline.utils import mask_logits, to_jax
+from oaht_bench.offline.utils import mask_logits, normalize_window_batch, safe_cross_entropy, to_jax
+
+#: The decoder window: the ego stream D_step/D_epi condition a prediction on,
+#: plus the decoder's OWN episode's teammate action stream -- D_step is built
+#: from this by construction (Eq. 2 never samples elsewhere; see
+#: build_d_step). No teammate *observation* field: the reference's main
+#: sequence has no opponent-state channel (see module docstring).
+_DECODER_FIELDS = (
+    "ego_rtg",
+    "ego_obs",
+    "ego_actions",
+    "timesteps",
+    "mask",
+    "ego_avail",
+    "mate_actions",
+    "mate_avail",
+)
+#: D_epi's per-fragment fields -- state and teammate action (Appendix C),
+#: plus the mask the backbone's `epi_mask` needs for fragments shorter than
+#: `H // C` (a short episode, or H not evenly divisible by C).
+_D_EPI_FIELDS = ("mate_obs", "mate_actions", "mask")
 
 
 def _masked_accuracy(logits, labels, mask) -> jnp.ndarray:
@@ -94,21 +127,80 @@ def _masked_accuracy(logits, labels, mask) -> jnp.ndarray:
     return (correct * m).sum() / jnp.maximum(m.sum(), 1.0)
 
 
-def _shift_right(mate_actions):
-    """``D_step``'s opponent-action history at position ``t`` is
-    ``a^{-1,k}_{t-1}``, not ``a^{-1,k}_t`` -- the imitator's label at ``t`` is
-    the raw, unshifted ``batch["mate_actions"][:, t]``, so feeding the same
-    tensor as the backbone's conditioning input would let the label leak into
-    its own input. Position 0 has no history yet: filled with ``-10``, the
-    same "no action" sentinel ``ContextWindow.ctx_act`` already uses
-    (``models/return_conditioned_agent.py``) -- not ``0``, which is a real
-    action id and would read as "the opponent played action 0" rather than
-    "unknown". ``jax.nn.one_hot`` maps any out-of-range index (negative
-    included) to an all-zero row, so the backbone sees a clean "nothing here"
-    token instead of a spurious action.
+def _random_t(batch, episode_id: int, rng: np.random.Generator) -> int:
+    """A uniform random window end-position within ``episode_id`` -- D_epi's
+    fragments are keyed by *teammate*, not drawn from "any window in the
+    dataset", so there is no stride-pool/reproducibility argument here (see
+    ``tao.py``'s identical helper, which this mirrors rather than imports --
+    each baseline's sampling stays self-contained)."""
+    length = int(batch.episode_lengths()[episode_id])
+    return int(rng.integers(1, length + 1))
+
+
+def build_d_epi(dataset, teammate_id: int, exclude_episode_id: int, rng, *, H: int, C: int):
+    """D_epi^k = {(s_h, a^{-1,k}_h)}_{h=1}^H -- Appendix C, verbatim: sample
+    the ids of ``C`` trajectories "from all historical games involving"
+    ``teammate_id`` (ANY ego policy, not necessarily the matching best
+    response -- :func:`teammate_episode_ids` makes no ego-identity
+    distinction), take a consecutive segment of length ``H // C`` from each,
+    concatenate. ``H``/``C`` are D_epi's own hyperparameters (paper: H=15,
+    C=3 on LBF) -- independent of the decoder window's own length, not
+    reused from it.
+
+    Falls back to including the decoder's own episode when the teammate
+    appears in too few *other* episodes to fill ``C`` without it (common
+    with 1-4 episodes per teammate on these datasets, see
+    ``tao._anchor_and_cross``'s identical fallback), and samples with
+    replacement in that case so D_epi is always exactly ``H`` long.
     """
-    filler = jnp.full_like(mate_actions[:, :1], -10)
-    return jnp.concatenate([filler, mate_actions[:, :-1]], axis=1)
+    all_episode_ids = teammate_episode_ids(dataset.batch, dataset.mate, teammate_id)
+    other_episode_ids = all_episode_ids[all_episode_ids != exclude_episode_id]
+    pool = other_episode_ids if other_episode_ids.size else all_episode_ids
+    chosen_episode_ids = rng.choice(pool, size=C, replace=pool.size < C)
+    h = H // C
+    fragments = [
+        window_slice(
+            dataset.batch,
+            int(episode_id),
+            _random_t(dataset.batch, int(episode_id), rng),
+            h,
+            _D_EPI_FIELDS,
+            mate=dataset.mate,
+        )
+        for episode_id in chosen_episode_ids
+    ]
+    return {k: np.concatenate([f[k] for f in fragments]) for k in _D_EPI_FIELDS}
+
+
+def _shift_right(x, fill):
+    """``D_step``'s opponent action history at position ``t`` is
+    ``a^{-1,k}_{t-1}``, not ``a^{-1,k}_t`` -- the imitator's label at ``t``
+    is the raw, unshifted ``batch["mate_actions"][:, t]``, so feeding the
+    same tensor as the backbone's conditioning input would let the label
+    leak into its own input. Position 0 has no history yet, filled with
+    ``fill``: ``-10`` for ``mate_actions`` (the same "no action" sentinel
+    ``ContextWindow.ctx_act`` already uses -- not ``0``, which is a real
+    action id and would read as "the opponent played action 0" rather than
+    "unknown"; ``jax.nn.one_hot`` maps any out-of-range index, negative
+    included, to an all-zero row).
+    """
+    filler = jnp.full_like(x[:, :1], fill)
+    return jnp.concatenate([filler, x[:, :-1]], axis=1)
+
+
+def build_d_step(window: dict) -> dict:
+    """D_step^k = (a^{-1,k}_0, ..., a^{-1,k}_{t-1}) -- Eq. 2's opponent
+    action history. (Eq. 2 reads as a (state, action) pair, but the
+    reference's main sequence has no opponent-observation channel; the
+    ``s_t`` it writes is the ego's own state, already in the backbone's
+    standard stream -- see ``models/backbone.py``'s docstring.)
+
+    From the decoder window's OWN episode (the matching best-response
+    episode, by construction -- D_step never samples elsewhere, unlike
+    D_epi), shifted one step via :func:`_shift_right` so position ``t``
+    never sees ``a^{-1,k}_t``.
+    """
+    return {"mate_actions": _shift_right(window["mate_actions"], fill=-10)}
 
 
 def omis_joint_loss(
@@ -120,12 +212,12 @@ def omis_joint_loss(
     and are differentiated together; nothing here is ``stop_gradient``-ed.
 
     The embedding conditions on ``D_t^k = (D_epi^k, D_step^k)`` (Eqs. 3-5),
-    not just the ego stream: ``D_step`` is the batch's own (shifted)
-    ``mate_actions``, and ``D_epi`` is the ``context_mate_*`` fields
-    :func:`~oaht_bench.dataset.sampler.sample_stage2` already builds (``C``
-    past episodes against the same teammate, Appendix C) -- the same
-    cross-episode context TAO's encoder cross-attends to, fed here as a
-    prepended block through the shared backbone instead.
+    not just the ego stream: ``D_step`` is :func:`build_d_step` applied to
+    this batch's own (decoder-episode) teammate stream, and ``D_epi`` is the
+    ``epi_mate_*`` fields :func:`build_d_epi` already built (``C`` past
+    episodes against the same teammate, Appendix C) -- the same cross-episode
+    context TAO's encoder cross-attends to, fed here as a prepended block
+    through the shared backbone instead.
 
     ``act_loss``/``oppo_pi_loss`` are the categorical negative log-likelihood
     of the ego action and the teammate action respectively; ``value_loss`` is
@@ -133,6 +225,7 @@ def omis_joint_loss(
     response's RTG on best-response data). All three are masked to valid
     timesteps and reported with an accuracy so a falling loss is interpretable.
     """
+    d_step = build_d_step(batch)
     embedding = backbone.apply(
         params["backbone"],
         batch["ego_rtg"],
@@ -140,10 +233,10 @@ def omis_joint_loss(
         batch["ego_actions"],
         timesteps=batch["timesteps"],
         mask=batch["mask"],
-        mate_actions=_shift_right(batch["mate_actions"]),
-        epi_state=batch["context_mate_next_obs"],
-        epi_mate_actions=batch["context_mate_actions"],
-        epi_mask=batch["context_mask"],
+        mate_actions=d_step["mate_actions"],
+        epi_state=batch["epi_mate_obs"],
+        epi_mate_actions=batch["epi_mate_actions"],
+        epi_mask=batch["epi_mask"],
         train=train,
         rngs=rngs,
     )
@@ -154,13 +247,11 @@ def omis_joint_loss(
     mask = batch["mask"].astype(jnp.float32)
     denom = jnp.maximum(mask.sum(), 1.0)
 
-    act_loss = optax.softmax_cross_entropy_with_integer_labels(action_logits, batch["ego_actions"])
+    act_loss = safe_cross_entropy(action_logits, batch["ego_actions"], mask)
     act_loss = (act_loss * mask).sum() / denom
     action_acc = _masked_accuracy(action_logits, batch["ego_actions"], mask)
 
-    oppo_pi_loss = optax.softmax_cross_entropy_with_integer_labels(
-        mate_logits, batch["mate_actions"]
-    )
+    oppo_pi_loss = safe_cross_entropy(mate_logits, batch["mate_actions"], mask)
     oppo_pi_loss = (oppo_pi_loss * mask).sum() / denom
     imitator_acc = _masked_accuracy(mate_logits, batch["mate_actions"], mask)
 
@@ -221,16 +312,55 @@ class OmisTrainer(BaseAhtTrainer):
         self.agent = OmisAgent(self.config)
         self.agent.build_model()
 
-    def _sample_batch(self, _step):
-        return to_jax(
-            sample_stage2(
-                self.dataset.windows,
-                self.dataset.index,
-                self.np_rng,
-                batch_size=self.config.batch_size,
-                context_trajectories=self.config.context_trajectories,
-            )
+    def prepare(self, dataset, logger, *, rng, np_rng, num_seeds: int = 1) -> None:
+        super().prepare(dataset, logger, rng=rng, np_rng=np_rng, num_seeds=num_seeds)
+        # The decoder window is "any window in the dataset" (D_step is read
+        # from its own episode by construction, not sampled), so this is the
+        # same stride-enumerated pool the ego-history baselines draw from.
+        self._pool = enumerate_windows(
+            dataset.batch, h=self.config.context_length, stride=self.config.stride
         )
+
+    def _sample_batch(self, _step):
+        episode_ids, ts = self._pool
+        h = self.config.context_length
+        batch_size = self.config.batch_size
+        rows = self.np_rng.choice(
+            len(episode_ids), size=batch_size, replace=len(episode_ids) < batch_size
+        )
+
+        decoder = [
+            window_slice(
+                self.dataset.batch,
+                int(episode_ids[i]),
+                int(ts[i]),
+                h,
+                _DECODER_FIELDS,
+                mate=self.dataset.mate,
+            )
+            for i in rows
+        ]
+        teammate_ids = [
+            int(self.dataset.batch.member_ids[episode_ids[i], self.dataset.mate]) for i in rows
+        ]
+        d_epis = [
+            build_d_epi(
+                self.dataset,
+                teammate_ids[j],
+                int(episode_ids[rows[j]]),
+                self.np_rng,
+                H=self.config.epi_length,
+                C=self.config.context_trajectories,
+            )
+            for j in range(len(rows))
+        ]
+
+        batch = {k: np.stack([d[k] for d in decoder]) for k in _DECODER_FIELDS}
+        batch["teammate_id"] = np.asarray(teammate_ids, dtype=np.int32)
+        batch["epi_mate_obs"] = np.stack([e["mate_obs"] for e in d_epis])
+        batch["epi_mate_actions"] = np.stack([e["mate_actions"] for e in d_epis])
+        batch["epi_mask"] = np.stack([e["mask"] for e in d_epis])
+        return to_jax(normalize_window_batch(batch, self.dataset.norm))
 
     def _loss(self, p, b, rngs, frozen):
         return omis_joint_loss(
@@ -260,6 +390,8 @@ class OmisTrainer(BaseAhtTrainer):
         init_batch = self._sample_batch(0)
         self.rng, k = jax.random.split(self.rng)
 
+        d_step = build_d_step(init_batch)
+
         def init_one(key):
             k1, k2 = jax.random.split(key)
             backbone_params = self.agent.backbone.init(
@@ -269,10 +401,10 @@ class OmisTrainer(BaseAhtTrainer):
                 init_batch["ego_actions"],
                 timesteps=init_batch["timesteps"],
                 mask=init_batch["mask"],
-                mate_actions=_shift_right(init_batch["mate_actions"]),
-                epi_state=init_batch["context_mate_next_obs"],
-                epi_mate_actions=init_batch["context_mate_actions"],
-                epi_mask=init_batch["context_mask"],
+                mate_actions=d_step["mate_actions"],
+                epi_state=init_batch["epi_mate_obs"],
+                epi_mate_actions=init_batch["epi_mate_actions"],
+                epi_mask=init_batch["epi_mask"],
             )
             embedding = self.agent.backbone.apply(
                 backbone_params,
@@ -281,10 +413,10 @@ class OmisTrainer(BaseAhtTrainer):
                 init_batch["ego_actions"],
                 timesteps=init_batch["timesteps"],
                 mask=init_batch["mask"],
-                mate_actions=_shift_right(init_batch["mate_actions"]),
-                epi_state=init_batch["context_mate_next_obs"],
-                epi_mate_actions=init_batch["context_mate_actions"],
-                epi_mask=init_batch["context_mask"],
+                mate_actions=d_step["mate_actions"],
+                epi_state=init_batch["epi_mate_obs"],
+                epi_mate_actions=init_batch["epi_mate_actions"],
+                epi_mask=init_batch["epi_mask"],
             )
             heads_params = self.agent.heads.init(k2, embedding)
             return {"backbone": backbone_params, "heads": heads_params}

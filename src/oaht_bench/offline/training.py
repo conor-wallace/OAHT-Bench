@@ -32,10 +32,11 @@ _PREFETCH_DONE = object()
 class _Prefetcher:
     """Prepare each step's batch on a background thread, a few ahead.
 
-    The sampler now reads its windows as concurrent disk slices (see
-    :class:`~oaht_bench.dataset.dataset.Windows`); running it on a background thread
-    overlaps that I/O with the GPU step on the main thread -- the PyTorch
-    ``DataLoader(num_workers>0, prefetch_factor)`` pattern. tensorstore reads and XLA
+    Each baseline's own ``_sample_batch`` reads its windows as concurrent disk
+    slices (see :func:`~oaht_bench.dataset.windowing.window_slice`); running it on
+    a background thread overlaps that I/O with the GPU step on the main thread --
+    the PyTorch ``DataLoader(num_workers>0, prefetch_factor)`` pattern. tensorstore
+    reads and XLA
     dispatch both release the GIL, so the overlap is real. ``depth`` batches may be in
     flight; the thread is daemonic, so a stage that stops early never blocks exit.
     """

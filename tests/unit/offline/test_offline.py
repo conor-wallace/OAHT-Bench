@@ -13,38 +13,43 @@ import numpy as np
 import optax
 import pytest
 
-from oaht_bench.dataset.dataset import _build_windows, return_to_go
+from oaht_bench.dataset.dataset import return_to_go
 from oaht_bench.models.liam_agent import LiamDecoder, LiamEncoder, LiamNetwork
 from oaht_bench.offline import GPT2Model, liam_reconstruction_loss
 
+_OBS_DIM = 5
+_T = 6
+_ACTION_DIM = 6
 
-def _windows(n_ep=4, T=12, obs_dim=5, n_agents=2, seed=0):
-    from oaht_bench.dataset.schema import Episode, EpisodeBatch
 
+def _batch(n_ep=4, T=_T, obs_dim=_OBS_DIM, action_dim=_ACTION_DIM, seed=0):
+    """A window batch dict of the shape every baseline's ``_sample_batch``
+    produces -- built directly rather than through
+    :func:`~oaht_bench.dataset.windowing.window_slice`, since these tests
+    check model/loss properties, not windowing itself (see
+    ``tests/unit/dataset/test_windowing.py`` for that).
+
+    Ragged: per-row valid length varies via ``mask``/``timesteps``, the same
+    left-padding convention ``window_slice`` uses.
+    """
     rng = np.random.default_rng(seed)
-    # Ragged: episode lengths vary (all >= the context length of 6, as they were
-    # before this became a list of variable-length episodes).
     lengths = [T - (i % 4) for i in range(n_ep)]
-    episodes = [
-        Episode(
-            obs=rng.normal(size=(n_agents, L, obs_dim)).astype(np.float32),
-            actions=rng.integers(0, 6, size=(n_agents, L)),
-            rewards=rng.normal(size=(n_agents, L)).astype(np.float32),
-            avail_actions=np.ones((n_agents, L, 6), dtype=np.float32),
-            dones=np.zeros(L, dtype=bool),
-        )
-        for L in lengths
-    ]
-    return _build_windows(
-        EpisodeBatch(
-            episodes=episodes,
-            member_ids=np.array([[0, i % 2] for i in range(n_ep)]),
-            ego_index=0,
-            meta={},
-        ),
-        context_length=6,
-        stride=3,
-    )
+    mask = np.zeros((n_ep, T), dtype=bool)
+    timesteps = np.zeros((n_ep, T), dtype=np.int32)
+    for i, length in enumerate(lengths):
+        mask[i, T - length :] = True
+        timesteps[i, T - length :] = np.arange(1, length + 1)
+    return {
+        "ego_obs": rng.normal(size=(n_ep, T, obs_dim)).astype(np.float32),
+        "mate_obs": rng.normal(size=(n_ep, T, obs_dim)).astype(np.float32),
+        "ego_actions": rng.integers(0, action_dim, size=(n_ep, T)),
+        "mate_actions": rng.integers(0, action_dim, size=(n_ep, T)),
+        "ego_rtg": rng.normal(size=(n_ep, T)).astype(np.float32),
+        "ego_avail": np.ones((n_ep, T, action_dim), dtype=np.float32),
+        "mate_avail": np.ones((n_ep, T, action_dim), dtype=np.float32),
+        "timesteps": timesteps,
+        "mask": mask,
+    }
 
 
 def test_return_to_go_ignores_padding():
@@ -52,16 +57,6 @@ def test_return_to_go_ignores_padding():
     rewards = np.array([[1.0, 1.0, 1.0, 99.0]])
     valid = np.array([[True, True, True, False]])
     assert return_to_go(rewards, valid).tolist() == [[3.0, 2.0, 1.0, 0.0]]
-
-
-def test_windows_expose_both_streams_and_the_teammate_label():
-    """Everything LIAM and TAO read has to come out of the collected schema."""
-    w = _windows()
-    assert w.ego_obs.shape == w.mate_obs.shape
-    assert w.ego_actions.shape == w.mate_actions.shape == w.mask.shape
-    assert w.teammate_id.shape == (len(w),)
-    # windows never extend past their episode
-    assert w.mask.sum() > 0
 
 
 def test_liam_conditions_by_concatenation_and_tao_by_cross_attention():
@@ -72,23 +67,23 @@ def test_liam_conditions_by_concatenation_and_tao_by_cross_attention():
     concatenates the embedding to the observation (``liam_agent.py:536``). The
     distinction is cross-attention versus concatenation.
     """
-    w = _windows()
+    b = _batch()
     rng = jax.random.PRNGKey(0)
-    kw = dict(timesteps=jnp.asarray(w.timesteps), mask=jnp.asarray(w.mask))
-    args = (jnp.asarray(w.ego_rtg), jnp.asarray(w.ego_obs), jnp.asarray(w.ego_actions))
+    kw = dict(timesteps=jnp.asarray(b["timesteps"]), mask=jnp.asarray(b["mask"]))
+    args = (jnp.asarray(b["ego_rtg"]), jnp.asarray(b["ego_obs"]), jnp.asarray(b["ego_actions"]))
 
     # LIAM widens the observation embedding by hidden_dim -- the concatenation.
-    z = jnp.zeros((len(w), w.context_length, 32))
-    liam = LiamNetwork(action_dim=6, hidden_dim=32)
+    z = jnp.zeros((b["ego_obs"].shape[0], _T, 32))
+    liam = LiamNetwork(action_dim=_ACTION_DIM, hidden_dim=32)
     lp = liam.init(rng, *args, embedding=z, **kw)
     obs_kernel = jax.tree_util.tree_leaves_with_path(lp)
-    widened = [v.shape for k, v in obs_kernel if v.ndim == 2 and v.shape[0] == w.obs_dim + 32]
+    widened = [v.shape for k, v in obs_kernel if v.ndim == 2 and v.shape[0] == _OBS_DIM + 32]
     assert widened, "LIAM's observation layer should take obs_dim + hidden_dim inputs"
 
     # A cross-attending backbone must be given a context; omitting it is an error
     # rather than a silent no-op.
     with pytest.raises(ValueError, match="no context was passed"):
-        GPT2Model(action_dim=6, use_cross_attention=True).init(rng, *args, **kw)
+        GPT2Model(action_dim=_ACTION_DIM, use_cross_attention=True).init(rng, *args, **kw)
 
 
 def test_liam_reconstructs_the_teammate_at_the_same_timestep():
@@ -114,24 +109,10 @@ def test_liam_observation_term_is_a_gaussian_nll_not_a_mean():
     a mean silently reweights observation reconstruction against action
     reconstruction.
     """
-    w = _windows()
+    batch = {k: jnp.asarray(v) for k, v in _batch().items()}
     rng = jax.random.PRNGKey(0)
-    enc = LiamEncoder(action_dim=6)
-    dec = LiamDecoder(obs_dim=w.obs_dim, action_dim=6)
-    batch = {
-        k: jnp.asarray(getattr(w, k))
-        for k in (
-            "ego_obs",
-            "ego_actions",
-            "ego_rtg",
-            "mate_obs",
-            "mate_actions",
-            "ego_avail",
-            "mate_avail",
-            "timesteps",
-            "mask",
-        )
-    }
+    enc = LiamEncoder(action_dim=_ACTION_DIM)
+    dec = LiamDecoder(obs_dim=_OBS_DIM, action_dim=_ACTION_DIM)
     ep = enc.init(
         rng,
         batch["ego_rtg"],
@@ -170,23 +151,9 @@ def test_liam_stage_two_does_not_differentiate_the_encoder():
     """
     from oaht_bench.offline import liam_policy_loss
 
-    w = _windows()
+    batch = {k: jnp.asarray(v) for k, v in _batch().items()}
     rng = jax.random.PRNGKey(0)
-    enc = LiamEncoder(action_dim=6)
-    batch = {
-        k: jnp.asarray(getattr(w, k))
-        for k in (
-            "ego_obs",
-            "ego_actions",
-            "ego_rtg",
-            "mate_obs",
-            "mate_actions",
-            "ego_avail",
-            "mate_avail",
-            "timesteps",
-            "mask",
-        )
-    }
+    enc = LiamEncoder(action_dim=_ACTION_DIM)
     ep = enc.init(
         rng,
         batch["ego_rtg"],
@@ -203,7 +170,7 @@ def test_liam_stage_two_does_not_differentiate_the_encoder():
         timesteps=batch["timesteps"],
         mask=batch["mask"],
     )
-    pol = LiamNetwork(action_dim=6)
+    pol = LiamNetwork(action_dim=_ACTION_DIM)
     pp = pol.init(
         rng,
         batch["ego_rtg"],
@@ -233,16 +200,16 @@ def test_available_actions_are_enforced_everywhere_the_data_enforces_them():
     """
     import inspect
 
-    from oaht_bench.dataset import dataset as ds
+    from oaht_bench.dataset import windowing
     from oaht_bench.models.return_conditioned_agent import ReturnConditionedAgent
     from oaht_bench.offline import liam as liam_mod
     from oaht_bench.offline import tao as tao_mod
 
     # windows carry the masks for both seats
-    w = _windows()
-    assert w.ego_avail.shape == (len(w), w.context_length, 6)
-    assert w.mate_avail.shape == w.ego_avail.shape
-    assert "avail_actions" in inspect.getsource(ds._build_windows)
+    b = _batch()
+    assert b["ego_avail"].shape == (b["ego_obs"].shape[0], _T, _ACTION_DIM)
+    assert b["mate_avail"].shape == b["ego_avail"].shape
+    assert "avail_actions" in inspect.getsource(windowing)
 
     # every cross-entropy is over masked logits
     assert "mask_logits" in inspect.getsource(liam_mod.liam_reconstruction_loss)
@@ -267,24 +234,11 @@ def test_omis_all_three_heads_reach_the_shared_backbone():
     from oaht_bench.models.omis_agent import OmisBackbone, OmisHeads
     from oaht_bench.offline.utils import mask_logits
 
-    w = _windows()
+    batch = {k: jnp.asarray(v) for k, v in _batch().items()}
     rng = jax.random.PRNGKey(0)
-    batch = {
-        k: jnp.asarray(getattr(w, k))
-        for k in (
-            "ego_rtg",
-            "ego_obs",
-            "ego_actions",
-            "mate_actions",
-            "ego_avail",
-            "mate_avail",
-            "timesteps",
-            "mask",
-        )
-    }
 
-    backbone = OmisBackbone(action_dim=6, hidden_dim=32)
-    heads = OmisHeads(action_dim=6, hidden_dim=32)
+    backbone = OmisBackbone(action_dim=_ACTION_DIM, hidden_dim=32)
+    heads = OmisHeads(action_dim=_ACTION_DIM, hidden_dim=32)
 
     bp = backbone.init(
         rng,

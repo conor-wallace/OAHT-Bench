@@ -158,17 +158,18 @@ def rollout_one_episode(
         rng, a0, a1, sr = jax.random.split(rng, 4)
         if uses_d_step:
             # a^{-1}_{t-1}, ..., left-padded to K -- mate_a holds exactly the
-            # opponent's actions through step t-1 at this point (this step's is
-            # appended below, after both agents have acted).
+            # opponent's action history through step t-1 at this point (this
+            # step's is appended below, after both agents have acted).
             K = ego_agent.context_length
-            history = mate_a[-K:]
-            # -10: the same "no action yet" sentinel training's `_shift_right`
-            # uses (offline/omis.py) -- not 0, which is a real action id.
-            # A proper fixed-shape jnp array, not a raw Python list: this is a
-            # jitted call (get_action_with_mate_history), so a plain list
-            # would trace each entry as its own scalar leaf and risk a
-            # retrace every step instead of reusing one compiled executable.
-            window = jnp.asarray([-10] * (K - len(history)) + history, dtype=jnp.int32)
+            history_act = mate_a[-K:]
+            # -10: the same sentinel training's `_shift_right` uses
+            # (offline/omis.py) -- a real action id would read as "the
+            # opponent played that action". A proper fixed-shape jnp array,
+            # not a raw Python list: this is a jitted call
+            # (get_action_with_mate_history), so a plain list would trace
+            # each entry as its own scalar leaf and risk a retrace every step
+            # instead of reusing one compiled executable.
+            act_window = jnp.asarray([-10] * (K - len(history_act)) + history_act, dtype=jnp.int32)
             act_0, hstate_0 = ego_agent.get_action_with_mate_history(
                 params=params_ep,
                 obs=obs["agent_0"].reshape(1, 1, -1),
@@ -176,7 +177,7 @@ def rollout_one_episode(
                 avail_actions=avail_0,
                 hstate=hstate_0,
                 rng=a0,
-                mate_action_window=window,
+                mate_action_window=act_window,
                 reward=reward["agent_0"].reshape(1, 1, -1),
             )
         else:

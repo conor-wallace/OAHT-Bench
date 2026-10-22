@@ -10,20 +10,21 @@ independently from the same tokens and assert they agree.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import jax
 import jax.numpy as jnp
 import numpy as np
-import optax
 import pytest
 
-from oaht_bench.dataset.dataset import TeammateIndex, _build_windows
-from oaht_bench.dataset.sampler import sample_stage1
 from oaht_bench.models.masking import mask_logits
 from oaht_bench.models.tao_agent import AncillaryActionDecoder, OpponentPolicyEncoder
 from oaht_bench.offline import embedding_loss, supervised_contrastive
+from oaht_bench.offline.tao import _ANCHOR_FIELDS, _CROSS_FIELDS, _anchor_and_cross
+from oaht_bench.offline.utils import safe_cross_entropy
 
 
-def _windows(n_ep=8, T=16, obs_dim=5, teammates=(0, 1, 2, 3), seed=0):
+def _dataset(n_ep=8, T=16, obs_dim=5, teammates=(0, 1, 2, 3), seed=0):
     from oaht_bench.dataset.schema import Episode, EpisodeBatch
 
     rng = np.random.default_rng(seed)
@@ -39,11 +40,31 @@ def _windows(n_ep=8, T=16, obs_dim=5, teammates=(0, 1, 2, 3), seed=0):
         )
         for _ in range(n_ep)
     ]
-    return _build_windows(
-        EpisodeBatch(episodes=episodes, member_ids=member_ids, ego_index=0, meta={}),
-        context_length=8,
-        stride=4,
+    batch = EpisodeBatch(episodes=episodes, member_ids=member_ids, ego_index=0, meta={})
+    return SimpleNamespace(batch=batch, mate=1)
+
+
+def _stage1_batch(ds, *, teammates_per_batch=3, windows_per_teammate=3, h=8, seed=0):
+    """The same teammate-first contrastive batch ``TaoTrainer._stage1_batch``
+    builds, standalone -- a real stage-1 batch through ``_anchor_and_cross``."""
+    rng = np.random.default_rng(seed)
+    teammate_ids = np.unique(ds.batch.member_ids[:, ds.mate])
+    chosen = rng.choice(
+        teammate_ids, size=min(teammates_per_batch, len(teammate_ids)), replace=False
     )
+
+    anchors, crosses, teammate_col = [], [], []
+    for teammate_id in chosen:
+        for _ in range(windows_per_teammate):
+            anchor, cross = _anchor_and_cross(ds, int(teammate_id), h, rng)
+            anchors.append(anchor)
+            crosses.append(cross)
+            teammate_col.append(int(teammate_id))
+
+    batch = {k: np.stack([a[k] for a in anchors]) for k in _ANCHOR_FIELDS}
+    batch.update({f"cross_{k}": np.stack([c[k] for c in crosses]) for k in _CROSS_FIELDS})
+    batch["teammate_id"] = np.asarray(teammate_col, dtype=np.int32)
+    return {k: jnp.asarray(v) for k, v in batch.items()}
 
 
 def test_supervised_contrastive_matches_the_reference_aggregation():
@@ -79,14 +100,11 @@ def test_supervised_contrastive_drops_rows_with_no_positive():
 
 
 def _stage1_params_and_batch():
-    """A real stage-1 batch (through the sampler) and freshly-initialised
-    encoder/decoder params, the way ``TaoTrainer.train_stage_1`` builds them."""
-    w = _windows()
-    idx = TeammateIndex.build(w)
-    raw = sample_stage1(
-        w, idx, np.random.default_rng(0), teammates_per_batch=3, windows_per_teammate=3
-    )
-    batch = {k: jnp.asarray(v) for k, v in raw.items()}
+    """A real stage-1 batch (through ``_anchor_and_cross``) and
+    freshly-initialised encoder/decoder params, the way
+    ``TaoTrainer.train_stage_1`` builds them."""
+    ds = _dataset()
+    batch = _stage1_batch(ds, teammates_per_batch=3, windows_per_teammate=3)
 
     rng = jax.random.PRNGKey(0)
     enc = OpponentPolicyEncoder(action_dim=6)
@@ -145,7 +163,7 @@ def test_embedding_loss_generative_term_scores_a_different_episode_under_z_bar()
         dec.apply(params["decoder"], batch["cross_mate_obs"], z_bar), batch["cross_mate_avail"]
     )
     cross_mask = batch["cross_mask"].astype(jnp.float32)
-    gen = optax.softmax_cross_entropy_with_integer_labels(logits, batch["cross_mate_actions"])
+    gen = safe_cross_entropy(logits, batch["cross_mate_actions"], cross_mask)
     gen = (gen * cross_mask).sum() / jnp.maximum(cross_mask.sum(), 1.0)
 
     assert float(aux["generative"]) == pytest.approx(float(gen), rel=1e-5)
@@ -153,10 +171,11 @@ def test_embedding_loss_generative_term_scores_a_different_episode_under_z_bar()
 
 def test_ancillary_decoder_conditions_on_the_embedding():
     """The decoder's input is (mate_obs, z_bar) -- Eq. 2's pi_phi_d(a | o, z_bar)."""
-    w = _windows()
+    n_rows, T, obs_dim = 8, 16, 5
+    mate_obs = jnp.asarray(np.random.default_rng(0).normal(size=(n_rows, T, obs_dim)))
     rng = jax.random.PRNGKey(0)
     dec = AncillaryActionDecoder(action_dim=6)
-    z = jnp.zeros((len(w), 32))
-    p = dec.init(rng, jnp.asarray(w.mate_obs), z)
-    out = dec.apply(p, jnp.asarray(w.mate_obs), z)
-    assert out.shape == (len(w), w.context_length, 6)
+    z = jnp.zeros((n_rows, 32))
+    p = dec.init(rng, mate_obs, z)
+    out = dec.apply(p, mate_obs, z)
+    assert out.shape == (n_rows, T, 6)

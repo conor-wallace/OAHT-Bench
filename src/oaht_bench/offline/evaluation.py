@@ -61,11 +61,11 @@ def load_trained_agent(
     ``dataset_path`` overrides the config's recorded path, for a checkpoint moved
     between machines whose ``job.json`` no longer resolves where it was trained.
 
-    ``dataset_cache``, keyed by ``(path, context_length, stride, normalize)`` --
-    everything that actually determines the windowed result -- lets several
-    checkpoints trained on the same dataset (the common case: one dataset, one
-    baseline per architecture) share ONE load instead of re-reading and
-    re-windowing the same vault once per checkpoint.
+    ``dataset_cache``, keyed by ``(path, normalize)`` -- everything that
+    actually determines the loaded result -- lets several checkpoints
+    trained on the same dataset (the common case: one dataset, one baseline
+    per architecture) share ONE load instead of re-reading the same vault
+    once per checkpoint.
 
     The agent's conditioning target is per-teammate now (see
     :func:`~oaht_bench.offline.evaluate.resolve_target_returns`), so it can't be
@@ -82,16 +82,11 @@ def load_trained_agent(
 
     job = load_job(run_dir / "job.json")
     cfg = job.offline
-    key = (
-        dataset_path or job.dataset_path,
-        cfg.context_length,
-        cfg.stride,
-        cfg.normalize_observations,
-    )
+    key = (dataset_path or job.dataset_path, cfg.normalize_observations)
     if dataset_cache is not None and key in dataset_cache:
         dataset = dataset_cache[key]
     else:
-        dataset = Dataset(key[0], context_length=key[1], stride=key[2], normalize=key[3])
+        dataset = Dataset(key[0], normalize=key[1])
         if dataset_cache is not None:
             dataset_cache[key] = dataset
     with (run_dir / "params.pkl").open("rb") as fh:
@@ -100,13 +95,13 @@ def load_trained_agent(
 
     resolved = _resolve_dims(cfg, dataset.obs_dim, dataset.action_dim)
     placeholder = dataset_target_return(dataset.batch)
-    if dataset.windows.norm is not None:
-        placeholder = dataset.windows.norm.apply_rtg(placeholder)
+    if dataset.norm is not None:
+        placeholder = dataset.norm.apply_rtg(placeholder)
     agent = agent_classes()[resolved.network.architecture](
         resolved,
         context_length=cfg.context_length,
         target_return=placeholder,
-        normalization=dataset.windows.norm,
+        normalization=dataset.norm,
     )
     agent.build_model()
     return job, dataset, agent, all_params
@@ -277,7 +272,7 @@ def _resolve_unseen_targets(unseen_meta, unseen_pool, *, norm, dataset_path, dat
 
     key = (dataset_path, "unseen_fallback")
     if key not in dataset_cache:
-        dataset_cache[key] = Dataset(dataset_path, context_length=1, stride=1, normalize=False)
+        dataset_cache[key] = Dataset(dataset_path, normalize=False)
     return resolve_target_returns(
         unseen_meta, unseen_pool, norm=norm, fallback_batch=dataset_cache[key].batch
     )
@@ -327,12 +322,12 @@ def run(job) -> Path:
         # normalised by *this checkpoint's* own training scale regardless of
         # which dataset a teammate's target was read from.
         seen_targets = resolve_target_returns(
-            dataset.batch.meta, seen_pool, norm=dataset.windows.norm, fallback_batch=dataset.batch
+            dataset.batch.meta, seen_pool, norm=dataset.norm, fallback_batch=dataset.batch
         )
         unseen_targets = _resolve_unseen_targets(
             unseen_meta,
             unseen_pool,
-            norm=dataset.windows.norm,
+            norm=dataset.norm,
             dataset_path=job.dataset_path,
             dataset_cache=dataset_cache,
         )

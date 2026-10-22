@@ -1,9 +1,10 @@
 """The OPE (M_theta_e, Sec 3.1) -- token fusion, timestep convention, AP pooling.
 
-Pins the architecture details that are in the reference implementation but not
-the paper text: the (a_{t-1}, r_t, o_t) fusion via *next*-observations rather
-than a shifted action/reward stream, left-padding with t=0 reserved for
-padding, and AP's unmasked mean.
+Left-padding conventions and the ``next_obs`` fusion shift are windowing
+properties, now pinned directly in ``tests/unit/dataset/test_windowing.py``
+(``window_slice``'s own tests) rather than here -- this file keeps only the
+encoder architecture properties: AP pools over real timesteps only, and a
+fully-masked row (an empty Opponent Context Window slot) stays finite.
 """
 
 from __future__ import annotations
@@ -12,87 +13,42 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from oaht_bench.dataset.dataset import _build_windows
 from oaht_bench.models.tao_agent import OpponentPolicyEncoder
 
+_T = 6
 
-def _windows(n_ep=4, T=12, obs_dim=5, n_agents=2, seed=0):
-    from oaht_bench.dataset.schema import Episode, EpisodeBatch
 
+def _batch(n_rows=4, T=_T, obs_dim=5, seed=0):
+    """Ragged: per-row valid length varies via ``mask``/``timesteps``, the
+    same left-padding convention ``window_slice`` uses."""
     rng = np.random.default_rng(seed)
-    # Ragged: episode lengths vary (all >= the context length of 6).
-    lengths = [T - (i % 4) for i in range(n_ep)]
-    episodes = [
-        Episode(
-            obs=rng.normal(size=(n_agents, L, obs_dim)).astype(np.float32),
-            actions=rng.integers(0, 6, size=(n_agents, L)),
-            rewards=rng.normal(size=(n_agents, L)).astype(np.float32),
-            avail_actions=np.ones((n_agents, L, 6), dtype=np.float32),
-            dones=np.zeros(L, dtype=bool),
-        )
-        for L in lengths
-    ]
-    return _build_windows(
-        EpisodeBatch(
-            episodes=episodes,
-            member_ids=np.array([[0, i % 2] for i in range(n_ep)]),
-            ego_index=0,
-            meta={},
-        ),
-        context_length=6,
-        stride=3,
-    )
+    lengths = [T - (i % 4) for i in range(n_rows)]
+    mask = np.zeros((n_rows, T), dtype=bool)
+    timesteps = np.zeros((n_rows, T), dtype=np.int32)
+    for i, length in enumerate(lengths):
+        mask[i, T - length :] = True
+        timesteps[i, T - length :] = np.arange(1, length + 1)
+    return {
+        "mate_next_obs": jnp.asarray(rng.normal(size=(n_rows, T, obs_dim)).astype(np.float32)),
+        "mate_actions": jnp.asarray(rng.integers(0, 6, size=(n_rows, T))),
+        "mate_rewards": jnp.asarray(rng.normal(size=(n_rows, T)).astype(np.float32)),
+        "mask": jnp.asarray(mask),
+        "timesteps": jnp.asarray(timesteps),
+    }
 
 
 def test_tao_encoder_pools_over_real_timesteps_only():
-    w = _windows()
+    b = _batch()
     rng = jax.random.PRNGKey(0)
     enc = OpponentPolicyEncoder(action_dim=6)
-    args = (jnp.asarray(w.mate_next_obs), jnp.asarray(w.mate_actions), jnp.asarray(w.mate_rewards))
-    kw = dict(mask=jnp.asarray(w.mask), timesteps=jnp.asarray(w.timesteps))
+    args = (b["mate_next_obs"], b["mate_actions"], b["mate_rewards"])
+    kw = dict(mask=b["mask"], timesteps=b["timesteps"])
     p = enc.init(rng, *args, **kw)
     tok = enc.apply(p, *args, **kw)
-    assert tok.shape == (len(w), w.context_length, 32)
+    assert tok.shape == (b["mate_next_obs"].shape[0], _T, 32)
     pooled = OpponentPolicyEncoder.pool(tok)
-    assert pooled.shape == (len(w), 32)
+    assert pooled.shape == (b["mate_next_obs"].shape[0], 32)
     assert np.all(np.isfinite(np.asarray(pooled)))
-
-
-def test_windows_are_left_padded_with_the_reference_conventions():
-    """Decision Transformer convention the TAO reference inherits.
-
-    Left padding means "now" is always the last position, so a short window and
-    a full one agree on where the present is. Timesteps are 1-indexed with 0
-    reserved for padding, and actions pad with -10 -- an out-of-range sentinel
-    whose one-hot is all zeros, so padding cannot be read as action 0.
-    """
-    w = _windows()
-    short = np.flatnonzero(~w.mask.all(axis=1))
-    if short.size:
-        i = int(short[0])
-        # padding at the front, real steps at the back
-        first_real = int(np.argmax(w.mask[i]))
-        assert w.mask[i][first_real:].all()
-        assert not w.mask[i][:first_real].any()
-        assert (w.timesteps[i][:first_real] == 0).all()
-        assert (w.ego_actions[i][:first_real] == -10).all()
-    assert w.timesteps[w.mask].min() >= 1
-
-
-def test_encoder_consumes_next_observations():
-    """TAO fuses (a_t, r_t, o_{t+1}); the reference does this with next_obs.
-
-    Shifting the action and reward streams instead gets the same pairing but
-    labels each token with a different timestep, and the encoder's positional
-    encoding is asymmetric (t for obs/reward, t-1 for the action).
-    """
-    w = _windows()
-    assert w.mate_next_obs.shape == w.mate_obs.shape
-    # next_obs at t equals obs at t+1 wherever both steps are real
-    for i in range(min(3, len(w))):
-        real = np.flatnonzero(w.mask[i])
-        for t in real[:-1]:
-            assert np.allclose(w.mate_next_obs[i, t], w.mate_obs[i, t + 1])
 
 
 def test_pool_is_finite_with_a_fully_masked_row_in_the_batch():

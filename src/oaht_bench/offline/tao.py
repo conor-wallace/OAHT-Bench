@@ -35,12 +35,91 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
-import optax
 
-from oaht_bench.dataset.sampler import sample_stage1, sample_stage2
+from oaht_bench.dataset.windowing import enumerate_windows, teammate_episode_ids, window_slice
 from oaht_bench.models.tao_agent import OpponentPolicyEncoder, TaoAgent
 from oaht_bench.offline.registry import BaseAhtTrainer
-from oaht_bench.offline.utils import mask_logits, to_jax
+from oaht_bench.offline.utils import mask_logits, normalize_window_batch, safe_cross_entropy, to_jax
+
+#: Stage 1's anchor trajectory -- what the encoder reads.
+_ANCHOR_FIELDS = ("mate_next_obs", "mate_actions", "mate_rewards", "mask", "timesteps")
+#: Stage 1's cross trajectory -- read by observation, scored by action
+#: (the generative term's whole point: predict from a different episode).
+_CROSS_FIELDS = ("mate_obs", "mate_actions", "mate_avail", "mask")
+#: Stage 2's decoder window -- TAO's policy reads only the ego stream; its
+#: opponent conditioning is entirely the cross-attended ``context_*`` fields.
+_DECODER_FIELDS = ("ego_obs", "ego_actions", "ego_rtg", "ego_avail", "timesteps", "mask")
+#: GetOffD's per-fragment fields -- what the encoder reads, same as the anchor.
+_CONTEXT_FIELDS = _ANCHOR_FIELDS
+
+
+def _random_t(batch, episode_id: int, rng: np.random.Generator) -> int:
+    """A uniform random window end-position within ``episode_id`` -- the
+    reference's own "random start offsets" (unlike the ego-history baselines'
+    ``stride``-enumerated pool, there is no reproducibility argument for a
+    grid here: these windows are keyed by *teammate*, not drawn from "any
+    window in the dataset", so a flat stride pool does not apply)."""
+    length = int(batch.episode_lengths()[episode_id])
+    return int(rng.integers(1, length + 1))
+
+
+def _anchor_and_cross(dataset, teammate_id: int, h: int, rng: np.random.Generator):
+    """Stage 1's contrastive pair (Eq. 2): an anchor window of
+    ``teammate_id``'s play, and a window of the *same* teammate from a
+    *different* episode -- the cross trajectory the generative term is scored
+    against. Falls back to the anchor's own episode when the teammate appears
+    in only one (common with 1-4 episodes per teammate on these datasets).
+    """
+    episode_ids = teammate_episode_ids(dataset.batch, dataset.mate, teammate_id)
+    anchor_episode_id = int(rng.choice(episode_ids))
+    anchor = window_slice(
+        dataset.batch,
+        anchor_episode_id,
+        _random_t(dataset.batch, anchor_episode_id, rng),
+        h,
+        _ANCHOR_FIELDS,
+        mate=dataset.mate,
+    )
+    other_episode_ids = episode_ids[episode_ids != anchor_episode_id]
+    pool = other_episode_ids if other_episode_ids.size else episode_ids
+    cross_episode_id = int(rng.choice(pool))
+    cross = window_slice(
+        dataset.batch,
+        cross_episode_id,
+        _random_t(dataset.batch, cross_episode_id, rng),
+        h,
+        _CROSS_FIELDS,
+        mate=dataset.mate,
+    )
+    return anchor, cross
+
+
+def _get_off_d_context(
+    dataset, teammate_id: int, exclude_episode_id: int, h: int, c: int, rng: np.random.Generator
+):
+    """GetOffD (stage 2's cross-attention context): ``c`` fragments of the
+    *same* teammate, each a full ``h``-length window from a *different*
+    episode than the decoder's own, concatenated along time into one context
+    of length ``c * h``. Unlike D_epi (``offline/omis.py``), TAO has no
+    independent fragment-length hyperparameter -- Appendix F's context is
+    ``C`` whole windows, not sub-windows of some other size.
+    """
+    episode_ids = teammate_episode_ids(dataset.batch, dataset.mate, teammate_id)
+    other_episode_ids = episode_ids[episode_ids != exclude_episode_id]
+    pool = other_episode_ids if other_episode_ids.size else episode_ids
+    chosen_episode_ids = rng.choice(pool, size=c, replace=pool.size < c)
+    fragments = [
+        window_slice(
+            dataset.batch,
+            int(episode_id),
+            _random_t(dataset.batch, int(episode_id), rng),
+            h,
+            _CONTEXT_FIELDS,
+            mate=dataset.mate,
+        )
+        for episode_id in chosen_episode_ids
+    ]
+    return {k: np.concatenate([f[k] for f in fragments]) for k in _CONTEXT_FIELDS}
 
 
 def _masked_accuracy(logits, labels, mask) -> jnp.ndarray:
@@ -130,7 +209,7 @@ def embedding_loss(
         batch["cross_mate_avail"],
     )
     cross_mask = batch["cross_mask"].astype(jnp.float32)
-    gen = optax.softmax_cross_entropy_with_integer_labels(logits, batch["cross_mate_actions"])
+    gen = safe_cross_entropy(logits, batch["cross_mate_actions"], cross_mask)
     gen = (gen * cross_mask).sum() / jnp.maximum(cross_mask.sum(), 1.0)
 
     # Discriminative: the same z_bar, contrasted by teammate label.
@@ -194,7 +273,7 @@ def tao_policy_loss(
             one call site serves both and the choice stays visible.
     """
     # GetOffD: C fragments of the same teammate, concatenated, sampled
-    # independently of the decoder window (see oaht_bench.dataset.sampler). The
+    # independently of the decoder window (see _get_off_d_context). The
     # context is therefore C*T long while the decoder window is T -- which is
     # fine, because it enters as cross-attention keys rather than being
     # concatenated to anything.
@@ -227,7 +306,7 @@ def tao_policy_loss(
         batch["ego_avail"],
     )
     mask = batch["mask"].astype(jnp.float32)
-    bc = optax.softmax_cross_entropy_with_integer_labels(logits, batch["ego_actions"])
+    bc = safe_cross_entropy(logits, batch["ego_actions"], mask)
     acc = _masked_accuracy(logits, batch["ego_actions"], mask)
     bc = (bc * mask).sum() / jnp.maximum(mask.sum(), 1.0)
     return bc, {"loss": bc, "bc": bc, "action_accuracy": acc}
@@ -238,10 +317,10 @@ class TaoTrainer(BaseAhtTrainer):
 
     Unlike the ego-history baselines, TAO's encoder reads the *teammate* stream
     and its stages use structured batches: stage 1 draws contrastive batches
-    (positives per teammate) via :func:`sample_stage1`, stage 2 draws windows with
-    a GetOffD context via :func:`sample_stage2`. Stage-2 parameters carry the
-    encoder (from stage 1, frozen or fine-tuned per ``freeze_encoder``) alongside
-    the policy.
+    (positives per teammate) via :func:`_anchor_and_cross`, stage 2 draws windows
+    with a GetOffD context via :func:`_get_off_d_context`. Stage-2 parameters
+    carry the encoder (from stage 1, frozen or fine-tuned per ``freeze_encoder``)
+    alongside the policy.
 
     ``act`` needs the deployment context, which the runner cannot supply at
     evaluation time (the policy is rebuilt without ``prepare``). So stage 2 seeds
@@ -259,6 +338,15 @@ class TaoTrainer(BaseAhtTrainer):
         self.agent = TaoAgent(self.config)
         self.agent.build_model()
 
+    def prepare(self, dataset, logger, *, rng, np_rng, num_seeds: int = 1) -> None:
+        super().prepare(dataset, logger, rng=rng, np_rng=np_rng, num_seeds=num_seeds)
+        # Stage 2's decoder windows: "any window in the dataset", so this is
+        # the same stride-enumerated pool the ego-history baselines draw from
+        # (and what _deployment_context_one seeds the offline C=all OCW from).
+        self._pool = enumerate_windows(
+            dataset.batch, h=self.config.context_length, stride=self.config.stride
+        )
+
     def _stage1_batch(self, _step):
         # Factor the single ``batch_size`` into TAO's teammate-first contrastive
         # batch: use as many teammates as possible (more contrastive negatives),
@@ -267,29 +355,60 @@ class TaoTrainer(BaseAhtTrainer):
         # on a small roster: contrastive learning saturates on positives, so without
         # it a large batch_size balloons stage 1 (e.g. 12 teammates x 21 windows =
         # 252) for no benefit. With it, stage 1 is min(batch_size, n_teammates * 8).
-        n_teammates = len(self.dataset.index.teammates)
-        tpb = max(1, min(n_teammates, self.config.batch_size // 2))
+        h = self.config.context_length
+        teammate_ids = np.unique(self.dataset.batch.member_ids[:, self.dataset.mate])
+        tpb = max(1, min(len(teammate_ids), self.config.batch_size // 2))
         wpt = min(max(2, round(self.config.batch_size / tpb)), 8)
-        return to_jax(
-            sample_stage1(
-                self.dataset.windows,
-                self.dataset.index,
-                self.np_rng,
-                teammates_per_batch=tpb,
-                windows_per_teammate=wpt,
-            )
-        )
+        chosen = self.np_rng.choice(teammate_ids, size=tpb, replace=False)
+
+        anchors, crosses, teammate_col = [], [], []
+        for teammate_id in chosen:
+            for _ in range(wpt):
+                anchor, cross = _anchor_and_cross(self.dataset, int(teammate_id), h, self.np_rng)
+                anchors.append(anchor)
+                crosses.append(cross)
+                teammate_col.append(int(teammate_id))
+
+        batch = {k: np.stack([a[k] for a in anchors]) for k in _ANCHOR_FIELDS}
+        batch.update({f"cross_{k}": np.stack([c[k] for c in crosses]) for k in _CROSS_FIELDS})
+        batch["teammate_id"] = np.asarray(teammate_col, dtype=np.int32)
+        return to_jax(normalize_window_batch(batch, self.dataset.norm))
 
     def _stage2_batch(self, _step):
-        return to_jax(
-            sample_stage2(
-                self.dataset.windows,
-                self.dataset.index,
-                self.np_rng,
-                batch_size=self.config.batch_size,
-                context_trajectories=self.config.context_trajectories,
-            )
+        h = self.config.context_length
+        c = self.config.context_trajectories
+        episode_ids, ts = self._pool
+        batch_size = self.config.batch_size
+        rows = self.np_rng.choice(
+            len(episode_ids), size=batch_size, replace=len(episode_ids) < batch_size
         )
+
+        decoder = [
+            window_slice(
+                self.dataset.batch,
+                int(episode_ids[i]),
+                int(ts[i]),
+                h,
+                _DECODER_FIELDS,
+                mate=self.dataset.mate,
+            )
+            for i in rows
+        ]
+        teammate_ids = [
+            int(self.dataset.batch.member_ids[episode_ids[i], self.dataset.mate]) for i in rows
+        ]
+        contexts = [
+            _get_off_d_context(
+                self.dataset, teammate_ids[j], int(episode_ids[rows[j]]), h, c, self.np_rng
+            )
+            for j in range(len(rows))
+        ]
+
+        batch = {k: np.stack([d[k] for d in decoder]) for k in _DECODER_FIELDS}
+        batch["teammate_id"] = np.asarray(teammate_ids, dtype=np.int32)
+        for key in _CONTEXT_FIELDS:
+            batch[f"context_{key}"] = np.stack([ctx[key] for ctx in contexts])
+        return to_jax(normalize_window_batch(batch, self.dataset.norm))
 
     def train_stage_1(self):
         init_batch = self._stage1_batch(0)
@@ -409,27 +528,42 @@ class TaoTrainer(BaseAhtTrainer):
         return self._deployment_context_one(encoder_params)
 
     def _deployment_context_one(self, encoder_params):
-        """The C-trajectory Opponent Context Window, encoded from the dataset."""
+        """The C-trajectory Opponent Context Window, encoded from the dataset.
+
+        Reads and encodes ONLY the first ``c`` windows of the training pool
+        (mirroring the old ``tokens[:c]``) -- the encoder embeds each
+        trajectory independently, so this gives byte-identical tokens to
+        encoding the whole pool and slicing afterward, without materializing
+        it.
+        """
         c = self.config.context_trajectories
         hidden = self.config.network.hidden_dim
-        # Read and encode ONLY the c windows this keeps. The window fields are
-        # lazy/streaming, so materializing the whole teammate stream here (the
-        # earlier ``jnp.asarray(windows.mate_next_obs)``) pulled the entire dataset
-        # into memory just to slice ``tokens[:c]`` -- tens of GB on a large dataset,
-        # OOM-killing the run right after stage 2. The encoder embeds each trajectory
-        # independently, so encoding ``windows[:c]`` gives byte-identical tokens.
-        # ``_LazyField`` indexes by integer array, not slices, hence ``np.arange``.
-        w = self.dataset.windows
-        idx = np.arange(min(c, len(w)))  # min mirrors the old tokens[:c] when windows < c
+        h = self.config.context_length
+        episode_ids, ts = self._pool
+        n = min(c, len(episode_ids))
+        windows = [
+            window_slice(
+                self.dataset.batch,
+                int(episode_ids[i]),
+                int(ts[i]),
+                h,
+                _CONTEXT_FIELDS,
+                mate=self.dataset.mate,
+            )
+            for i in range(n)
+        ]
+        batch = normalize_window_batch(
+            {k: np.stack([w[k] for w in windows]) for k in _CONTEXT_FIELDS}, self.dataset.norm
+        )
         tokens = self.agent.encoder.apply(
             encoder_params,
-            jnp.asarray(w.mate_next_obs[idx]),
-            jnp.asarray(w.mate_actions[idx]),
-            jnp.asarray(w.mate_rewards[idx]),
-            mask=jnp.asarray(w.mask[idx]),
-            timesteps=jnp.asarray(w.timesteps[idx]),
+            jnp.asarray(batch["mate_next_obs"]),
+            jnp.asarray(batch["mate_actions"]),
+            jnp.asarray(batch["mate_rewards"]),
+            mask=jnp.asarray(batch["mask"]),
+            timesteps=jnp.asarray(batch["timesteps"]),
             train=False,
         )
         context = tokens.reshape(1, -1, hidden)
-        context_mask = jnp.asarray(w.mask[idx]).reshape(1, -1)
+        context_mask = jnp.asarray(batch["mask"]).reshape(1, -1)
         return context, context_mask

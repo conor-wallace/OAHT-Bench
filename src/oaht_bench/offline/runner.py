@@ -99,18 +99,14 @@ def run(job: TrainingJob) -> Path:
     save_job(job, run_dir / "job.json", minimal=False)
 
     cfg = job.offline
-    dataset = Dataset(
-        job.dataset_path,
-        context_length=cfg.context_length,
-        stride=cfg.stride,
-        normalize=cfg.normalize_observations,
-    )
+    dataset = Dataset(job.dataset_path, normalize=cfg.normalize_observations)
     action_dim = dataset.action_dim
+    num_teammates = len(np.unique(dataset.batch.member_ids[:, dataset.mate]))
     log.info(
-        "dataset %s -> %d windows, %d teammates, obs_dim %d, action_dim %d",
+        "dataset %s -> %d episodes, %d teammates, obs_dim %d, action_dim %d",
         job.dataset_path,
-        len(dataset.windows),
-        len(dataset.index.teammates),
+        dataset.batch.num_episodes,
+        num_teammates,
         dataset.obs_dim,
         action_dim,
     )
@@ -167,7 +163,7 @@ def run(job: TrainingJob) -> Path:
                 eval_scores = _evaluate(
                     job,
                     dataset.batch,
-                    dataset.windows,
+                    dataset,
                     stage1_params,
                     stage2_params,
                     action_dim,
@@ -179,8 +175,8 @@ def run(job: TrainingJob) -> Path:
                 json.dumps(
                     {
                         "baseline": job.baseline,
-                        "windows": len(dataset.windows),
-                        "teammates": len(dataset.index.teammates),
+                        "episodes": dataset.batch.num_episodes,
+                        "teammates": num_teammates,
                         "obs_dim": dataset.obs_dim,
                         "action_dim": action_dim,
                         "stage1_steps": cfg.stage1_steps,
@@ -249,7 +245,7 @@ def _teammate_policies(batch, env, which: str = "held_out") -> list:
     ]
 
 
-def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, action_dim, logger):
+def _evaluate(job: TrainingJob, batch, dataset, stage1_params, stage2_params, action_dim, logger):
     """Roll the trained policy against its teammates and report per-teammate return.
 
     Against the **held-out** test teammates when the dataset carries a train/test
@@ -274,7 +270,7 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
         )
     train_teammates = _teammate_policies(batch, env, which="train")
 
-    resolved = _resolve_dims(cfg, windows.obs_dim, action_dim)
+    resolved = _resolve_dims(cfg, dataset.obs_dim, action_dim)
     all_params = {"stage1": stage1_params, "stage2": stage2_params}
     # Per teammate, not one dataset-wide number: the crossplay matrix's column
     # max when this dataset was collected in pooled mode (TAO's own OPPO_TARGET
@@ -282,7 +278,7 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
     target_returns = resolve_target_returns(
         batch.meta,
         heldout_teammates + train_teammates,
-        norm=windows.norm,
+        norm=dataset.norm,
         fallback_batch=batch,
     )
 
@@ -295,7 +291,7 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
         resolved,
         context_length=cfg.context_length,
         target_return=float(np.mean(list(target_returns.values()))),
-        normalization=windows.norm,
+        normalization=dataset.norm,
     )
     agent.build_model()
 
@@ -334,7 +330,7 @@ def _evaluate(job: TrainingJob, batch, windows, stage1_params, stage2_params, ac
                 max_episode_steps=job.env.rollout_length,
                 num_episodes=job.offline.eval_episodes,
                 ocw_size=job.offline.context_trajectories,
-                obs_dim=windows.obs_dim,
+                obs_dim=dataset.obs_dim,
                 rng=jax.random.PRNGKey(rng_base + s),
                 target_returns=target_returns,
             )

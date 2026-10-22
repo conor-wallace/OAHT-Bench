@@ -133,7 +133,6 @@ def test_bc_filters_to_the_top_quantile_of_episodes_by_return(tmp_path):
     windows, and filtering is by episode, not by window, so a long episode's
     overlapping fragments cannot dominate the quantile.
     """
-    from oaht_bench.dataset.dataset import _build_windows
     from oaht_bench.offline.bc import _filter_by_return
 
     n_ep, T, obs_dim = 4, 6, 3
@@ -156,14 +155,11 @@ def test_bc_filters_to_the_top_quantile_of_episodes_by_return(tmp_path):
         ego_index=0,
         meta={"generator": "test"},
     )
-    windows = _build_windows(batch, context_length=T, stride=T, normalize=False)
-    assert set(np.unique(windows.episode_id)) == {0, 1, 2, 3}
 
-    kept = _filter_by_return(windows, top_return_quantile=0.5)
-    kept_episodes = set(np.unique(windows.episode_id[kept]))
+    kept_episodes = set(_filter_by_return(batch, ego=0, top_return_quantile=0.5).tolist())
     assert kept_episodes == {2, 3}, "top 50% of 4 episodes by return should be episodes 2 and 3"
 
-    assert len(_filter_by_return(windows, top_return_quantile=1.0)) == len(windows)
+    assert len(_filter_by_return(batch, ego=0, top_return_quantile=1.0)) == n_ep
 
 
 def test_runner_refuses_an_unimplemented_baseline(tmp_path):

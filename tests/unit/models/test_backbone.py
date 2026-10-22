@@ -200,7 +200,9 @@ def test_d_step_and_d_epi_change_the_output_and_preserve_shape():
     init_rng = jax.random.PRNGKey(0)
     off_shape = (B, T, hidden)
 
-    # D_step alone.
+    # D_step alone -- the opponent's action history, Eq. 2 (action-only: the
+    # reference's main sequence has no opponent-observation channel, see
+    # backbone.py's own docstring).
     p = model.init(
         init_rng,
         rtg,
@@ -226,7 +228,9 @@ def test_d_step_and_d_epi_change_the_output_and_preserve_shape():
         mate_actions=mate_actions2,
         train=False,
     )
-    assert not np.allclose(out1, out1b, atol=1e-6)
+    assert not np.allclose(out1, out1b, atol=1e-6), (
+        "changing D_step's action history should change output"
+    )
 
     # D_epi alone.
     p2 = model.init(
@@ -297,3 +301,83 @@ def test_d_step_and_d_epi_change_the_output_and_preserve_shape():
         train=False,
     )
     assert out3.shape == off_shape
+
+
+def test_d_step_and_d_epi_use_separate_timestep_tables_and_an_agent_role_embedding():
+    """Two reference-only (not paper-text) details, ported for fidelity to
+    the released model rather than its text: D_epi reads a *separate*
+    timestep embedding table from the main sequence's (``prompt_embed_timestep``
+    vs. ``embed_timestep`` in ``nets.py:34,70``), and every token gets an
+    agent-role bias (``embed_agent_idx``) on top of its modality projection.
+    Both are checked by construction (independent parameter tables / a
+    role table with exactly 2 rows) rather than indirectly through outputs,
+    since an output-level check could pass by coincidence.
+    """
+    B, T, action_dim, obs_dim, hidden, H = 3, 5, 4, 6, 8, 6
+    rng = np.random.default_rng(0)
+    rtg, obs, actions, timesteps, mask = _inputs(B, T, action_dim, obs_dim)
+    mate_actions = jnp.asarray(rng.integers(0, action_dim, size=(B, T)), dtype=jnp.int32)
+    epi_state = jnp.asarray(rng.normal(size=(B, H, obs_dim)), dtype=jnp.float32)
+    epi_mate_actions = jnp.asarray(rng.integers(0, action_dim, size=(B, H)), dtype=jnp.int32)
+    epi_mask = jnp.ones((B, H), dtype=bool)
+
+    model = GPT2Model(
+        action_dim=action_dim, hidden_dim=hidden, ff_dim=16, num_blocks=2, dropout=0.0
+    )
+    params = model.init(
+        jax.random.PRNGKey(0),
+        rtg,
+        obs,
+        actions,
+        timesteps=timesteps,
+        mask=mask,
+        mate_actions=mate_actions,
+        epi_state=epi_state,
+        epi_mate_actions=epi_mate_actions,
+        epi_mask=epi_mask,
+        train=False,
+    )
+    embed_tables = {
+        path: leaf.shape
+        for path, leaf in jax.tree_util.tree_leaves_with_path(params)
+        if "Embed" in jax.tree_util.keystr(path)
+    }
+    sizes = sorted(shape[0] for shape in embed_tables.values())
+    # Two independent (max_timesteps, hidden) tables (main + D_epi) and one
+    # (2, hidden) agent-role table -- not one shared timestep table reused.
+    assert sizes.count(2) == 1, "the agent-role table should have exactly 2 rows"
+    assert sizes.count(model.max_timesteps) == 2, (
+        "D_epi must use its own timestep table, not the main sequence's"
+    )
+
+
+def test_d_step_is_action_only_matching_the_reference_main_stream():
+    """Eq. 2 reads as an opponent (state, action) pair, but the reference's
+    ``GPTModel.forward`` has exactly one observation tensor -- the ego's own,
+    already in the backbone's standard stream -- and loads only opponent
+    *actions* for the main sequence (``OMIS/pretraining/utils.py``'s
+    ``get_batch``/``load_dataset`` never read an opponent observation for the
+    main training batch). So ``mate_actions`` alone must be a fully
+    supported call, not require a state argument alongside it.
+    """
+    B, T, action_dim, obs_dim, hidden = 3, 5, 4, 6, 8
+    rng = np.random.default_rng(0)
+    rtg, obs, actions, timesteps, mask = _inputs(B, T, action_dim, obs_dim)
+    mate_actions = jnp.asarray(rng.integers(0, action_dim, size=(B, T)), dtype=jnp.int32)
+    model = GPT2Model(
+        action_dim=action_dim, hidden_dim=hidden, ff_dim=16, num_blocks=2, dropout=0.0
+    )
+
+    params = model.init(
+        jax.random.PRNGKey(0),
+        rtg,
+        obs,
+        actions,
+        timesteps=timesteps,
+        mask=mask,
+        mate_actions=mate_actions,
+    )
+    out = model.apply(
+        params, rtg, obs, actions, timesteps=timesteps, mask=mask, mate_actions=mate_actions
+    )
+    assert out.shape == (B, T, hidden)

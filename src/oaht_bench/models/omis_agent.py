@@ -22,16 +22,20 @@ All three heads condition on ``D_t^k = (D_epi^k, D_step^k)`` (Sec. 4.1), not
 just the ego's own ``(s_t, a^{1,k,*}_t, G^{1,k,*}_t)`` -- an earlier version
 of this port dropped that conditioning entirely ("ego-stream-only, same
 information set as LIAM/MeLIBA"), which was a real divergence from the
-paper, not a faithful simplification; restored here. ``D_step`` (the current
-episode's own opponent-action history) and ``D_epi`` (``C`` past episodes
-against the same opponent, Appendix C) are the two new, off-by-default
+paper, not a faithful simplification; restored here. ``D_step`` is the
+current episode's own opponent *action* history (Eq. 2 reads as a (state,
+action) pair, but the reference's ``GPTModel.forward`` has no opponent-
+observation channel at all -- see ``backbone.py``'s own docstring for the
+evidence) and ``D_epi`` is ``C`` past episodes against the same opponent,
+carrying real opponent (state, action) pairs since those past episodes have
+no current ego state to reuse (Appendix C). Both are new, off-by-default
 :class:`~oaht_bench.models.backbone.GPT2Model` capabilities -- see that
 module's own docstring for the token-layout design. :meth:`OmisAgent.act`'s
 four new keyword args all default to ``None``, reproducing the old
 ego-stream-only forward exactly when omitted: the generic
 :class:`~oaht_bench.models.return_conditioned_agent.ReturnConditionedAgent`
 deployment loop (shared with LIAM/MeLIBA/BC/TAO) has no field for the
-opponent's own actions and calls ``act`` without them, so the real,
+opponent's own action history and calls ``act`` without them, so the real,
 paper-faithful deployment goes through the bespoke
 :mod:`oaht_bench.offline.incontext_eval` path instead -- the same reason TAO
 needs a bespoke path (the generic loop can't express cross-episode context),
@@ -169,12 +173,12 @@ class OmisAgent(ReturnConditionedAgent):
         """The base ``ReturnConditionedAgent.get_action`` deployment loop (shared
         with LIAM/MeLIBA/BC/TAO) calls this without the four D_step/D_epi kwargs
         below, since ``ContextWindow`` has no field for the opponent's own
-        action -- so they default to ``None``, giving the ego-stream-only
-        forward exactly as before. The paper-faithful deployment, with real
-        within-episode opponent actions and the cross-episode OCW, goes through
-        the bespoke :mod:`oaht_bench.offline.incontext_eval` path instead, the
-        same reason TAO needs a bespoke path rather than a change to the shared
-        base.
+        action history -- so they default to ``None``, giving the ego-stream-only
+        forward exactly as before. The paper-faithful deployment, with the real
+        within-episode opponent action history and the cross-episode OCW,
+        goes through the bespoke :mod:`oaht_bench.offline.incontext_eval` path
+        instead, the same reason TAO needs a bespoke path rather than a change
+        to the shared base.
         """
         embedding = self.backbone.apply(
             params["stage2"]["backbone"],
@@ -232,7 +236,16 @@ class OmisAgent(ReturnConditionedAgent):
 
     @partial(jax.jit, static_argnums=(0,))
     def get_action_with_mate_history(
-        self, params, obs, done, avail_actions, hstate, rng, mate_action_window, *, reward=None
+        self,
+        params,
+        obs,
+        done,
+        avail_actions,
+        hstate,
+        rng,
+        mate_action_window,
+        *,
+        reward=None,
     ):
         """OMIS's own deployment step, with ``D_step`` threaded in.
 
@@ -247,8 +260,9 @@ class OmisAgent(ReturnConditionedAgent):
 
         Duplicates :meth:`ReturnConditionedAgent.get_action`'s window roll / return
         decrement / sampling exactly; the one difference is the extra
-        ``mate_actions=mate_action_window`` passed into :meth:`act`, and that
-        ``D_epi`` (``epi_state``/``epi_mate_actions``/``epi_mask``) is read off
+        ``mate_actions=mate_action_window`` -- D_step's opponent action
+        history, Eq. 2 -- passed into :meth:`act`, and that ``D_epi``
+        (``epi_state``/``epi_mate_actions``/``epi_mask``) is read off
         ``params["stage2"]``, where :mod:`oaht_bench.offline.incontext_eval` bakes
         it once per episode via :meth:`encode_ocw` -- the same place TAO's
         ``context`` lives, because both only change *between* episodes. ``D_step``
@@ -256,14 +270,15 @@ class OmisAgent(ReturnConditionedAgent):
         same way and has to be threaded in here instead of through the shared,
         every-baseline :class:`ContextWindow` (see the module docstring).
 
-        ``mate_action_window`` is ``(K,)`` int32, left-padded like ``hstate.ctx_act``:
-        position ``K-1`` holds the opponent's action one step *before* the current
-        one (``a^{-1}_{t-1}``), matching training's ``_shift_right`` convention
-        (``offline/omis.py``) -- not the opponent's action at the current step, which
-        is unknown until after this one is taken. Built and rolled by the caller
-        (:mod:`oaht_bench.offline.incontext_eval`), which already collects the
-        opponent's observed action stream for the OCW and is in the one position
-        that knows both agents' actions each step.
+        ``mate_action_window`` is ``(K,)`` int32, left-padded like
+        ``hstate.ctx_act``: position ``K-1`` holds the opponent's action one
+        step *before* the current one (``a^{-1}_{t-1}``), matching training's
+        ``_shift_right`` convention (``offline/omis.py``) -- not the
+        opponent's current-step action, which is unknown until after this
+        step is taken. Built and rolled by the caller
+        (:mod:`oaht_bench.offline.incontext_eval`), which already collects
+        the opponent's observed action stream for the OCW and is in the one
+        position that knows both agents' actions each step.
         """
         K = self.context_length
         h = hstate

@@ -16,11 +16,29 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-import optax
 
+from oaht_bench.dataset.windowing import enumerate_windows
 from oaht_bench.models.liam_agent import LiamAgent
 from oaht_bench.offline.registry import BaseAhtTrainer
-from oaht_bench.offline.utils import mask_logits, masked_accuracy, sample_window_batch
+from oaht_bench.offline.utils import (
+    mask_logits,
+    masked_accuracy,
+    safe_cross_entropy,
+    sample_window_batch,
+)
+
+#: LIAM's encoder reads the ego stream and reconstructs the teammate from it.
+_BATCH_FIELDS = (
+    "ego_obs",
+    "ego_actions",
+    "ego_rtg",
+    "mate_obs",
+    "mate_actions",
+    "ego_avail",
+    "mate_avail",
+    "timesteps",
+    "mask",
+)
 
 
 def liam_reconstruction_loss(params, encoder, decoder, batch, *, rngs=None, train: bool = True):
@@ -58,9 +76,7 @@ def liam_reconstruction_loss(params, encoder, decoder, batch, *, rngs=None, trai
     recon_obs = 0.5 * ((batch["mate_obs"] - mate_obs_hat) ** 2).sum(axis=-1)
     recon_obs = (recon_obs * mask).sum() / denom
 
-    recon_act = optax.softmax_cross_entropy_with_integer_labels(
-        mate_act_logits, batch["mate_actions"]
-    )
+    recon_act = safe_cross_entropy(mate_act_logits, batch["mate_actions"], mask)
     recon_act = (recon_act * mask).sum() / denom
 
     # Teammate action-prediction accuracy: does the embedding actually let the
@@ -110,7 +126,7 @@ def liam_policy_loss(
         batch["ego_avail"],
     )
     mask = batch["mask"].astype(jnp.float32)
-    bc = optax.softmax_cross_entropy_with_integer_labels(logits, batch["ego_actions"])
+    bc = safe_cross_entropy(logits, batch["ego_actions"], mask)
     acc = masked_accuracy(logits, batch["ego_actions"], mask)
     bc = (bc * mask).sum() / jnp.maximum(mask.sum(), 1.0)
     return bc, {"loss": bc, "bc": bc, "action_accuracy": acc}
@@ -131,11 +147,24 @@ class LiamTrainer(BaseAhtTrainer):
         self.agent = LiamAgent(self.config)
         self.agent.build_model()
 
+    def prepare(self, dataset, logger, *, rng, np_rng, num_seeds: int = 1) -> None:
+        super().prepare(dataset, logger, rng=rng, np_rng=np_rng, num_seeds=num_seeds)
+        self._pool = enumerate_windows(
+            dataset.batch, h=self.config.context_length, stride=self.config.stride
+        )
+
     def _sample_batch(self, _step):
         """Sample a batch of windows. LIAM's encoder reads the ego stream, so a
         batch is just windows -- no cross trajectory and no contrastive term. The
         step index is ignored; each call draws a fresh minibatch."""
-        return sample_window_batch(self.dataset.windows, self.np_rng, self.config.batch_size)
+        return sample_window_batch(
+            self.dataset,
+            self._pool,
+            self.config.context_length,
+            self.np_rng,
+            self.config.batch_size,
+            _BATCH_FIELDS,
+        )
 
     def train_stage_1(self):
         init_batch = self._sample_batch(0)

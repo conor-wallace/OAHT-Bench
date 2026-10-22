@@ -46,10 +46,11 @@ class BaseAhtTrainer:
     def prepare(self, dataset, logger, *, rng, np_rng, num_seeds: int = 1) -> None:
         """Inject the training data and infrastructure used by both stages.
 
-        Takes the whole :class:`~oaht_bench.dataset.dataset.Dataset`. The stages
-        draw from it directly -- ``self.dataset.windows`` / ``self.dataset.index``
-        fed to the samplers in :mod:`oaht_bench.dataset.sampler` -- rather than the
-        policy holding its own copies.
+        Takes the whole :class:`~oaht_bench.dataset.dataset.Dataset`. Each
+        baseline's own ``_sample_batch``/``_stage1_batch``/``_stage2_batch``
+        draws from ``self.dataset.batch`` directly via
+        :mod:`oaht_bench.dataset.windowing` -- rather than the policy holding
+        its own copies.
 
         ``num_seeds`` trains that many independently-initialised seeds in parallel
         (vmapped over a leading seed axis); the returned parameter trees then carry
@@ -101,6 +102,7 @@ class BaseAhtTrainer:
         self.rng, stage_rng = jax.random.split(self.rng)
 
         if num_seeds > 1:
+
             def seeded_batch(i):
                 per_seed = [batch_fn(i) for _ in range(num_seeds)]
                 return jax.tree.map(lambda *xs: jnp.stack(xs), *per_seed)

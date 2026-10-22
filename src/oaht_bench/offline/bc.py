@@ -36,40 +36,38 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
-import optax
 
-from oaht_bench.dataset.dataset import Windows
+from oaht_bench.dataset.windowing import enumerate_windows
 from oaht_bench.models.bc_agent import BcAgent
 from oaht_bench.offline.registry import BaseAhtTrainer
-from oaht_bench.offline.utils import mask_logits, masked_accuracy, to_jax
+from oaht_bench.offline.utils import (
+    mask_logits,
+    masked_accuracy,
+    safe_cross_entropy,
+    sample_window_batch,
+)
 
-#: BC reads only the ego stream — no teammate fields, unlike
-#: ``utils.WINDOW_BATCH_KEYS``, which every modelling baseline needs.
-_BATCH_KEYS = ("ego_obs", "ego_actions", "ego_rtg", "ego_avail", "timesteps", "mask")
+#: BC reads only the ego stream -- no teammate fields.
+_BATCH_FIELDS = ("ego_obs", "ego_actions", "ego_rtg", "ego_avail", "timesteps", "mask")
 
 
-def _filter_by_return(windows: Windows, top_return_quantile: float) -> np.ndarray:
-    """Indices of windows whose *episode* is in the top ``top_return_quantile``
-    of episodes by ego return.
-
-    Filters by episode, not by window: an episode contributes several
-    overlapping windows (``stride`` < ``context_length``), and ranking windows
-    directly would let a long episode's redundant fragments dominate the
-    quantile computation over a short one.
+def _filter_by_return(batch, ego: int, top_return_quantile: float) -> np.ndarray:
+    """Ids of the episodes in the top ``top_return_quantile`` of episodes by
+    ego return -- NOT windows, episodes: the filter is a data-selection knob
+    on which trajectories exist to be windowed, not on the windows themselves.
     """
+    episode_return = batch.episode_returns()[:, ego]
     if top_return_quantile >= 1.0:
-        return np.arange(len(windows))
-    episode_ids, first = np.unique(windows.episode_id, return_index=True)
-    per_episode_return = windows.episode_return[first]
-    threshold = np.quantile(per_episode_return, 1.0 - top_return_quantile)
-    keep = episode_ids[per_episode_return >= threshold]
-    idx = np.flatnonzero(np.isin(windows.episode_id, keep))
-    if idx.size == 0:
+        return np.arange(len(episode_return))
+    threshold = np.quantile(episode_return, 1.0 - top_return_quantile)
+    keep = np.flatnonzero(episode_return >= threshold)
+    if keep.size == 0:
         raise ValueError(
-            f"top_return_quantile={top_return_quantile} kept 0 windows out of "
-            f"{len(windows)} -- the threshold {threshold} excluded every episode."
+            f"top_return_quantile={top_return_quantile} kept 0 of "
+            f"{len(episode_return)} episodes -- the threshold {threshold} "
+            f"excluded every one."
         )
-    return idx
+    return keep
 
 
 def bc_loss(params, network, batch, *, rngs=None, train: bool = True):
@@ -94,7 +92,7 @@ def bc_loss(params, network, batch, *, rngs=None, train: bool = True):
         batch["ego_avail"],
     )
     mask = batch["mask"].astype(jnp.float32)
-    bc = optax.softmax_cross_entropy_with_integer_labels(logits, batch["ego_actions"])
+    bc = safe_cross_entropy(logits, batch["ego_actions"], mask)
     acc = masked_accuracy(logits, batch["ego_actions"], mask)
     bc = (bc * mask).sum() / jnp.maximum(mask.sum(), 1.0)
     return bc, {"loss": bc, "bc": bc, "action_accuracy": acc}
@@ -112,25 +110,34 @@ class BcTrainer(BaseAhtTrainer):
 
     def prepare(self, dataset, logger, *, rng, np_rng, num_seeds: int = 1) -> None:
         super().prepare(dataset, logger, rng=rng, np_rng=np_rng, num_seeds=num_seeds)
-        self._filtered_idx = _filter_by_return(
-            self.dataset.windows, self.config.network.top_return_quantile
+        keep_episodes = _filter_by_return(
+            dataset.batch, dataset.ego, self.config.network.top_return_quantile
         )
-        if len(self._filtered_idx) < self.config.batch_size:
+        episode_ids, ts = enumerate_windows(
+            dataset.batch, h=self.config.context_length, stride=self.config.stride
+        )
+        keep = np.isin(episode_ids, keep_episodes)
+        self._episode_ids, self._ts = episode_ids[keep], ts[keep]
+        if len(self._episode_ids) < self.config.batch_size:
             raise ValueError(
                 f"top_return_quantile={self.config.network.top_return_quantile} keeps "
-                f"only {len(self._filtered_idx)} windows, fewer than "
+                f"only {len(self._episode_ids)} windows, fewer than "
                 f"batch_size={self.config.batch_size}. Raise the "
                 f"quantile or lower the batch size."
             )
 
     def _sample_batch(self, _step):
-        """Sample only from the return-filtered window set. Each call draws a
+        """Sample only from the return-filtered window pool. Each call draws a
         fresh minibatch, so the step index is ignored, matching every other
         ego-history baseline's sampler."""
-        idx = self.np_rng.choice(
-            self._filtered_idx, size=self.config.batch_size, replace=False
+        return sample_window_batch(
+            self.dataset,
+            (self._episode_ids, self._ts),
+            self.config.context_length,
+            self.np_rng,
+            self.config.batch_size,
+            _BATCH_FIELDS,
         )
-        return to_jax({k: getattr(self.dataset.windows, k)[idx] for k in _BATCH_KEYS})
 
     def train_stage_1(self):
         """No representation to learn — BC's entire point is having none."""

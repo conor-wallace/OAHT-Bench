@@ -25,7 +25,6 @@ import numpy as np
 
 from oaht_bench.configs.job import OfflineTrainingConfig
 from oaht_bench.configs.network import TaoNetworkConfig
-from oaht_bench.dataset.dataset import TeammateIndex, _build_windows
 from oaht_bench.offline.incontext_eval import OpponentContextWindow
 from oaht_bench.offline.tao import TaoTrainer
 
@@ -38,7 +37,7 @@ class _NullLogger:
         pass
 
 
-def _mirror_opponent_windows(obs_dim=3, action_dim=2, T=6, n_ep_per_teammate=6, seed=0):
+def _mirror_opponent_batch(obs_dim=3, action_dim=2, T=6, n_ep_per_teammate=6, seed=0):
     """Two opponents, deterministic and trivially distinguishable *by their
     actions only* -- observations are noise, uncorrelated with teammate
     identity or the ego label, so there is no shortcut around using the
@@ -62,28 +61,27 @@ def _mirror_opponent_windows(obs_dim=3, action_dim=2, T=6, n_ep_per_teammate=6, 
                 )
             )
             member_rows.append([0, teammate])
-    return _build_windows(
-        EpisodeBatch(episodes=episodes, member_ids=np.array(member_rows), ego_index=0, meta={}),
-        context_length=T,
-        stride=T,
-    )
+    return EpisodeBatch(episodes=episodes, member_ids=np.array(member_rows), ego_index=0, meta={})
 
 
-def _train_tiny_tao(w, *, obs_dim, action_dim, hidden_dim=16, context_trajectories=3, steps=300):
+def _train_tiny_tao(
+    batch, *, T, obs_dim, action_dim, hidden_dim=16, context_trajectories=3, steps=300
+):
     cfg = OfflineTrainingConfig(
         network=TaoNetworkConfig(obs_dim=obs_dim, action_dim=action_dim, hidden_dim=hidden_dim),
-        context_length=w.context_length,
+        context_length=T,
         stage1_steps=steps,
         stage2_steps=steps,
         batch_size=8,
         context_trajectories=context_trajectories,
+        stride=T,
         stage1_learning_rate=1e-2,
         stage2_learning_rate=1e-2,
         normalize_observations=False,  # synthetic obs are already unit noise; irrelevant to the label anyway
     )
     trainer = TaoTrainer(cfg)
     trainer.build_model()
-    dataset = SimpleNamespace(windows=w, index=TeammateIndex.build(w))
+    dataset = SimpleNamespace(batch=batch, ego=0, mate=1, norm=None)
     trainer.prepare(
         dataset,
         _NullLogger(),
@@ -120,9 +118,9 @@ def _predicted_action(agent, params, ocw, *, T, obs_dim):
 
 def test_in_context_adaptation_shifts_the_predicted_action_toward_the_observed_opponent():
     obs_dim, action_dim, T, C = 3, 2, 6, 3
-    w = _mirror_opponent_windows(obs_dim=obs_dim, action_dim=action_dim, T=T)
+    batch = _mirror_opponent_batch(obs_dim=obs_dim, action_dim=action_dim, T=T)
     trainer, params = _train_tiny_tao(
-        w, obs_dim=obs_dim, action_dim=action_dim, context_trajectories=C
+        batch, T=T, obs_dim=obs_dim, action_dim=action_dim, context_trajectories=C
     )
     agent = trainer.agent
 
@@ -187,9 +185,9 @@ def test_evaluate_incontext_produces_a_real_per_episode_curve_not_nan():
     action_dim = int(env.action_space(env.agents[1]).n)
     T, C, num_episodes = 6, 3, 4
 
-    w = _mirror_opponent_windows(obs_dim=obs_dim, action_dim=action_dim, T=T)
+    batch = _mirror_opponent_batch(obs_dim=obs_dim, action_dim=action_dim, T=T)
     trainer, params = _train_tiny_tao(
-        w, obs_dim=obs_dim, action_dim=action_dim, context_trajectories=C, steps=150
+        batch, T=T, obs_dim=obs_dim, action_dim=action_dim, context_trajectories=C, steps=150
     )
     # A deployment-configured agent sharing trainer's architecture (trainer.agent,
     # built for training only, has no context_length/normalization for act()).

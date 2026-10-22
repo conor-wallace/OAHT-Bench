@@ -20,7 +20,6 @@ import numpy as np
 
 from oaht_bench.configs.job import OfflineTrainingConfig
 from oaht_bench.configs.network import OmisNetworkConfig
-from oaht_bench.dataset.dataset import TeammateIndex, _build_windows
 from oaht_bench.offline.incontext_eval import OpponentContextWindow
 from oaht_bench.offline.omis import OmisTrainer, _shift_right
 
@@ -33,7 +32,7 @@ class _NullLogger:
         pass
 
 
-def _mirror_opponent_windows(obs_dim=3, action_dim=2, T=6, n_ep_per_teammate=6, seed=0):
+def _mirror_opponent_batch(obs_dim=3, action_dim=2, T=6, n_ep_per_teammate=6, seed=0):
     """Two opponents, deterministic and trivially distinguishable *by their
     actions only* -- observations are noise, uncorrelated with teammate
     identity or the ego label, so there is no shortcut around using the
@@ -61,19 +60,15 @@ def _mirror_opponent_windows(obs_dim=3, action_dim=2, T=6, n_ep_per_teammate=6, 
                 )
             )
             member_rows.append([0, teammate])
-    return _build_windows(
-        EpisodeBatch(episodes=episodes, member_ids=np.array(member_rows), ego_index=0, meta={}),
-        context_length=T,
-        stride=T,
-    )
+    return EpisodeBatch(episodes=episodes, member_ids=np.array(member_rows), ego_index=0, meta={})
 
 
-def _identity_by_observation_windows(
+def _identity_by_observation_batch(
     obs_dim=3, action_dim=2, T=6, n_ep_per_teammate=8, seed=0, signature=3.0
 ):
     """Two opponents distinguishable *only by their observation stream*
-    (``mate_next_obs``, what D_epi's ``epi_state`` reads) -- unlike
-    ``_mirror_opponent_windows``, the opponent's *action* is uniform noise,
+    (``mate_obs``, what D_epi's ``epi_state`` reads) -- unlike
+    ``_mirror_opponent_batch``, the opponent's *action* is uniform noise,
     independent of identity, so D_step (which only ever sees opponent
     actions) cannot shortcut this task the way it can mirror-the-opponent.
     The ego label is tied directly to identity (not to the opponent's
@@ -100,32 +95,32 @@ def _identity_by_observation_windows(
                 )
             )
             member_rows.append([0, teammate])
-    return _build_windows(
-        EpisodeBatch(episodes=episodes, member_ids=np.array(member_rows), ego_index=0, meta={}),
-        context_length=T,
-        stride=T,
-    )
+    return EpisodeBatch(episodes=episodes, member_ids=np.array(member_rows), ego_index=0, meta={})
 
 
 def _train_tiny_omis(
-    w,
+    batch,
     *,
+    T,
     obs_dim,
     action_dim,
     hidden_dim=16,
     context_trajectories=3,
+    epi_length=6,
     steps=300,
     vf_coef=0.5,
     oppo_pi_coef=0.8,
 ):
     cfg = OfflineTrainingConfig(
         network=OmisNetworkConfig(obs_dim=obs_dim, action_dim=action_dim, hidden_dim=hidden_dim),
-        context_length=w.context_length,
+        context_length=T,
         # stage1_steps/stage1_learning_rate are unused -- OmisTrainer.train_stage_1
         # is a no-op (see its own docstring); everything real runs in stage 2.
         stage2_steps=steps,
         batch_size=8,
         context_trajectories=context_trajectories,
+        epi_length=epi_length,
+        stride=T,
         stage2_learning_rate=1e-2,
         normalize_observations=False,
         vf_coef=vf_coef,
@@ -133,7 +128,7 @@ def _train_tiny_omis(
     )
     trainer = OmisTrainer(cfg)
     trainer.build_model()
-    dataset = SimpleNamespace(windows=w, index=TeammateIndex.build(w))
+    dataset = SimpleNamespace(batch=batch, ego=0, mate=1, norm=None)
     trainer.prepare(
         dataset,
         _NullLogger(),
@@ -156,8 +151,8 @@ def _predicted_action(agent, params, ocw, *, T, obs_dim):
     to be pulled back out of ``stage2`` here, the same way
     :meth:`OmisAgent.get_action_with_mate_history` does for every real step.
 
-    ``mate_actions`` (D_step) is passed as all-``-10`` ("no action observed
-    yet", training's own convention for a fresh episode -- see
+    D_step (``mate_actions``) is passed as all-"unknown" ("no history
+    observed yet", training's own convention for a fresh episode -- see
     ``offline/omis._shift_right``), not omitted: the model is trained with
     D_step's token group always present (never a shorter, group-of-3
     sequence), so dropping the group entirely here would evaluate an input
@@ -200,12 +195,18 @@ def test_in_context_adaptation_shifts_the_predicted_action_toward_the_observed_o
     much weaker D_epi-dependent signal, which is what this test isolates.
     """
     obs_dim, action_dim, T, C = 3, 2, 6, 3
-    w = _identity_by_observation_windows(obs_dim=obs_dim, action_dim=action_dim, T=T)
+    batch = _identity_by_observation_batch(obs_dim=obs_dim, action_dim=action_dim, T=T)
     trainer, params = _train_tiny_omis(
-        w,
+        batch,
+        T=T,
         obs_dim=obs_dim,
         action_dim=action_dim,
         context_trajectories=C,
+        # Matches the OCW's own C*T below -- D_epi's H is independent of
+        # context_length in general (Appendix C; see offline/omis.py's
+        # build_d_epi), but this test's signal is in the OCW's per-trajectory
+        # horizon T, so H is set here to reproduce exactly that at train time.
+        epi_length=C * T,
         steps=400,
         vf_coef=0.0,
         oppo_pi_coef=0.0,
@@ -243,7 +244,7 @@ def test_shift_right_never_lets_the_label_leak_into_its_own_input():
     are the same tensor slice and the loss is trivially satisfiable.
     """
     mate_actions = jnp.asarray([[1, 2, 3, 4]])
-    shifted = _shift_right(mate_actions)
+    shifted = _shift_right(mate_actions, fill=-10)
     assert shifted.shape == mate_actions.shape
     assert shifted[0].tolist() == [-10, 1, 2, 3]
     # the label at every position is still the original, unshifted stream
@@ -284,9 +285,9 @@ def test_evaluate_incontext_produces_a_real_per_episode_curve_not_nan():
     action_dim = int(env.action_space(env.agents[1]).n)
     T, C, num_episodes = 6, 3, 4
 
-    w = _mirror_opponent_windows(obs_dim=obs_dim, action_dim=action_dim, T=T)
+    batch = _mirror_opponent_batch(obs_dim=obs_dim, action_dim=action_dim, T=T)
     trainer, params = _train_tiny_omis(
-        w, obs_dim=obs_dim, action_dim=action_dim, context_trajectories=C, steps=150
+        batch, T=T, obs_dim=obs_dim, action_dim=action_dim, context_trajectories=C, steps=150
     )
     agent = OmisAgent(trainer.config, context_length=T, target_return=0.0, normalization=None)
     agent.build_model()

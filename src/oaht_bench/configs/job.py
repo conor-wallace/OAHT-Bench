@@ -471,6 +471,14 @@ class OfflineTrainingConfig(BaseConfig):
         ge=0.0,
         description="OMIS's weight on the opponent-imitator CE in the joint loss.",
     )
+    epi_length: int = Field(
+        default=15,
+        gt=0,
+        description="OMIS's H: D_epi's own total length (Appendix C), independent "
+        "of context_length (B) -- the paper's own LBF hyperparameter table gives "
+        "H=15, B=20 as separately-valued. context_trajectories is D_epi's C; each "
+        "of its C fragments is H // C long.",
+    )
     eval_episodes: int = Field(
         default=20,
         gt=0,

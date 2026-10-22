@@ -40,11 +40,25 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-import optax
 
+from oaht_bench.dataset.windowing import enumerate_windows
 from oaht_bench.models.meliba_agent import MelibaAgent
 from oaht_bench.offline.registry import BaseAhtTrainer
-from oaht_bench.offline.utils import mask_logits, sample_window_batch
+from oaht_bench.offline.utils import mask_logits, safe_cross_entropy, sample_window_batch
+
+#: MeLIBA's encoder reads the ego stream and reconstructs the teammate's
+#: action from it (see the module docstring on the LIAM/MeLIBA difference).
+_BATCH_FIELDS = (
+    "ego_obs",
+    "ego_actions",
+    "ego_rtg",
+    "mate_obs",
+    "mate_actions",
+    "ego_avail",
+    "mate_avail",
+    "timesteps",
+    "mask",
+)
 
 
 def _masked_accuracy(logits, labels, mask) -> jnp.ndarray:
@@ -120,7 +134,7 @@ def meliba_reconstruction_loss(
     mask = batch["mask"].astype(jnp.float32)
     denom = jnp.maximum(mask.sum(), 1.0)
 
-    recon_act = optax.softmax_cross_entropy_with_integer_labels(mate_logits, batch["mate_actions"])
+    recon_act = safe_cross_entropy(mate_logits, batch["mate_actions"], mask)
     recon_act = (recon_act * mask).sum() / denom
     recon_acc = _masked_accuracy(mate_logits, batch["mate_actions"], mask)
 
@@ -180,7 +194,7 @@ def meliba_policy_loss(
         batch["ego_avail"],
     )
     mask = batch["mask"].astype(jnp.float32)
-    bc = optax.softmax_cross_entropy_with_integer_labels(logits, batch["ego_actions"])
+    bc = safe_cross_entropy(logits, batch["ego_actions"], mask)
     acc = _masked_accuracy(logits, batch["ego_actions"], mask)
     bc = (bc * mask).sum() / jnp.maximum(mask.sum(), 1.0)
     return bc, {"loss": bc, "bc": bc, "action_accuracy": acc}
@@ -205,8 +219,21 @@ class MelibaTrainer(BaseAhtTrainer):
         self.agent = MelibaAgent(self.config)
         self.agent.build_model()
 
+    def prepare(self, dataset, logger, *, rng, np_rng, num_seeds: int = 1) -> None:
+        super().prepare(dataset, logger, rng=rng, np_rng=np_rng, num_seeds=num_seeds)
+        self._pool = enumerate_windows(
+            dataset.batch, h=self.config.context_length, stride=self.config.stride
+        )
+
     def _sample_batch(self, _step):
-        return sample_window_batch(self.dataset.windows, self.np_rng, self.config.batch_size)
+        return sample_window_batch(
+            self.dataset,
+            self._pool,
+            self.config.context_length,
+            self.np_rng,
+            self.config.batch_size,
+            _BATCH_FIELDS,
+        )
 
     def train_stage_1(self):
         init_batch = self._sample_batch(0)
