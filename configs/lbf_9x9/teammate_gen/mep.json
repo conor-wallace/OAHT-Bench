@@ -1,0 +1,34 @@
+{
+  "job": {
+    "env": {
+      "different_levels": false,
+      "env_name": "lbf",
+      "force_coop": false,
+      "grid_size": 9,
+      "name": "lbf_9x9",
+      "notes": "Approximately replicates OMIS's (Jing et al., NeurIPS 2024) own LBF setup for a population-replication experiment: 9x9 grid, 2 agents, 5 food, full observability, horizon=50 (their own horizon_per_ep_dict['lbf']), force_coop=False with stochastic per-food levels (matches their actual gym.make('Foraging-9x9-2p-5f-v2') -- no '-coop' suffix -- see module docstring; an earlier version of this config used force_coop=True + different_levels=True, a fixed-split approximation that does not match). Not a registered preset (see scripts/gen_omis_lbf_mep_config.py); not part of the tiered benchmark matrix.",
+      "num_food": 5,
+      "rollout_length": 50,
+      "tier": "debug",
+      "time_limit": 50
+    },
+    "generator": {
+      "generator": "mep",
+      "population_entropy_coef": 0.001,
+      "population_size": 20,
+      "ppo": {
+        "entropy_coef": 0.5,
+        "gae_lambda": 0.98,
+        "learning_rate": 0.005,
+        "max_grad_norm": 0.1,
+        "update_epochs": 8,
+        "value_coef": 0.1
+      },
+      "round_robin": true,
+      "total_timesteps": 15000000.0
+    },
+    "job_type": "teammate_generation",
+    "label": "mep_lbf_9x9_omis_replication"
+  },
+  "schema_version": 1
+}

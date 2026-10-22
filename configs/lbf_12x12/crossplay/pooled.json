@@ -1,0 +1,25 @@
+{
+  "job": {
+    "job_type": "pooled_crossplay",
+    "env": {
+        "env_name": "lbf",
+        "grid_size": 12,
+        "name": "lbf_12x12",
+        "notes": "Gridworld. Matches the existing checkpoints/lbf/lbf_12x12 populations.",
+        "num_food": 6,
+        "rollout_length": 128,
+        "tier": "tier1"
+    },
+    "population_path": [
+        "populations/lbf_12x12/brdiv",
+        "populations/lbf_12x12/comedi",
+        "populations/lbf_12x12/fcp",
+        "populations/lbf_12x12/lbrdiv"
+    ],
+    "br_population_path": "TODO_FILL_IN: results/teammate_generation/ppo_br_lbf_12x12-<hash>, the run directory from configs/lbf_12x12/ppo_br.json once trained",
+    "num_episodes": 3,
+    "output_path": "populations/lbf_12x12/new_pooled_crossplay.npz",
+    "label": "new_pooled_lbf_12x12",
+    "logging": {"use_wandb": false}
+  }
+}

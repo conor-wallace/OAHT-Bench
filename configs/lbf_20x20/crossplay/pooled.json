@@ -1,0 +1,26 @@
+{
+  "job": {
+    "job_type": "pooled_crossplay",
+    "env": {
+        "env_name": "lbf",
+        "fov": 2,
+        "grid_size": 20,
+        "name": "lbf_20x20",
+        "different_levels": true,
+        "notes": "Partially observable LBF matching TAGET's cooperative setup (ICML 2025): 20x20 grid, 4 food, 2 agents, 5x5 view (fov=2).",
+        "num_food": 4,
+        "rollout_length": 128,
+        "tier": "tier1"
+    },
+    "population_path": [
+        "populations/lbf_20x20/brdiv",
+        "populations/lbf_20x20/comedi",
+        "populations/lbf_20x20/fcp",
+        "populations/lbf_20x20/lbrdiv"
+    ],
+    "num_episodes": 200,
+    "output_path": "populations/lbf_20x20/pooled_crossplay_200ep.npz",
+    "label": "pooled_lbf_20x20_200ep",
+    "logging": {"use_wandb": false}
+  }
+}

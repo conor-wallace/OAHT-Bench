@@ -1,0 +1,979 @@
+"""Maximum Entropy Population-based training (Zhao et al., AAAI-23) -- Stage 1 only.
+
+OMIS uses MEP for its own teammate generation; this is a clean-room
+implementation from the paper (no upstream code absorbed -- the reference
+repo, https://github.com/ruizhaogit/maximum_entropy_population_based_training,
+is on an incompatible stack). See ``PROVENANCE.md``.
+
+N population members each run ordinary self-play PPO (paired with itself),
+while every rollout step's reward is augmented with the *population-entropy*
+bonus (Eq. 6/9 of the paper): the log-probability of the already-sampled
+action under the population's *mean* policy, an unbiased Monte-Carlo estimate
+of population entropy. This must be reduced as
+``logsumexp(log_probs_across_members) - log(N)`` -- i.e. ``log(mean(probs))``
+-- **not** ``mean(log_probs))``; those are different quantities, and picking
+the wrong one silently trains a different (and wrong) objective. See
+``tests/unit/teammate_gen/test_mep.py``'s isolated reduction test.
+
+This is a *non-adversarial* diversity mechanism: unlike BRDiv/L-BRDiv/CoMeDi/
+RPG, nothing here optimizes to minimize another member's reward or cross-play
+score, so it is structurally immune to the self-sabotage failure mode those
+methods must be engineered around (see ``papers/rpg.pdf``, Fig. 4). MEP's own
+Stage 2 (training a single shared robust-generalist ego against the population
+via prioritized/hardness-ranked sampling) is deliberately not built here --
+every other generator in this repo only releases a *population* (BRDiv/
+L-BRDiv discard their internal ``br``, RPG discards its manipulators) and
+leaves ego training to ``ppo_br.py``; MEP follows that precedent.
+
+Architecture note (why this isn't just ``fcp.py`` with an extra reward term):
+FCP's ``train_fcp_partners`` vmaps ``population_size`` fully independent
+self-play trains with zero communication between vmap lanes -- correct for
+FCP, but MEP's entropy bonus needs every member's *current* policy visible
+from every other member's rollout at each step. BRDiv/L-BRDiv solve a similar
+visibility problem by threading one ``TrainState`` with a population leading
+axis through a single scan, with ``gather_params`` pulling specific members'
+params for *environment* pairings -- machinery built for their cross-play
+*environment* interactions (conf-vs-br rollouts), which MEP has none of (only
+a forward-pass-only statistic, no shared environment steps). Instead, the
+population vmap axis here is *named* (``axis_name="population"``), and
+``jax.lax.all_gather`` is used as a collective inside the training loop to
+gather every lane's current params into every lane for that one forward pass
+-- no restructuring of the self-play rollout/GAE/PPO-update body, which stays
+close to ``marl/ippo.py``'s ``make_train``.
+
+Recurrent-actor caveat (Hanabi / Overcooked-v2): MEP's objective is written as
+``pi(a|s)`` -- state-conditioned, no history/hstate in its formalism, because
+the paper's own environment (Overcooked) is fully observed. Hanabi and
+Overcooked-v2 need recurrent actors here, which the paper's math doesn't
+address. For the cross-member forward pass *only* (never each member's own
+rollout, which keeps its own evolving hstate as normal), hstate is reset to
+``policy.init_hstate(...)`` rather than gathering and reusing each member's
+own trajectory-hstate against another lane's observation -- the closest
+reading of the paper's literal state-only conditioning. For the "mlp"/
+non-recurrent actor types (LBF), ``init_hstate`` is already the no-op hstate
+ippo.py's own rollout uses, so this assumption changes nothing there; it only
+bites for Hanabi ("rnn") and Overcooked-v2 ("cnn_rnn"). Flag in
+``docs/tuning_record.md`` once those runs exist -- an extension the paper
+doesn't cover, tracked openly rather than silently resolved.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from functools import partial
+
+import chex
+import jax
+import jax.numpy as jnp
+import numpy as np
+import optax
+from flax.training.train_state import TrainState
+
+from oaht_bench.common.logging import RunLogger, nonfatal
+from oaht_bench.common.plot_utils import get_metric_names
+from oaht_bench.common.save_load_utils import save_train_run
+from oaht_bench.configs.job import TeammateGenerationJob
+from oaht_bench.envs import make_env
+from oaht_bench.envs.log_wrapper import LogWrapper
+from oaht_bench.envs.protocols import TrainingEnv
+from oaht_bench.models.population_interface import AgentPopulation
+from oaht_bench.population.loading import TrainOutput, get_mep_population
+from oaht_bench.teammate_gen.marl.ippo import initialize_agent, log_metrics_intermediate
+from oaht_bench.teammate_gen.marl.lr_schedule import make_lr_schedule
+from oaht_bench.teammate_gen.marl.ppo_utils import (
+    Transition,
+    _create_minibatches,
+    _is_checkpoint_step,
+    _maybe_store_best,
+    _maybe_store_checkpoint,
+    batchify,
+    unbatchify,
+)
+from oaht_bench.teammate_gen.marl.reward_shaping import add_shaped_reward
+from oaht_bench.teammate_gen.runtime import PpoRuntime
+
+#: A trained MEP population: stacked parameters plus the policy class that
+#: reads them. Leading axes of the parameters are ``(num_seeds, population_size)``.
+MepPopulation = tuple[chex.ArrayTree, AgentPopulation]
+
+log = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+
+def population_entropy_bonus(
+    member_log_probs: jnp.ndarray, coef: float, exclude_idx=None
+) -> jnp.ndarray:
+    """MEP's Eq. 6/9 reward bonus: ``-coef * log(mean_k pi_k(a|s))``.
+
+    ``member_log_probs`` is every population member's log-probability of the
+    same already-sampled action at the same observation (leading axis =
+    population size). The population's mean-policy log-probability must be
+    reduced as ``logsumexp(member_log_probs, axis=0) - log(N)`` --
+    ``log(mean(probs))`` -- **not** ``mean(member_log_probs, axis=0)`` --
+    ``mean(log(probs))``. Those are different quantities (Jensen's inequality
+    makes the latter a strictly lower, biased estimate whenever members
+    disagree), and training against the wrong one silently optimizes a
+    different objective than the paper's. Kept as a standalone function so
+    this reduction is unit-testable independent of the training loop.
+
+    ``exclude_idx`` (``None`` by default, preserving the self-inclusive
+    reduction above exactly) excludes one member -- the one currently
+    training -- from the mean, matching the round-robin reference's
+    ``pbt_population_copy.pop(idx0)``: ``log(mean_{k != idx} pi_k(a|s))``
+    rather than ``log(mean_k pi_k(a|s))``. ``n`` is ``member_log_probs``'s
+    static leading-axis size, so this stays shape-static under ``jit`` even
+    though ``exclude_idx`` itself may be a traced scalar.
+    """
+    n = member_log_probs.shape[0]
+    if exclude_idx is not None:
+        mask_shape = (n,) + (1,) * (member_log_probs.ndim - 1)
+        exclude_mask = (jnp.arange(n) == exclude_idx).reshape(mask_shape)
+        member_log_probs = jnp.where(exclude_mask, -jnp.inf, member_log_probs)
+        n = n - 1
+    pop_log_prob = jax.scipy.special.logsumexp(member_log_probs, axis=0) - jnp.log(n)
+    return -coef * pop_log_prob
+
+
+def population_entropy_coef_schedule(update_steps, num_updates, warmup_fraction, target_coef):
+    """Linear warmup: 0 at ``update_steps=0``, ``target_coef`` once
+    ``update_steps`` reaches ``warmup_fraction * num_updates``, held at
+    ``target_coef`` after.
+
+    The reference implementation applies its entropy-pool coefficient as a
+    flat constant for the whole run (confirmed directly from
+    ``baselines/baselines/ppo2/runner.py`` -- no warmup, no decay). It can get
+    away with that because Overcooked's task reward grows into a scale that
+    naturally dwarfs a small fixed bonus once competence is established; LBF's
+    bounded ~0.5 episode return does not, which is why
+    ``population_entropy_coef=1e-2`` (the paper's own value) was found to
+    dominate task reward by a stable ~19x for the *entire* run, not just
+    early on. A warmup keeps diversity pressure near zero while members are
+    still near-random (where "diversity" would just be initialization noise,
+    not real strategic difference) and ramps it in only once there is a
+    competent baseline to diverge from.
+
+    ``warmup_fraction <= 0`` returns ``target_coef`` unconditionally -- a
+    genuinely different, simpler code path, not a schedule that happens to
+    equal the constant, so every existing config (which never sets this) is
+    byte-for-byte unchanged. Matches ``ppo.lr_warmup``'s own
+    zero-means-off convention (``marl/lr_schedule.py``).
+    """
+    if warmup_fraction <= 0:
+        return target_coef
+    warmup_updates = jnp.maximum(1.0, warmup_fraction * num_updates)
+    frac = jnp.minimum(update_steps / warmup_updates, 1.0)
+    return frac * target_coef
+
+
+def _mask_and_mean(x, mask):
+    """Mean of ``x`` over the entries where ``mask`` is true, else 0."""
+    return jnp.where(mask, x, 0).sum() / jnp.maximum(1, mask.sum())
+
+
+class MepTrainer:
+    """Builds and runs one MEP population member's training loop.
+
+    Use as ``jax.vmap(trainer.train, axis_name="population")`` over
+    ``population_size`` -- the population-entropy bonus reads that axis via
+    ``jax.lax.all_gather``.
+
+    ``gradient_accumulation_steps > 1`` wraps the optimizer in
+    ``optax.MultiSteps``: every ``_env_step``/rollout collection below still
+    runs at ``config.num_envs``, but the optimizer only actually updates
+    params once every ``gradient_accumulation_steps`` rollouts, having
+    averaged their gradients. Params stay frozen for the whole accumulation
+    window (``MultiSteps`` returns a zero update on intermediate calls), so
+    every rollout and every PPO minibatch/epoch pass inside that window sees
+    the exact same policy snapshot -- the on-policy ratio in ``_loss_fn``
+    stays valid throughout, and nothing else in this class needs to know
+    accumulation is happening. See
+    ``docs/tuning_record.md``'s MEP-on-Hanabi section for why (GPU memory) and
+    ``marl/lr_schedule.py`` for how the LR schedule stays correctly paced.
+    """
+
+    def __init__(
+        self,
+        config,
+        env,
+        logger,
+        population_entropy_coef,
+        population_entropy_warmup=0.0,
+        evenly_spaced_checkpoints=False,
+        progress_callback=None,
+        gradient_accumulation_steps=1,
+    ):
+        self.config = config
+        self.env = env
+        self.logger = logger
+        self.population_entropy_coef = population_entropy_coef
+        self.population_entropy_warmup = population_entropy_warmup
+        self.evenly_spaced_checkpoints = evenly_spaced_checkpoints
+        self.progress_callback = progress_callback
+        self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.policy, _ = initialize_agent(
+            config.actor_type, config.to_agent_dict(), env, jax.random.PRNGKey(0)
+        )
+
+    def train(self, rng):
+        rng, init_rng = jax.random.split(rng)
+        _, init_rng = jax.random.split(init_rng)
+        init_params = self.policy.init_params(init_rng)
+
+        tx = optax.chain(
+            optax.clip_by_global_norm(self.config.ppo.max_grad_norm),
+            optax.adam(
+                learning_rate=make_lr_schedule(
+                    self.config.ppo,
+                    self.config.num_updates,
+                    accumulation_steps=self.gradient_accumulation_steps,
+                ),
+                eps=1e-5,
+            ),
+        )
+        if self.gradient_accumulation_steps > 1:
+            every_k = (
+                self.gradient_accumulation_steps
+                * self.config.ppo.update_epochs
+                * self.config.ppo.num_minibatches
+            )
+            tx = optax.MultiSteps(tx, every_k_schedule=every_k)
+        train_state = TrainState.create(
+            apply_fn=self.policy.network.apply, params=init_params, tx=tx
+        )
+
+        rng, _rng = jax.random.split(rng)
+        reset_rng = jax.random.split(_rng, self.config.num_envs)
+        obsv, env_state = jax.vmap(self.env.reset, in_axes=(0,))(reset_rng)
+
+        rng, _rng = jax.random.split(rng)
+        update_steps = 0
+        init_hstate = self.policy.init_hstate(self.config.num_actors)
+        init_done = {
+            k: jnp.zeros((self.config.num_envs), dtype=bool) for k in self.env.agents + ["__all__"]
+        }
+        update_runner_state = (
+            (train_state, env_state, obsv, init_done, init_hstate, _rng),
+            update_steps,
+        )
+        checkpoint_array = self._init_ckpt_array(train_state.params)
+        ckpt_idx = 0
+        # Continuously-tracked best-performing params (MEP reference's
+        # best_sparse_rew_avg mechanism, see module docstring) -- independent of
+        # and in addition to the evenly-spaced checkpoint_array above. Starts at
+        # -inf, like the reference, so the very first measured return always
+        # becomes the initial "best".
+        best_params = jax.tree.map(jnp.zeros_like, train_state.params)
+        best_score = jnp.asarray(-jnp.inf)
+        update_with_ckpt_runner_state = (
+            update_runner_state,
+            checkpoint_array,
+            ckpt_idx,
+            best_params,
+            best_score,
+        )
+
+        runner_state, metrics = jax.lax.scan(
+            self._update_step_with_checkpoint,
+            update_with_ckpt_runner_state,
+            xs=None,
+            length=self.config.num_updates,
+        )
+
+        update_runner_state, checkpoint_array, final_ckpt_idx, best_params, best_score = (
+            runner_state
+        )
+
+        return {
+            "final_params": update_runner_state[0][0].params,
+            "metrics": metrics,
+            "checkpoints": checkpoint_array,
+            "final_ckpt_idx": final_ckpt_idx,
+            "best_params": best_params,
+            "best_score": best_score,
+        }
+
+    def train_round_robin(self, rng, population_size, chunk_timesteps):
+        """Reference-matching training cadence (see ``MepConfig.round_robin``'s
+        docstring): every PBT iteration visits each of ``population_size``
+        members exactly once, in a random order, running a self-contained
+        PPO chunk of ``chunk_timesteps`` env-steps for that member alone
+        while every other member's params stay frozen for the visit's full
+        duration. Opt-in; ``train()`` (the simultaneous-vmap path) is
+        untouched and stays the default.
+
+        Unlike ``train()``, this method is NOT externally vmapped over
+        ``population_size`` -- it owns the whole population internally,
+        since the reference's round-robin schedule has no notion of
+        "every member at once" to vmap over.
+        """
+        chunk_updates = int(chunk_timesteps // self.config.rollout_length // self.config.num_envs)
+        if chunk_updates < 1:
+            raise ValueError(
+                f"round_robin_chunk_timesteps={chunk_timesteps:g} gives "
+                f"{chunk_updates} updates at rollout_length={self.config.rollout_length} "
+                f"and num_envs={self.config.num_envs}; each visit would be a no-op. "
+                f"Raise round_robin_chunk_timesteps above "
+                f"{self.config.rollout_length * self.config.num_envs}."
+            )
+        num_pbt_iters = int(self.config.total_timesteps // chunk_timesteps)
+        if num_pbt_iters < 1:
+            raise ValueError(
+                f"total_timesteps={self.config.total_timesteps:g} gives "
+                f"{num_pbt_iters} PBT iterations at "
+                f"round_robin_chunk_timesteps={chunk_timesteps:g}; training would "
+                f"be a no-op. Raise total_timesteps above {chunk_timesteps:g}."
+            )
+
+        rng, init_rng = jax.random.split(rng)
+        init_rngs = jax.random.split(init_rng, population_size)
+        init_params = jax.vmap(self.policy.init_params)(init_rngs)
+
+        # Same tx/schedule-building as train() verbatim -- one shared
+        # template, applied per member via vmap below. make_lr_schedule and
+        # the entropy-coef warmup both key off self.config.num_updates
+        # (~= num_pbt_iters * chunk_updates, up to integer-division
+        # rounding), the same per-member lifetime-budget meaning in both
+        # paths.
+        tx = optax.chain(
+            optax.clip_by_global_norm(self.config.ppo.max_grad_norm),
+            optax.adam(
+                learning_rate=make_lr_schedule(
+                    self.config.ppo,
+                    self.config.num_updates,
+                    accumulation_steps=self.gradient_accumulation_steps,
+                ),
+                eps=1e-5,
+            ),
+        )
+        if self.gradient_accumulation_steps > 1:
+            every_k = (
+                self.gradient_accumulation_steps
+                * self.config.ppo.update_epochs
+                * self.config.ppo.num_minibatches
+            )
+            tx = optax.MultiSteps(tx, every_k_schedule=every_k)
+
+        population_train_state = jax.vmap(
+            lambda p: TrainState.create(apply_fn=self.policy.network.apply, params=p, tx=tx)
+        )(init_params)
+
+        checkpoint_array = jax.vmap(self._init_ckpt_array)(population_train_state.params)
+        ckpt_idx = jnp.zeros((population_size,), dtype=jnp.int32)
+        best_params = jax.tree.map(jnp.zeros_like, population_train_state.params)
+        best_score = jnp.full((population_size,), -jnp.inf)
+        # Cumulative, cross-visit update counter per member -- NOT reset each
+        # visit. This is what makes checkpoint spacing, the entropy-coef
+        # warmup, and reward-shaping annealing see each member's true
+        # lifetime progress rather than restarting at 0 every chunk.
+        member_update_steps = jnp.zeros((population_size,), dtype=jnp.int32)
+
+        def extract(pytree, idx):
+            return jax.tree.map(
+                lambda x: jax.lax.dynamic_index_in_dim(x, idx, axis=0, keepdims=False), pytree
+            )
+
+        def write_back(full_pytree, idx, new_slice):
+            return jax.tree.map(
+                lambda full, new: jax.lax.dynamic_update_slice_in_dim(full, new[None], idx, axis=0),
+                full_pytree,
+                new_slice,
+            )
+
+        def visit(carry, idx):
+            (
+                population_train_state,
+                checkpoint_array,
+                ckpt_idx,
+                best_params,
+                best_score,
+                member_update_steps,
+                rng,
+            ) = carry
+
+            member_train_state = extract(population_train_state, idx)
+            member_ckpt = extract(checkpoint_array, idx)
+            member_ckpt_idx = extract(ckpt_idx, idx)
+            member_best_params = extract(best_params, idx)
+            member_best_score = extract(best_score, idx)
+            member_steps0 = extract(member_update_steps, idx)
+
+            # Fresh rollout state every visit -- matches the reference's own
+            # learn(..., total_timesteps=...) resetting its env internally
+            # each call. Only the model + optimizer state persist across a
+            # member's (non-consecutive) visits, mirroring the reference's
+            # create_model/update_model object-reuse split exactly; carrying
+            # population_size live env states when only one member trains
+            # per visit would be pure waste.
+            rng, env_rng, chunk_rng = jax.random.split(rng, 3)
+            reset_rngs = jax.random.split(env_rng, self.config.num_envs)
+            obsv, env_state = jax.vmap(self.env.reset, in_axes=(0,))(reset_rngs)
+            init_hstate = self.policy.init_hstate(self.config.num_actors)
+            init_done = {
+                k: jnp.zeros((self.config.num_envs,), dtype=bool)
+                for k in self.env.agents + ["__all__"]
+            }
+
+            update_runner_state = (
+                (member_train_state, env_state, obsv, init_done, init_hstate, chunk_rng),
+                member_steps0,
+            )
+            update_with_ckpt_runner_state = (
+                update_runner_state,
+                member_ckpt,
+                member_ckpt_idx,
+                member_best_params,
+                member_best_score,
+            )
+
+            # others_params is the FULL population array, static-shaped
+            # (population_size never shrinks) -- self_idx (traced) excludes
+            # this visit's own member from the entropy-bonus reduction via
+            # population_entropy_bonus's exclude_idx, matching the
+            # reference's pbt_population_copy.pop(idx0).
+            chunk_step = partial(
+                self._update_step_with_checkpoint,
+                others_params=population_train_state.params,
+                self_idx=idx,
+            )
+            new_runner_state, metric = jax.lax.scan(
+                chunk_step, update_with_ckpt_runner_state, xs=None, length=chunk_updates
+            )
+            (
+                new_update_runner_state,
+                new_ckpt,
+                new_ckpt_idx,
+                new_best_params,
+                new_best_score,
+            ) = new_runner_state
+            (new_member_train_state, _, _, _, _, _), new_steps = new_update_runner_state
+
+            population_train_state = write_back(population_train_state, idx, new_member_train_state)
+            checkpoint_array = write_back(checkpoint_array, idx, new_ckpt)
+            ckpt_idx = write_back(ckpt_idx, idx, new_ckpt_idx)
+            best_params = write_back(best_params, idx, new_best_params)
+            best_score = write_back(best_score, idx, new_best_score)
+            member_update_steps = write_back(member_update_steps, idx, new_steps)
+
+            new_carry = (
+                population_train_state,
+                checkpoint_array,
+                ckpt_idx,
+                best_params,
+                best_score,
+                member_update_steps,
+                rng,
+            )
+            return new_carry, metric
+
+        def pbt_iteration(carry, unused):
+            *state, rng = carry
+            rng, perm_rng = jax.random.split(rng)
+            # A fresh permutation per PBT iteration, drawn once -- the
+            # vectorized equivalent of the reference's
+            # pairs_to_train.pop(np.random.choice(...)) loop: every member
+            # visited exactly once per iteration, order resampled each time.
+            visit_order = jax.random.permutation(perm_rng, population_size)
+            iter_carry, metrics = jax.lax.scan(visit, (*state, rng), visit_order)
+            return iter_carry, metrics
+
+        init_carry = (
+            population_train_state,
+            checkpoint_array,
+            ckpt_idx,
+            best_params,
+            best_score,
+            member_update_steps,
+            rng,
+        )
+        final_carry, metrics = jax.lax.scan(
+            pbt_iteration, init_carry, xs=None, length=num_pbt_iters
+        )
+        (
+            population_train_state,
+            checkpoint_array,
+            ckpt_idx,
+            best_params,
+            best_score,
+            _member_update_steps,
+            _rng,
+        ) = final_carry
+
+        return {
+            "final_params": population_train_state.params,
+            # Shape (num_pbt_iters, population_size, chunk_updates) per
+            # field -- natural nested-scan stacking order, NOT grouped by
+            # member identity (a given (iter, slot) position visits a
+            # different member each iteration, per visit_order). This
+            # differs in *meaning* from train()'s (num_updates,)-per-member
+            # shape; metrics.jsonl (which carries the member_idx field added
+            # in _update_step) is the correct place to read a per-member
+            # curve, not this bulk array -- see module docstring.
+            "metrics": metrics,
+            "checkpoints": checkpoint_array,
+            "final_ckpt_idx": ckpt_idx,
+            "best_params": best_params,
+            "best_score": best_score,
+        }
+
+    def _init_ckpt_array(self, params_pytree):
+        num_ckpts = self.config.num_checkpoints
+        return jax.tree.map(lambda x: jnp.zeros((num_ckpts,) + x.shape, x.dtype), params_pytree)
+
+    def _update_step_with_checkpoint(
+        self, update_with_ckpt_runner_state, unused, *, others_params=None, self_idx=None
+    ):
+        (update_runner_state, checkpoint_array, ckpt_idx, best_params, best_score) = (
+            update_with_ckpt_runner_state
+        )
+        update_runner_state, metric = self._update_step(
+            update_runner_state, None, others_params=others_params, self_idx=self_idx
+        )
+        _, update_steps = update_runner_state
+        should_store = _is_checkpoint_step(
+            update_steps,
+            self.config.num_updates,
+            self.config.num_checkpoints,
+            evenly_spaced=self.evenly_spaced_checkpoints,
+        )
+        checkpoint_array, ckpt_idx = _maybe_store_checkpoint(
+            checkpoint_array, ckpt_idx, update_runner_state[0][0].params, should_store
+        )
+        best_params, best_score = _maybe_store_best(
+            best_params,
+            best_score,
+            update_runner_state[0][0].params,
+            metric["returned_episode_returns"],
+        )
+        runner_state = (update_runner_state, checkpoint_array, ckpt_idx, best_params, best_score)
+        return runner_state, metric
+
+    def _update_step(self, update_runner_state, unused, *, others_params=None, self_idx=None):
+        runner_state, update_steps = update_runner_state
+
+        env_step = partial(
+            self._env_step,
+            update_steps=update_steps,
+            others_params=others_params,
+            self_idx=self_idx,
+        )
+        runner_state, (traj_batch, bonus_diag) = jax.lax.scan(
+            env_step, runner_state, None, self.config.rollout_length
+        )
+
+        train_state, env_state, last_obs, last_done, last_hstate, rng = runner_state
+        last_obs_batch = batchify(last_obs, self.env.agents, self.config.num_actors).reshape(
+            1, self.config.num_actors, -1
+        )
+        last_done_batch = batchify(last_done, self.env.agents, self.config.num_actors).reshape(
+            1, self.config.num_actors
+        )
+        last_avail_batch = jax.vmap(self.env.get_avail_actions)(env_state.env_state)
+        last_avail_batch = jax.lax.stop_gradient(
+            batchify(last_avail_batch, self.env.agents, self.config.num_actors).astype(jnp.float32)
+        )
+
+        _, last_val, _, _ = self.policy.get_action_value_policy(
+            params=train_state.params,
+            obs=last_obs_batch,
+            done=last_done_batch,
+            avail_actions=last_avail_batch,
+            hstate=last_hstate,
+            rng=jax.random.PRNGKey(0),
+        )
+        last_val = last_val.squeeze()
+
+        advantages, targets = self._calculate_gae(traj_batch, last_val)
+
+        init_hstate = self.policy.init_hstate(self.config.num_actors)
+        update_state = (train_state, init_hstate, traj_batch, advantages, targets, rng)
+        update_state, loss_info = jax.lax.scan(
+            self._update_epoch, update_state, None, self.config.ppo.update_epochs
+        )
+        train_state = update_state[0]
+
+        mask = traj_batch.info.get("returned_episode", jnp.ones_like(traj_batch.reward))
+        metric = jax.tree.map(lambda x: _mask_and_mean(x, mask), traj_batch.info)
+        metric["update_steps"] = update_steps
+        # True per-step means over the whole rollout (every actor, every
+        # timestep) -- not episode-end-masked like the metrics above -- so
+        # the entropy bonus's magnitude can be read directly against the
+        # task reward's own per-step magnitude, instead of inferred from
+        # training behavior. Inserted here, before the callback, since that
+        # is what actually reaches metrics.jsonl -- condensed_metric below
+        # is a separate, later-built dict the callback never sees.
+        metric["population_entropy_bonus_mean"] = bonus_diag["entropy_bonus"].mean()
+        metric["task_reward_per_step_mean"] = bonus_diag["task_reward"].mean()
+        metric["population_entropy_coef_current"] = bonus_diag["entropy_coef_current"].mean()
+        # Only added on the round-robin path (self_idx is a real index there,
+        # None on the simultaneous path) -- keeps the simultaneous path's
+        # metric dict byte-for-byte unchanged, since every vmapped lane IS a
+        # member simultaneously there and "which member" isn't a meaningful
+        # per-step question the way it is once training visits one member
+        # at a time.
+        if self_idx is not None:
+            metric["member_idx"] = self_idx
+
+        jax.experimental.io_callback(self._callback, None, metric)
+
+        rng = update_state[-1]
+        update_steps += 1
+        runner_state = (train_state, env_state, last_obs, last_done, last_hstate, rng)
+
+        mask = metric["returned_episode"]
+        n_episodes = mask.sum()
+        condensed_metric = {}
+        for key, val in metric.items():
+            if key in ("update_steps", "member_idx"):
+                condensed_metric[key] = val
+            elif key == "returned_episode":
+                condensed_metric[key] = n_episodes.astype(jnp.float32)
+            else:
+                condensed_metric[key] = jnp.where(
+                    n_episodes > 0,
+                    jnp.where(mask, val, 0.0).sum() / jnp.maximum(n_episodes, 1),
+                    0.0,
+                )
+        condensed_metric["value_loss"] = loss_info[1][0].mean()
+        condensed_metric["actor_loss"] = loss_info[1][1].mean()
+        condensed_metric["entropy_loss"] = loss_info[1][2].mean()
+        # population_entropy_bonus_mean/task_reward_per_step_mean/
+        # population_entropy_coef_current are already in condensed_metric via
+        # the metric.items() loop above, inserted
+        # into `metric` before the callback (see there for why).
+
+        return (runner_state, update_steps), condensed_metric
+
+    def _callback(self, metrics):
+        log_metrics_intermediate(metrics, self.logger)
+        if self.progress_callback is not None:
+            self.progress_callback()
+
+    def _env_step(self, runner_state, unused, *, update_steps, others_params=None, self_idx=None):
+        train_state, env_state, last_obs, last_done, last_hstate, rng = runner_state
+
+        rng, act_rng = jax.random.split(rng, 2)
+
+        last_obs_batch = batchify(last_obs, self.env.agents, self.config.num_actors)
+        last_done_batch = batchify(last_done, self.env.agents, self.config.num_actors)
+
+        avail_actions = jax.vmap(self.env.get_avail_actions)(env_state.env_state)
+        avail_actions = jax.lax.stop_gradient(
+            batchify(avail_actions, self.env.agents, self.config.num_actors).astype(jnp.float32)
+        )
+
+        obs_in = last_obs_batch.reshape(1, self.config.num_actors, -1)
+        done_in = last_done_batch.reshape(1, self.config.num_actors)
+        avail_in = avail_actions.reshape(1, self.config.num_actors, -1)
+
+        action, value, pi, new_hstate = self.policy.get_action_value_policy(
+            params=train_state.params,
+            obs=obs_in,
+            done=done_in,
+            avail_actions=avail_in,
+            hstate=last_hstate,
+            rng=act_rng,
+        )
+        log_prob = pi.log_prob(action)
+
+        # --- MEP population-entropy bonus (Eq. 6/9) ---
+        # Gather every member's CURRENT params (forward-pass only, no
+        # extra environment interaction), evaluate each member's
+        # log-prob of THIS already-sampled action at THIS observation,
+        # reduce via log-mean-exp. See module docstring for why this
+        # must not be mean-of-log-probs, and for the hstate reset.
+        #
+        # ``others_params`` is None on the simultaneous-vmap path (today's
+        # behavior, unchanged): every lane's current params are gathered
+        # live via the named-axis collective. Round-robin (see
+        # ``train_round_robin``) has no population vmap to gather across --
+        # it passes the whole (static-shape, population_size-leading-axis)
+        # params array in directly, already a plain argument, and excludes
+        # the currently-training member (``self_idx``) from the reduction
+        # via ``population_entropy_bonus``'s ``exclude_idx``, matching the
+        # reference's ``pbt_population_copy.pop(idx0)``.
+        if others_params is None:
+            gathered_params = jax.tree.map(
+                lambda x: jax.lax.all_gather(x, axis_name="population"), train_state.params
+            )
+        else:
+            gathered_params = others_params
+        zero_hstate = self.policy.init_hstate(self.config.num_actors)
+
+        def _member_log_prob(member_params):
+            _, _, member_pi, _ = self.policy.get_action_value_policy(
+                params=member_params,
+                obs=obs_in,
+                done=done_in,
+                avail_actions=avail_in,
+                hstate=zero_hstate,
+                rng=jax.random.PRNGKey(0),  # unused: only pi.log_prob is read
+            )
+            return member_pi.log_prob(action)
+
+        member_log_probs = jax.vmap(_member_log_prob)(gathered_params)
+        current_entropy_coef = population_entropy_coef_schedule(
+            update_steps,
+            self.config.num_updates,
+            self.population_entropy_warmup,
+            self.population_entropy_coef,
+        )
+        entropy_bonus = population_entropy_bonus(
+            member_log_probs, current_entropy_coef, exclude_idx=self_idx
+        ).squeeze()
+
+        action = action.squeeze()
+        log_prob = log_prob.squeeze()
+        value = value.squeeze()
+
+        env_act = unbatchify(action, self.env.agents, self.config.num_envs, self.env.num_agents)
+        env_act = {k: v.flatten() for k, v in env_act.items()}
+
+        rng, _rng = jax.random.split(rng)
+        rng_step = jax.random.split(_rng, self.config.num_envs)
+
+        new_obs, new_env_state, reward, new_done, info = jax.vmap(self.env.step, in_axes=(0, 0, 0))(
+            rng_step, env_state, env_act
+        )
+
+        reward = add_shaped_reward(
+            reward,
+            info,
+            self.env.agents,
+            horizon=self.config.ppo.reward_shaping_horizon,
+            global_env_step=update_steps * self.config.rollout_length * self.config.num_envs,
+        )
+
+        info = jax.tree.map(lambda x: x.reshape(self.config.num_actors), info)
+
+        task_reward = batchify(reward, self.env.agents, self.config.num_actors).squeeze()
+        transition = Transition(
+            batchify(new_done, self.env.agents, self.config.num_actors).squeeze(),
+            action,
+            value,
+            task_reward + entropy_bonus,
+            log_prob,
+            last_obs_batch,
+            info,
+            avail_actions,
+        )
+        runner_state = (train_state, new_env_state, new_obs, new_done, new_hstate, rng)
+        # Per-step, every-actor diagnostic -- deliberately NOT routed through
+        # `info`/`_mask_and_mean`, which only average at episode-end steps
+        # (the right semantics for `returned_episode_returns` etc., but wrong
+        # here: the entropy bonus and task reward both apply every step, and
+        # comparing their per-step magnitudes is the point).
+        bonus_diag = {
+            "entropy_bonus": entropy_bonus,
+            "task_reward": task_reward,
+            "entropy_coef_current": jnp.asarray(current_entropy_coef),
+        }
+        return runner_state, (transition, bonus_diag)
+
+    def _get_advantages(self, gae_and_next_value, transition):
+        gae, next_value = gae_and_next_value
+        done, value, reward = transition.done, transition.value, transition.reward
+        delta = reward + self.config.ppo.gamma * next_value * (1 - done) - value
+        gae = delta + self.config.ppo.gamma * self.config.ppo.gae_lambda * (1 - done) * gae
+        return (gae, value), gae
+
+    def _calculate_gae(self, traj_batch, last_val):
+        _, advantages = jax.lax.scan(
+            self._get_advantages,
+            (jnp.zeros_like(last_val), last_val),
+            traj_batch,
+            reverse=True,
+            unroll=16,
+        )
+        return advantages, advantages + traj_batch.value
+
+    def _loss_fn(self, params, traj_batch, gae, targets, *, init_hstate):
+        _, value, pi, _ = self.policy.get_action_value_policy(
+            params=params,
+            obs=traj_batch.obs,
+            done=traj_batch.done,
+            avail_actions=traj_batch.avail_actions,
+            hstate=init_hstate,
+            rng=jax.random.PRNGKey(0),
+        )
+        log_prob = pi.log_prob(traj_batch.action)
+
+        value_pred_clipped = traj_batch.value + (value - traj_batch.value).clip(
+            -self.config.ppo.clip_eps, self.config.ppo.clip_eps
+        )
+        value_losses = jnp.square(value - targets)
+        value_losses_clipped = jnp.square(value_pred_clipped - targets)
+        value_loss = jnp.maximum(value_losses, value_losses_clipped).mean()
+
+        ratio = jnp.exp(log_prob - traj_batch.log_prob)
+        gae = (gae - gae.mean()) / (gae.std() + 1e-8)
+        loss_actor1 = ratio * gae
+        loss_actor2 = (
+            jnp.clip(ratio, 1.0 - self.config.ppo.clip_eps, 1.0 + self.config.ppo.clip_eps) * gae
+        )
+        loss_actor = -jnp.minimum(loss_actor1, loss_actor2).mean()
+        entropy = pi.entropy().mean()
+
+        total_loss = (
+            loss_actor
+            + self.config.ppo.value_coef * value_loss
+            - self.config.ppo.entropy_coef * entropy
+        )
+        return total_loss, (value_loss, loss_actor, entropy)
+
+    def _update_minbatch(self, train_state, batch_info):
+        init_hstate, traj_batch, advantages, targets = batch_info
+
+        loss_fn = partial(self._loss_fn, init_hstate=init_hstate)
+        grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
+        total_loss, grads = grad_fn(train_state.params, traj_batch, advantages, targets)
+        train_state = train_state.apply_gradients(grads=grads)
+        return train_state, total_loss
+
+    def _update_epoch(self, update_state, unused):
+        train_state, init_hstate, traj_batch, advantages, targets, rng = update_state
+        rng, perm_rng = jax.random.split(rng)
+        minibatches = _create_minibatches(
+            traj_batch,
+            advantages,
+            targets,
+            init_hstate,
+            self.config.num_actors,
+            self.config.ppo.num_minibatches,
+            perm_rng,
+        )
+        train_state, total_loss = jax.lax.scan(self._update_minbatch, train_state, minibatches)
+        update_state = (train_state, init_hstate, traj_batch, advantages, targets, rng)
+        return update_state, total_loss
+
+
+def train_mep_members(
+    rng: chex.PRNGKey,
+    env: TrainingEnv,
+    population_size: int,
+    runtime: PpoRuntime,
+    population_entropy_coef: float,
+    wandb_logger: RunLogger,
+    population_entropy_warmup: float = 0.0,
+    evenly_spaced_checkpoints: bool = False,
+    round_robin: bool = False,
+    round_robin_chunk_timesteps: float = 4e4,
+    gradient_accumulation_steps: int = 1,
+) -> TrainOutput:
+    """Single seed of training an MEP population.
+
+    ``round_robin=False`` (default): the population axis is *named*
+    (``axis_name="population"``) so the entropy bonus's
+    ``jax.lax.all_gather`` can synchronize every member's current params at
+    every step -- see module docstring.
+
+    ``round_robin=True``: no population vmap at all --
+    ``MepTrainer.train_round_robin`` owns the whole population internally
+    and trains members sequentially, matching the reference's actual
+    training cadence (see ``MepConfig.round_robin``'s docstring).
+    """
+    trainer = MepTrainer(
+        runtime,
+        env,
+        logger=wandb_logger,
+        population_entropy_coef=population_entropy_coef,
+        population_entropy_warmup=population_entropy_warmup,
+        evenly_spaced_checkpoints=evenly_spaced_checkpoints,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+    )
+    if round_robin:
+        train_jit = jax.jit(
+            partial(
+                trainer.train_round_robin,
+                population_size=population_size,
+                chunk_timesteps=round_robin_chunk_timesteps,
+            )
+        )
+        out = train_jit(rng)
+    else:
+        rngs = jax.random.split(rng, population_size)
+        train_jit = jax.jit(jax.vmap(trainer.train, axis_name="population"))
+        out = train_jit(rngs)
+    return out
+
+
+def run_mep(job: TeammateGenerationJob, wandb_logger: RunLogger) -> MepPopulation:
+    """Train an MEP population from a validated job config.
+
+    Stage 1 only -- see module docstring. Reads a
+    :class:`~oaht_bench.configs.job.TeammateGenerationJob` directly, same
+    contract as ``run_fcp``.
+    """
+    gen = job.generator
+    rng = jax.random.PRNGKey(gen.train_seed)
+    rngs = jax.random.split(rng, gen.num_seeds)
+
+    env = make_env(job.env.env_name, job.env.env_kwargs())
+    env = LogWrapper(env)
+
+    runtime = PpoRuntime.from_config(
+        ppo=gen.ppo,
+        network=gen.network,
+        actor_type=gen.actor_type,
+        rollout_length=job.env.rollout_length,
+        num_envs=gen.num_envs,
+        total_timesteps=gen.total_timesteps,
+        num_checkpoints=gen.num_checkpoints,
+        num_agents=env.num_agents,
+    )
+
+    start_time = time.time()
+    with jax.disable_jit(False):
+        vmapped_train_fn = jax.jit(
+            jax.vmap(
+                partial(
+                    train_mep_members,
+                    env=env,
+                    population_size=gen.population_size,
+                    runtime=runtime,
+                    population_entropy_coef=gen.population_entropy_coef,
+                    population_entropy_warmup=gen.population_entropy_warmup,
+                    evenly_spaced_checkpoints=gen.evenly_spaced_checkpoints,
+                    round_robin=gen.round_robin,
+                    round_robin_chunk_timesteps=gen.round_robin_chunk_timesteps,
+                    wandb_logger=wandb_logger,
+                    gradient_accumulation_steps=gen.gradient_accumulation_steps,
+                )
+            )
+        )
+        out = vmapped_train_fn(rngs)
+    end_time = time.time()
+    log.info(f"Training MEP population took {end_time - start_time:.2f} seconds.")
+
+    flattened_partner_params, partner_population = get_mep_population(job, out, env)
+
+    # Save FIRST so the checkpoint survives even if metric logging OOMs.
+    out_savepath = save_train_run(out, job.run_dir(), savename="saved_train_run")
+    with nonfatal("MEP post-training metrics"):
+        log_metrics(job, out, wandb_logger, out_savepath)
+
+    return flattened_partner_params, partner_population
+
+
+def log_metrics(
+    job: TeammateGenerationJob, out: TrainOutput, logger: RunLogger, out_savepath: str
+) -> None:
+    """Log statistics and record the saved train run as an artifact."""
+    metric_names = get_metric_names(job.env.env_name)
+    # metrics shape after mask_and_mean: (num_seeds, population_size, num_updates)
+    member_metrics = out["metrics"]
+    num_updates = member_metrics["returned_episode_returns"].shape[2]
+
+    member_stat_means = {
+        stat_name: np.mean(np.asarray(member_metrics[stat_name]), axis=(0, 1))
+        for stat_name in metric_names
+        if stat_name in member_metrics
+    }
+
+    for step in range(num_updates):
+        for stat_name, stat_data in member_stat_means.items():
+            logger.log_item(f"Train/Member_{stat_name}", stat_data[step], train_step=step)
+
+    logger.commit()
+
+    logger.log_artifact(name="saved_train_run", path=out_savepath, type_name="train_run")

@@ -1,0 +1,567 @@
+"""Job configs: the top-level object a single experiment JSON deserializes into.
+
+One JSON file fully determines one run, and the CLI routes on ``job_type``. The
+file is also the provenance record — its :meth:`~BaseConfig.content_hash` is what
+gets written into the artifact the run produces, so a dataset or a checkpoint can
+always be traced back to the exact configuration that made it.
+
+Job models here declare *what* to run. The code that executes them lives in the
+corresponding package (``oaht_bench.teammate_generation``, ``oaht_bench.dataset``,
+...) so that importing a config never pulls in JAX.
+"""
+
+from __future__ import annotations
+
+from typing import Annotated, Literal
+
+from pydantic import AliasChoices, Field, model_validator
+
+from oaht_bench.configs.base import BaseConfig, VersionedConfig
+from oaht_bench.configs.env import EnvConfig
+from oaht_bench.configs.network import (
+    BcNetworkConfig,
+    LiamNetworkConfig,
+    MelibaNetworkConfig,
+    OmisNetworkConfig,
+    TaoNetworkConfig,
+)
+from oaht_bench.configs.teammate_gen import GeneratorConfig
+
+#: Offline network config, selected by ``architecture``. Only LIAM is on the
+#: BaseAhtTrainer contract; the other three carry a config so their runs validate
+#: while they stay on the runner's inline path (transitional).
+OfflineNetworkConfig = Annotated[
+    LiamNetworkConfig
+    | MelibaNetworkConfig
+    | OmisNetworkConfig
+    | TaoNetworkConfig
+    | BcNetworkConfig,
+    Field(discriminator="architecture"),
+]
+
+#: The benchmark's baseline roster (§12.9). Thirteen entries in four groups:
+#: floors, a reference row, a ceiling, the learning-history family, and the
+#: trajectory-view family. Declaring it here means a typo fails at config load
+#: rather than after a training run dispatches to nothing.
+BaselineName = Literal[
+    # floors and reference
+    "random",
+    "bc",
+    "prompt_dt",
+    # ceiling: privileged teammate model, bounds how much headroom modeling has
+    "oracle",
+    # learning-history family
+    "ad",
+    "dpt",
+    "amago_offline",
+    "hybrid_ad",
+    # trajectory-view family
+    "liam",
+    "meliba",
+    "tao",
+    "omis",
+    "taget",
+]
+
+
+class LoggingConfig(BaseConfig):
+    """Where run metrics go. Weights & Biases is opt-in.
+
+    A benchmark must run identically for someone with no wandb account, and a
+    config carrying someone else's ``entity`` must never publish there by
+    accident. Metrics always land in ``<run_dir>/metrics.jsonl`` regardless.
+    """
+
+    use_wandb: bool = False
+    wandb_project: str | None = None
+    wandb_entity: str | None = None
+    verbose: bool = False
+
+    @model_validator(mode="after")
+    def _wandb_needs_a_project(self) -> LoggingConfig:
+        if self.use_wandb and not self.wandb_project:
+            raise ValueError("use_wandb is set but wandb_project is empty.")
+        return self
+
+
+class JobBase(VersionedConfig):
+    """Fields every job carries."""
+
+    label: str = Field(
+        description="Human-readable run label. Appears in output paths alongside "
+        "the config hash, which is what actually disambiguates runs."
+    )
+    seed: int = Field(default=0, description="Master seed for the run.")
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    output_dir: str = Field(
+        default="results",
+        description="Root for run outputs. The run writes to "
+        "<output_dir>/<job_type>/<label>-<config hash>/.",
+    )
+
+    def run_dir(self) -> str:
+        """Output directory for this run, disambiguated by config hash."""
+        return f"{self.output_dir}/{self.job_type}/{self.label}-{self.short_hash()}"
+
+
+class TeammateGenerationJob(JobBase):
+    """Train a teammate population with one of the four generators (§7.1)."""
+
+    job_type: Literal["teammate_generation"] = "teammate_generation"
+    env: EnvConfig
+    generator: GeneratorConfig
+    evaluation_episodes: int = Field(
+        default=20,
+        gt=0,
+        description="Episodes per ordered pair in the post-training cross-play "
+        "evaluation. Cost is population_size^2 x this, so it is the dial for the "
+        "accuracy/time trade-off when scoring a sweep.",
+    )
+    evaluation_greedy: bool = Field(
+        default=False,
+        description="Take argmax actions in the cross-play evaluation instead of "
+        "sampling. Defaults to sampling, which is both how training measures "
+        "returns and how the released population is used downstream. Greedy is "
+        "kept for diagnostics but is not the benchmark's measurement: in a "
+        "symmetric coordination task two argmax policies are perfectly "
+        "correlated and deadlock. On LBF 12x12 that held every episode to the "
+        "100-step limit and cut food collected from 75% to 25%, reporting 0.11 "
+        "for a population whose training curve read 0.40. It also discards the "
+        "policy entropy, which makes entropy_coef unmeasurable in a sweep.",
+    )
+
+
+class DatasetCollectionJob(JobBase):
+    """Roll out a trained population into the two dataset views (§4.1)."""
+
+    job_type: Literal["dataset_collection"] = "dataset_collection"
+    env: EnvConfig
+    population_path: str | list[str] = Field(
+        description="Teammate-generation run directory, or the saved_train_run "
+        "inside it. The run's own job.json says which generator produced it, so "
+        "the population is rebuilt the same way scoring rebuilds it.\n\n"
+        "A *list* of run directories selects pooled mode (§4, dataset_design.md): "
+        "the released members of every listed generator are flattened into one "
+        "roster and seated across populations, driven by the ε sampler against "
+        "'pooled_matrix_path'. The list order must match the roster order the "
+        "matrix was computed with. A single string keeps the original "
+        "single-population path (designed pairing within one generator)."
+    )
+    variant: Literal[
+        "random", "medium", "expert", "replay_full", "mixed", "br_vs_worst", "weighted"
+    ] = Field(
+        description="D4RL-style data regime (§4.3). 'replay_full' is deliberately "
+        "not D4RL's 'medium-replay', which stops at medium performance. The ε "
+        "variants ('expert', 'mixed', 'br_vs_worst') are discrete target bands over "
+        "the pooled ego-response-quality spectrum; 'weighted' draws the ego per "
+        "episode from a softmax over the matrix's own ceiling-normalized returns "
+        "(`temperature`) instead of a fixed band. All need pooled mode."
+    )
+    pooled_matrix_path: str | None = Field(
+        default=None,
+        description="Path to the pooled cross-play matrix "
+        "(populations/<env>/pooled_crossplay.npz) that the ε sampler reads in "
+        "pooled mode. Required when population_path is a list; ignored otherwise.",
+    )
+    br_population_path: str | None = Field(
+        default=None,
+        description="Required in pooled mode. A `ppo_br` run directory training one "
+        "dedicated best response per teammate, matching the one `pooled_matrix_path` "
+        "was computed with -- the matrix's ego axis is already exclusively this "
+        "population (see PooledCrossplayJob), so this rebuilds the live roster that "
+        "reproduces it rather than overriding anything at collection time.",
+    )
+    temperature: float = Field(
+        default=0.2,
+        gt=0,
+        description="'weighted' only: softmax temperature over the crossplay "
+        "matrix's own returns, normalized by that matrix's single peak cell "
+        "(PooledMatrix.ceiling) before dividing by temperature -- so this is a "
+        "fraction of this experiment's own best achieved return, not an absolute "
+        "return, and the same numeric value means the same thing across "
+        "environments with different reward scales (a temperature tuned in one "
+        "environment's raw units would otherwise need re-deriving for another's, "
+        "e.g. LBF's ~0.5 return scale vs. Overcooked's ~200). Low = concentrates "
+        "near each teammate's own dedicated best response (approaches 'expert'); "
+        "high = approaches a uniform draw over every teammate's best response. "
+        "Ignored by every other variant.",
+    )
+    allow_self_pairing: bool = Field(
+        default=True,
+        description="Pooled mode only. Whether a teammate's own dedicated best "
+        "response may be drawn as its ego (as opposed to another teammate's best "
+        "response, which was trained for a different teammate and is rarely as "
+        "good a fit). True makes 'expert' the genuine top of the spectrum -- a "
+        "teammate's own best response should win its own column; False forces a "
+        "cross-teammate responder instead. The §4 self-pairing decision, as a knob.",
+    )
+    mismatch_fraction: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of episodes seated with *mismatched* members — "
+        "member i opposite member j, i != j. Zero means every episode is the "
+        "generator's designed pairing, which is what makes 'expert' a stated "
+        "property rather than an artefact of sampling: at population_size=5, "
+        "independent seat draws matched only 1 episode in 5.\n\n"
+        "Note this is a different kind of suboptimality from the one the offline "
+        "opponent-modelling literature uses. TIPR (ICML 2025) measures datasets "
+        "by an Optimal Ratio rho = return of the dataset's ego policy / return "
+        "of the best response to that teammate, and constructs rho < 1 by "
+        "training the ego for *fewer steps against the same teammate*. That is "
+        "an incompetent partner for the right teammate; a mismatched pairing is "
+        "a competent partner for the wrong one. Both are worth having and they "
+        "are not interchangeable — see §4.3.",
+    )
+    ego_ratio: float | None = Field(
+        default=None,
+        gt=0.0,
+        le=1.0,
+        description="TIPR's Optimal Ratio rho: seat every teammate's ego at the "
+        "checkpoint whose return against that teammate is closest to this fraction "
+        "of the fully-converged best response's own return, instead of the converged "
+        "BR itself (see `mismatch_fraction`'s docstring for the rho vs. mismatch "
+        "distinction). None (default) keeps every existing job byte-for-byte "
+        "unaffected -- the converged BR via `load_ego_policies`. Only applies to "
+        "pooled mode's 'expert'-variant ego; requires `br_population_path` to point "
+        "at a `ppo_br` run trained with `num_checkpoints > 1`.",
+    )
+    num_episodes: int = Field(gt=0)
+    mirror_trajectories: bool = Field(
+        default=False,
+        description="TAGET-style trajectory mirroring (§4.5). Only valid when the "
+        "environment has symmetric roles; validated against env.symmetric_roles.",
+    )
+    holdout_per_generator: int = Field(
+        default=2,
+        ge=0,
+        description="Ad-hoc-teamwork train/test split (§8): members held out per "
+        "generator as *test* teammates, never seated in this collection. The offline "
+        "learner trains on the remaining (train) members and is evaluated online "
+        "against the held-out ones. The split is a deterministic function of "
+        "(roster, split_seed, holdout_per_generator), so every variant collected with "
+        "the same values shares one canonical held-out set. 0 disables the split "
+        "(collect against all members) — only for ablations, not the AHT protocol.",
+    )
+    split_seed: int = Field(
+        default=0,
+        description="Seed for the train/test teammate split, kept separate from "
+        "`seed` so the held-out set is stable when the collection seed changes.",
+    )
+    write_chunk_episodes: int = Field(
+        default=2000,
+        gt=0,
+        description="Episodes buffered in memory before each flush to the vault "
+        "(runner.py's old hardcoded `_WRITE_CHUNK`), and also the number of "
+        "episodes requested per `collect_episodes_batched` call (runner.py's old "
+        "hardcoded `_COLLECT_SUBGROUP`) -- that call fully materialises its whole "
+        "`num_episodes` in host memory before returning, so using a separate, "
+        "larger constant there meant this field did not actually bound peak "
+        "memory; lowering it alone could not fix an OOM. Bounds collection RAM to "
+        "roughly `write_chunk_episodes * env.rollout_length * per-timestep bytes`, "
+        "which the default was never tuned against: Overcooked-v2's ~400-step "
+        "episodes and CNN-sized (600-float) observations put a single default "
+        "chunk's observation array alone at ~3.8GB (both agents, float32) --"
+        "OOM territory on a small GPU box, versus a few hundred MB for LBF/MPE's "
+        "shorter, smaller-observation episodes at the same value. Lower this for "
+        "environments with long rollouts and/or large observations rather than "
+        "assuming the default scales.",
+    )
+    rollout_batch_size: int = Field(
+        default=256,
+        gt=0,
+        description="Episodes per vmapped device call inside "
+        "`collect_episodes_batched` (that function's old hardcoded default). "
+        "Bounds one call's device memory to roughly "
+        "`rollout_batch_size * env.rollout_length * obs_dim` -- same concern as "
+        "`write_chunk_episodes`, but for the GPU rollout itself rather than the "
+        "host-side vault write. Lower for environments with long rollouts, large "
+        "observations, or heavy (e.g. CNN) actor networks.",
+    )
+    clear_rollout_cache_every: int = Field(
+        default=0,
+        ge=0,
+        description="Call `collect.clear_rollout_cache()` after this many "
+        "(ego, teammate) pairings, clearing every compiled rollout and JAX's own "
+        "per-shape compilation cache. 0 (default) never clears, matching every "
+        "existing config's behavior. `weighted`-variant pooled collection can "
+        "have a few hundred distinct pairings, and a pairing's own leftover, "
+        "non-`rollout_batch_size`-sized final chunk triggers one more compile "
+        "that is never freed otherwise -- on a long run and a memory-constrained "
+        "GPU those accumulate. Set this (e.g. 20-50) if a collection OOMs "
+        "partway through rather than immediately, even after lowering "
+        "`rollout_batch_size`. Trades some recompilation time for bounded "
+        "memory; too low adds real overhead, since every pairing after a clear "
+        "recompiles from scratch.",
+    )
+
+
+class PooledCrossplayJob(JobBase):
+    """Compute the pooled cross-population coordination-return matrix (§4, step 2).
+
+    Builds the designed-teammate roster from every listed generator
+    (:func:`~oaht_bench.population.loading.load_teammate_policies` -- ``self``/
+    ``conf`` roles only) and scores every ordered ``(dedicated best response,
+    teammate)`` pair. The ego axis is always ``br_population_path``'s trained
+    ``ppo_br`` population, never the teammates' own generators' policies -- a
+    reused population policy caps realistic competence at ~45%
+    (``docs/tuning_record.md``). The matrix is what the ε sampler reads to place
+    each episode on the best-worst response spectrum, so a pooled
+    ``dataset_collection`` job points its ``pooled_matrix_path`` at this job's
+    output.
+
+    ``population_path`` is the same list, in the same order, a pooled
+    ``dataset_collection`` uses: ``load_teammate_policies`` preserves list order and the
+    sampler indexes the matrix by roster position, so a reordered list would
+    silently mis-seat (the collection runner's ``check_roster`` guards against
+    exactly that).
+    """
+
+    job_type: Literal["pooled_crossplay"] = "pooled_crossplay"
+    env: EnvConfig
+    population_path: list[str] = Field(
+        min_length=1,
+        description="Released teammate-generation run directories flattened into one "
+        "designed-teammate roster in list order. Must match the list a pooled "
+        "dataset_collection uses. A single-element list is valid -- it isolates one "
+        "generator's population behind pooled mode's machinery without pooling in "
+        "any other generator's members.",
+    )
+    br_population_path: str = Field(
+        description="A `ppo_br` run directory training one dedicated best response "
+        "per teammate across every population in `population_path` -- the matrix's "
+        "entire ego axis. Must cover the teammate roster exactly 1:1 "
+        "(`evaluate_pooled` raises otherwise); one `ppo_br` run trained with every "
+        "source population listed already covers the whole roster.",
+    )
+    num_episodes: int = Field(
+        default=20,
+        gt=0,
+        description="Episodes per ordered (best response, teammate) pair. Only has "
+        "to rank egos per teammate for the ε bands, so modest counts suffice; raise "
+        "it to break near-ties. Cost is K^2 x this, with K the teammate count.",
+    )
+    output_path: str | None = Field(
+        default=None,
+        description="Where to write pooled_crossplay.npz (plus a .csv and roster.json "
+        "alongside). Defaults to <run_dir>/pooled_crossplay.npz; set it to a stable "
+        "path (e.g. populations/<env>/pooled_crossplay.npz) to keep the matrix beside "
+        "the populations it scores, which is what a pooled dataset_collection then "
+        "references.",
+    )
+
+
+class OfflineTrainingConfig(BaseConfig):
+    """Optimisation and batching for the two-stage trajectory-view baselines.
+
+    Defaults are TAO's, from ``offline_stage_{1,2}/config.py``. Two differ, both
+    because our datasets are smaller than the ones those values were chosen for,
+    and both are called out here rather than buried: the batch is expressed as
+    teammates x windows (see below), and the step counts are per stage rather
+    than iterations x updates-per-iteration.
+    """
+
+    # Defaults to LIAM so a job that omits `offline` still validates; the
+    # architecture is serialised either way, so it stays in the run's hash.
+    network: OfflineNetworkConfig = Field(default_factory=LiamNetworkConfig)
+    context_length: int = Field(default=20, gt=0, description="Timesteps per window; TAO's K.")
+    stride: int = Field(
+        default=5,
+        gt=0,
+        description="Step between window starts. The reference samples random "
+        "start offsets instead; a stride enumerates them, which makes a run "
+        "reproducible from the config alone.",
+    )
+    stage1_steps: int = Field(
+        default=2000,
+        gt=0,
+        description="Gradient steps for the representation stage. TAO runs "
+        "NUM_ITER x NUM_UPDATE_PER_ITER = 200x10 (MS) or 500x10 (PA).",
+    )
+    stage2_steps: int = Field(
+        default=30000,
+        gt=0,
+        description="Gradient steps for the policy stage; TAO's 2000x10. Raised from "
+        "20000: at 20000 BC/TAO were flat but LIAM/MELIBA/OMIS still had a small "
+        "residual downward loss slope (~-0.013/1k), so the extra steps let those "
+        "three finish converging. Stage 1 stays at 2000 (already ~2x past its "
+        "representation plateau ~step 1000). See docs/tuning_record.md.",
+    )
+    stage1_learning_rate: float = Field(default=1e-2, gt=0)
+    stage2_learning_rate: float = Field(default=1e-4, gt=0)
+    weight_decay: float = Field(default=1e-4, ge=0.0)
+    clip_grad: float = Field(default=0.5, gt=0)
+    warmup_fraction: float = Field(
+        default=0.5,
+        gt=0.0,
+        le=1.0,
+        description="Linear warmup over this fraction of each stage, rather than "
+        "a fixed step count. The reference uses WARMUP_STEPS=10000 for both "
+        "stages, which is exactly half of stage 2 (20000 steps) but five times "
+        "the whole of stage 1 (2000) -- so its stage-1 learning rate ramps to "
+        "0.2x nominal and stops, never reaching the 1e-2 the config names. A "
+        "fraction reproduces stage 2 exactly and gives stage 1 the schedule its "
+        "learning rate implies.",
+    )
+    normalize_observations: bool = Field(
+        default=True,
+        description="Standardise observations and rescale return-to-go from the "
+        "dataset. The reference does both (OBS_NORMALIZE, REWARD_SCALE); without "
+        "them LBF observations sit at std 3.3 against a return-to-go at std "
+        "0.155, so the return token -- the Decision Transformer's whole control "
+        "signal -- carries a twentieth of an observation feature's magnitude "
+        "into a sum of three embeddings.",
+    )
+
+    batch_size: int = Field(
+        default=64,
+        gt=0,
+        # One knob for every baseline and both stages. BC/LIAM/MeLIBA/OMIS use it
+        # for their single training loop; TAO uses it for stage 2 and *derives* its
+        # stage-1 contrastive factorization from it (all available teammates x
+        # batch_size/n_teammates windows each, >=2 positives -- see TaoTrainer).
+        # Accepts the old `stage2_batch_size` key so existing configs keep loading.
+        validation_alias=AliasChoices("batch_size", "stage2_batch_size"),
+        description="Minibatch size, shared by every baseline and both training "
+        "stages. TAO's stage-1 contrastive batch is factored from it over the "
+        "available teammates.",
+    )
+    context_trajectories: int = Field(
+        default=5,
+        gt=0,
+        description="TAO's C: trajectories stitched into the GetOffD context. "
+        "Matches the reference's OCW_SIZE.",
+    )
+    alpha: float = Field(default=1.0, ge=0.0, description="Weight on the generative term.")
+    lam: float = Field(default=1.0, ge=0.0, description="Weight on the discriminative term.")
+    temperature: float = Field(default=0.1, gt=0)
+    base_temperature: float = Field(default=0.1, gt=0)
+    freeze_encoder: bool = Field(
+        default=True,
+        description="Freeze the stage-1 encoder during stage 2. True follows the "
+        "paper; the released code trains it jointly, which would make TAO and "
+        "TAO-w/o-PEL the same model. See offline.tao.tao_policy_loss.",
+    )
+    # MeLIBA only. Defaults from the jax-aht implementation
+    # (``meliba_agent.py``: ENCODER_LATENT_DIM, DECODER_KL_WEIGHT).
+    latent_dim: int = Field(
+        default=16,
+        gt=0,
+        description="MeLIBA's per-latent dimension; the encoder emits two latents "
+        "(agent character and mental state) of this size.",
+    )
+    kl_weight: float = Field(
+        default=0.05,
+        ge=0.0,
+        description="MeLIBA's beta on the sequential belief KL (DECODER_KL_WEIGHT).",
+    )
+    # OMIS only. Weights on the critic and opponent-imitator terms in the joint
+    # actor/critic/imitator loss (offline.omis.omis_joint_loss); the actor
+    # cross-entropy has weight 1. Names and defaults match the reference's own
+    # ``args.vf_coef``/``args.oppo_pi_coef`` (``pretraining/pretrain.py``).
+    # Search is not deployed, so ``oppo_pi_coef`` and ``vf_coef`` only shape the
+    # saved imitator/critic heads, not the deployed actor's own gradient share.
+    vf_coef: float = Field(
+        default=0.5,
+        ge=0.0,
+        description="OMIS's weight on the critic MSE in the joint loss.",
+    )
+    oppo_pi_coef: float = Field(
+        default=0.8,
+        ge=0.0,
+        description="OMIS's weight on the opponent-imitator CE in the joint loss.",
+    )
+    epi_length: int = Field(
+        default=15,
+        gt=0,
+        description="OMIS's H: D_epi's own total length (Appendix C), independent "
+        "of context_length (B) -- the paper's own LBF hyperparameter table gives "
+        "H=15, B=20 as separately-valued. context_trajectories is D_epi's C; each "
+        "of its C fragments is H // C long.",
+    )
+    eval_episodes: int = Field(
+        default=20,
+        gt=0,
+        description="Episodes per teammate in the post-training rollout. Cost is "
+        "members x this, and it is the only metric that measures play rather "
+        "than action prediction.",
+    )
+    log_every: int = Field(default=100, gt=0)
+
+
+class TrainingJob(JobBase):
+    """Train one baseline on one dataset."""
+
+    job_type: Literal["training"] = "training"
+    env: EnvConfig
+    dataset_path: str
+    baseline: BaselineName = Field(description="Which baseline to train (§6).")
+    backbone: Literal["dt", "iql", "bc"] = Field(
+        default="dt",
+        description="Shared sequence-model backbone (§3.1). 'iql' is the "
+        "backbone-sensitivity ablation.",
+    )
+    num_seeds: int = Field(
+        default=3,
+        gt=0,
+        description="Independently-initialised seeds trained together, vmapped over "
+        "a leading seed axis on one device (params.pkl then carries that axis, and "
+        "held-out eval is reported as the across-seed mean +/- std). Seeds are what "
+        "make a baseline ordering trustworthy -- teammate-to-teammate variance "
+        "already swamps the small gaps between methods. Memory scales with this; on "
+        "a large model per device, run one seed per GPU instead. 1 = single seed.",
+    )
+    offline: OfflineTrainingConfig = Field(default_factory=OfflineTrainingConfig)
+
+
+class EvaluationJob(JobBase):
+    """Evaluate trained baselines against held-out teammates (§8)."""
+
+    job_type: Literal["evaluation"] = "evaluation"
+    env: EnvConfig
+    checkpoint_paths: list[str] = Field(min_length=1)
+    dataset_path: str = Field(
+        description="A dataset COLLECTION directory (e.g. "
+        "results/dataset_collection/pooled_<env>_expert-<hash>, where teammate_split.json "
+        "lives), not a released populations/<env>/<generator> directory. Its own recorded "
+        "'held_out' split -- the roster actually reserved at collection time, not just any "
+        "member outside training -- is the 'unseen' teammate set. Usually the checkpoint's "
+        "own dataset (did held-out generalisation change); a different one when the question "
+        "is generalisation to a separate collection -- run a separate EvaluationJob per "
+        "dataset rather than merging two held-out sets into one number.",
+    )
+    num_episodes: int = Field(
+        default=1200,
+        gt=0,
+        description="Per teammate. The literature runs 50-2500; low budgets "
+        "produce confidence intervals that overlap the baselines being beaten.",
+    )
+
+
+#: The union itself, for annotating anything that holds a concrete job.
+AnyJob = Annotated[
+    TeammateGenerationJob | DatasetCollectionJob | PooledCrossplayJob | TrainingJob | EvaluationJob,
+    Field(discriminator="job_type"),
+]
+
+
+class JobConfig(VersionedConfig):
+    """An experiment config file: exactly one job.
+
+    The union is a *field* rather than the model itself because
+    ``Annotated[A | B, ...]`` is a typing alias — an assignment binding a name to
+    a typing object, not a class — so it has no ``model_validate``. Wrapping it
+    gives the normal pydantic interface, with ``job_type`` still selecting which
+    member is validated::
+
+        job = JobConfig.model_validate(payload).job
+
+    Keeping the job under a named key also leaves the top level free for
+    file-scoped metadata later without colliding with any job's own fields.
+
+    Prefer :func:`~oaht_bench.configs.load_job` and
+    :func:`~oaht_bench.configs.validate_job`, which unwrap ``.job`` and turn a
+    malformed config into a message naming the file and the offending key.
+    """
+
+    job: AnyJob

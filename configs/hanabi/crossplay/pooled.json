@@ -1,0 +1,28 @@
+{
+  "job": {
+    "job_type": "pooled_crossplay",
+    "env": {
+        "env_name": "hanabi",
+        "hand_size": 5,
+        "max_info_tokens": 8,
+        "max_life_tokens": 3,
+        "name": "hanabi",
+        "notes": "Turn-based, action-masked, hidden own hand. The abstraction stress test.",
+        "num_cards_of_rank": [3, 2, 2, 2, 1],
+        "num_colors": 5,
+        "num_ranks": 5,
+        "rollout_length": 128,
+        "tier": "tier1"
+    },
+    "population_path": [
+        "populations/hanabi/brdiv",
+        "populations/hanabi/comedi",
+        "populations/hanabi/fcp",
+        "populations/hanabi/lbrdiv"
+    ],
+    "num_episodes": 20,
+    "output_path": "populations/hanabi/pooled_crossplay.npz",
+    "label": "pooled_hanabi",
+    "logging": {"use_wandb": false}
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "job": {
+    "env": {
+      "env_name": "lbf",
+      "grid_size": 12,
+      "name": "lbf_12x12",
+      "notes": "Gridworld. Matches the existing checkpoints/lbf/lbf_12x12 populations.",
+      "num_food": 6,
+      "rollout_length": 128,
+      "tier": "tier1"
+    },
+    "generator": {
+      "generator": "mep",
+      "total_timesteps": 10000000.0
+    },
+    "job_type": "teammate_generation",
+    "label": "mep_lbf_12x12"
+  },
+  "schema_version": 1
+}

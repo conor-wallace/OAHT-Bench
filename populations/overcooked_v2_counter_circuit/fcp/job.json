@@ -1,0 +1,62 @@
+{
+  "job": {
+    "env": {
+      "agent_view_size": 2,
+      "env_name": "overcooked-v2",
+      "indicate_successful_delivery": false,
+      "layout": "counter_circuit",
+      "name": "overcooked_v2_counter_circuit",
+      "negative_rewards": false,
+      "notes": "Full resource-sharing; discriminates between methods in v1.",
+      "random_agent_positions": false,
+      "random_reset": true,
+      "rollout_length": 400,
+      "sample_recipe_on_delivery": false,
+      "schema_version": 1,
+      "tier": "tier1"
+    },
+    "evaluation_episodes": 20,
+    "evaluation_greedy": false,
+    "generator": {
+      "actor_type": "rnn",
+      "generator": "fcp",
+      "network": {
+        "activation": "tanh",
+        "architecture": "mlp",
+        "hidden_dim": 64,
+        "policy_input_dim": null
+      },
+      "num_checkpoints": 5,
+      "num_envs": 64,
+      "num_eval_episodes": 20,
+      "num_seeds": 1,
+      "population_size": 5,
+      "ppo": {
+        "anneal_lr": true,
+        "clip_eps": 0.2,
+        "entropy_coef": 0.01,
+        "gae_lambda": 0.95,
+        "gamma": 0.99,
+        "learning_rate": 0.00025,
+        "max_grad_norm": 1.0,
+        "num_minibatches": 64,
+        "update_epochs": 4,
+        "value_coef": 0.5
+      },
+      "total_timesteps": 60000000.0,
+      "train_seed": 20374
+    },
+    "job_type": "teammate_generation",
+    "label": "fcp_overcooked_v2_budget2__total_timesteps=60000000.0",
+    "logging": {
+      "use_wandb": false,
+      "verbose": false,
+      "wandb_entity": null,
+      "wandb_project": null
+    },
+    "output_dir": "results",
+    "schema_version": 1,
+    "seed": 0
+  },
+  "schema_version": 1
+}

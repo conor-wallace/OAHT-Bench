@@ -1,0 +1,40 @@
+{
+  "job": {
+    "job_type": "training",
+    "env": {
+      "env_name": "hanabi",
+      "hand_size": 5,
+      "max_info_tokens": 8,
+      "max_life_tokens": 3,
+      "name": "hanabi",
+      "notes": "Turn-based, action-masked, hidden own hand. The abstraction stress test.",
+      "num_cards_of_rank": [
+        3,
+        2,
+        2,
+        2,
+        1
+      ],
+      "num_colors": 5,
+      "num_ranks": 5,
+      "rollout_length": 128,
+      "tier": "tier1"
+    },
+    "dataset_path": "results/dataset_collection/pooled_expert_hanabi-690e4dc7f41b/dataset.vlt",
+    "baseline": "meliba",
+    "label": "meliba_pooled_expert_hanabi",
+    "offline": {
+      "network": {
+        "architecture": "meliba"
+      },
+      "stride": 20,
+      "stage1_steps": 2000,
+      "stage2_steps": 30000,
+      "log_every": 250,
+      "eval_episodes": 20
+    },
+    "logging": {
+      "use_wandb": false
+    }
+  }
+}
