@@ -220,10 +220,12 @@ def test_is_checkpoint_step_evenly_spaced_true_spans_the_full_known_range():
     assert triggers == [30, 60, 90]
 
 
-def _toy_gen(population_entropy_coef, *, population_size=2, num_envs=8, total_timesteps=1600):
+def _toy_gen(
+    population_entropy_coef, *, population_size=2, num_envs=8, total_timesteps=1600, network=None
+):
     from oaht_bench.configs.teammate_gen import MepConfig
 
-    return MepConfig(
+    kwargs = dict(
         population_size=population_size,
         num_envs=num_envs,
         total_timesteps=total_timesteps,
@@ -231,6 +233,9 @@ def _toy_gen(population_entropy_coef, *, population_size=2, num_envs=8, total_ti
         population_entropy_coef=population_entropy_coef,
         train_seed=0,
     )
+    if network is not None:
+        kwargs["network"] = network
+    return MepConfig(**kwargs)
 
 
 def test_run_mep_trains_saves_and_scores(tmp_path):
@@ -253,6 +258,44 @@ def test_run_mep_trains_saves_and_scores(tmp_path):
     run_dir = run(job)
     assert (run_dir / "job.json").exists()
     assert artifact_dir(run_dir).exists()  # the checkpoint was written
+
+
+def test_run_mep_scores_with_a_non_default_network_shape(tmp_path):
+    """Regression guard: get_mep_population's MLP branch must reconstruct the
+    policy with the SAME hidden_dim/num_layers training actually used, not the
+    class defaults.
+
+    Every other MEP test here leaves `network` at MlpNetwork()'s defaults
+    (hidden_dim=64, num_layers=2), which masks this exact bug: training and
+    the post-training evaluation each independently default to 64/2, so they
+    "agree" even if neither reads the job's own network config. A
+    non-default shape is the only way to catch get_mep_population silently
+    dropping fc_hidden_dim/num_layers and reconstructing the class defaults
+    instead -- which crashed _evaluate_population's cross-play scoring with
+    `flax.errors.ScopeParamShapeError` on a real OMIS-fidelity LBF run
+    (hidden_dim=32, num_layers=3) the moment a config stopped matching
+    MlpNetwork's defaults by coincidence.
+    """
+    from oaht_bench.configs import get_preset
+    from oaht_bench.configs.job import TeammateGenerationJob
+    from oaht_bench.configs.network import MlpNetwork
+    from oaht_bench.population import artifact_dir
+    from oaht_bench.teammate_gen.runner import run
+
+    env = get_preset("lbf_12x12").model_copy(update={"rollout_length": 8})
+    gen = _toy_gen(
+        population_entropy_coef=0.01,
+        num_envs=4,
+        total_timesteps=32,
+        network=MlpNetwork(hidden_dim=16, num_layers=3, activation="relu"),
+    )
+    job = TeammateGenerationJob(
+        label="mep_nondefault_shape", env=env, generator=gen, output_dir=str(tmp_path)
+    )
+
+    run_dir = run(job)  # must reach the end, including _evaluate_population's crossplay
+    assert (run_dir / "job.json").exists()
+    assert artifact_dir(run_dir).exists()
 
 
 def test_run_mep_tracks_best_and_releases_it_independently_of_checkpoints(tmp_path):

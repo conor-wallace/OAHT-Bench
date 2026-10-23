@@ -138,6 +138,8 @@ def get_fcp_population(
             action_dim=env.action_space(env.agents[1]).n,
             obs_dim=env.observation_space(env.agents[1]).shape[0],
             activation=gen.network.activation,
+            fc_hidden_dim=gen.network.hidden_dim,
+            num_layers=gen.network.num_layers,
         )
 
     # Create partner population
@@ -231,6 +233,8 @@ def get_mep_population(
             action_dim=env.action_space(env.agents[1]).n,
             obs_dim=env.observation_space(env.agents[1]).shape[0],
             activation=gen.network.activation,
+            fc_hidden_dim=gen.network.hidden_dim,
+            num_layers=gen.network.num_layers,
         )
 
     partner_population = AgentPopulation(
@@ -265,7 +269,11 @@ def _conditional_critic_policy(job: TeammateGenerationJob, env: TrainingEnv, pop
             gru_hidden_dim=128,
             **kwargs,
         )
-    return ActorWithConditionalCriticPolicy(**kwargs)
+    return ActorWithConditionalCriticPolicy(
+        fc_hidden_dim=job.generator.network.hidden_dim,
+        num_layers=job.generator.network.num_layers,
+        **kwargs,
+    )
 
 
 def get_comedi_population(
