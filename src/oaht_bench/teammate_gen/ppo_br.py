@@ -11,9 +11,16 @@ Structure: one trainable ego in seat 0, one **frozen** teammate in seat 1. It is
 two-policy PPO — the same rollout/GAE/clipped-PPO machinery as
 :func:`~oaht_bench.teammate_gen.marl.ippo.make_train`, but the seats carry *different*
 params: only the ego has a ``TrainState`` and gradients; the teammate acts with fixed
-params (``jax.lax.stop_gradient``) and is part of the environment. The ego is
-**warm-started** from an already-competent policy (the paired ``br`` where one exists,
-else the self-play member itself), so PPO fine-tunes rather than learns from scratch.
+params (``jax.lax.stop_gradient``) and is part of the environment. ``make_br_train``
+itself is agnostic to where the ego's initial params came from -- that choice is
+``PpoBrConfig.ego_init``, read in ``_train_source`` before this function ever runs:
+by default (``"warm_start"``) the ego starts from an already-competent policy (the
+paired ``br`` where one exists, else the self-play member itself), so PPO fine-tunes
+rather than learns from scratch; ``"scratch"`` instead draws a fresh random init per
+member (:func:`~oaht_bench.teammate_gen.marl.ippo.initialize_agent`), matching OMIS's
+own reference (``OMIS/pretraining/train_br.py``: a brand-new PPO agent trained online
+against one fixed, frozen opponent, no warm start at all) -- see ``PpoBrConfig.ego_init``'s
+own docstring for why that divergence from the reference might matter here.
 
 ``jax.vmap`` over a leading member axis trains one BR per teammate in a single run
 (the ``teammate_params`` and ``ego_init_params`` pytrees carry that axis, exactly as
@@ -366,6 +373,7 @@ def _train_source(src_path, job, env, base, source_index, logger):
     from oaht_bench.configs import load_job
     from oaht_bench.population.loading import artifact_dir, population_from_run
     from oaht_bench.population.members import get_member_params, released_members
+    from oaht_bench.teammate_gen.marl.ippo import initialize_agent
     from oaht_bench.teammate_gen.runtime import PpoRuntime
 
     gen = job.generator
@@ -375,35 +383,9 @@ def _train_source(src_path, job, env, base, source_index, logger):
     loaded = population_from_run(src_job, load_train_run(str(artifact_dir(src_run))), env)
     members = [int(m) for m in released_members(src_job, loaded.pop_size)]
 
-    teammate_list, ego_list, entries = [], [], []
-    for pos, m in enumerate(members):
-        if loaded.paired:
-            teammate_list.append(get_member_params(loaded.params, m))  # confederate (fixed)
-            ego_list.append(get_member_params(loaded.partner_params, m))  # its br (warm start)
-            role = "conf"
-        else:
-            p = get_member_params(loaded.params, m)
-            teammate_list.append(p)  # self member (fixed)
-            ego_list.append(p)  # warm-start from itself
-            role = "self"
-        entries.append(
-            {
-                "generator": loaded.generator,
-                "member": m,
-                "role": role,
-                "source_index": source_index,
-                "pos": pos,
-                "source_population_path": str(src_path),
-            }
-        )
-    teammate_params = jax.tree.map(lambda *xs: jnp.stack(xs), *teammate_list)
-    ego_init_params = jax.tree.map(lambda *xs: jnp.stack(xs), *ego_list)
-
-    ego_aux_ids = None
-    if "conditional_critic" in src_job.generator.actor_type:
-        eye = jnp.eye(loaded.pop_size)
-        ego_aux_ids = jnp.stack([eye[m] for m in members])  # (members, pop_size) onehot
-
+    # Built here, before the per-member loop, because 'scratch' ego_init needs it
+    # (initialize_agent reads actor_type/to_agent_dict() off it) -- unchanged for
+    # the 'warm_start' path, which never reads it before this point either.
     rt = PpoRuntime.from_config(
         ppo=gen.ppo,
         network=src_job.generator.network,
@@ -415,6 +397,51 @@ def _train_source(src_path, job, env, base, source_index, logger):
         num_agents=base.num_agents,
         pop_size=loaded.pop_size,
     )
+
+    # A separate RNG stream from the training rngs below (jax.random.fold_in with
+    # a distinct tag), so switching ego_init never perturbs warm_start's existing
+    # training randomness -- only 'scratch' ever reads scratch_rngs.
+    scratch_rngs = jax.random.split(
+        jax.random.fold_in(jax.random.PRNGKey(gen.train_seed + source_index), 0), len(members)
+    )
+
+    teammate_list, ego_list, entries = [], [], []
+    for pos, m in enumerate(members):
+        if loaded.paired:
+            teammate_list.append(get_member_params(loaded.params, m))  # confederate (fixed)
+            warm_start_params = get_member_params(loaded.partner_params, m)  # its br
+            role = "conf"
+        else:
+            p = get_member_params(loaded.params, m)
+            teammate_list.append(p)  # self member (fixed)
+            warm_start_params = p  # warm-start from itself
+            role = "self"
+        if gen.ego_init == "scratch":
+            _, init_params = initialize_agent(
+                rt.actor_type, rt.to_agent_dict(), env, scratch_rngs[pos]
+            )
+            ego_list.append(init_params)
+        else:
+            ego_list.append(warm_start_params)
+        entries.append(
+            {
+                "generator": loaded.generator,
+                "member": m,
+                "role": role,
+                "source_index": source_index,
+                "pos": pos,
+                "source_population_path": str(src_path),
+                "ego_init": gen.ego_init,
+            }
+        )
+    teammate_params = jax.tree.map(lambda *xs: jnp.stack(xs), *teammate_list)
+    ego_init_params = jax.tree.map(lambda *xs: jnp.stack(xs), *ego_list)
+
+    ego_aux_ids = None
+    if "conditional_critic" in src_job.generator.actor_type:
+        eye = jnp.eye(loaded.pop_size)
+        ego_aux_ids = jnp.stack([eye[m] for m in members])  # (members, pop_size) onehot
+
     from tqdm import tqdm
 
     chunk = int(gen.members_per_chunk)
@@ -455,8 +482,9 @@ def run_ppo_br(job, logger):
 
     ``source_population_path`` may be a single run dir or a *list* (pooled mode: the whole
     released roster across generators). Each population's ``self``/``conf`` members become
-    fixed teammates; each BR ego is warm-started from the paired ``br`` (paired) or the
-    member itself (homogeneous). Populations are trained per-source (they carry different
+    fixed teammates; each BR ego's initial params come from ``ego_init``'s warm-start
+    (the paired ``br``, or the member itself for homogeneous populations -- the default,
+    unchanged prior behaviour) or a fresh random init (``"scratch"``). Populations are trained per-source (they carry different
     actor architectures, which cannot share one ``vmap``), member-chunked for bounded
     VRAM, and saved as one combined artifact: ``br_by_source`` (params per source) plus a
     ``br_manifest.json`` mapping every teammate ``(generator, member, role)`` to its BR.

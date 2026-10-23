@@ -444,12 +444,11 @@ class MepConfig(GeneratorBase):
 
 class PpoBrConfig(GeneratorBase):
     """Train a dedicated best-response ego against each fixed teammate in a released
-    population, warm-started from an already-competent policy.
+    population, by default warm-started from an already-competent policy.
 
     Not a diversity generator: it *consumes* a released population (``self``/``conf``
-    members become fixed teammates) and produces one PPO best-response ego per teammate,
-    warm-started from the paired ``br`` where one exists, else the self-play member
-    itself. This is the ego the offline dataset should clone (TAO/OMIS/ICRL4AHT build
+    members become fixed teammates) and produces one PPO best-response ego per teammate.
+    This is the ego the offline dataset should clone (TAO/OMIS/ICRL4AHT build
     the offline set from per-teammate best responses); reusing population policies as
     the ego caps the dataset at ~45% of competence (``docs/tuning_record.md``).
     ``actor_type`` must match the source population's.
@@ -459,7 +458,7 @@ class PpoBrConfig(GeneratorBase):
     source_population_path: str | list[str] = Field(
         description="Released teammate-generation run dir(s) to best-respond to "
         "(``populations/<env>/<gen>/``). Their released self/conf members become the "
-        "fixed teammates; the paired br (or the member) seeds each BR ego. A *list* is "
+        "fixed teammates; ``ego_init`` decides what seeds each BR ego. A *list* is "
         "pooled mode: one run trains best responses for the whole released roster across "
         "generators, saved as one combined artifact. Each source's architecture is read "
         "from its own job, so `actor_type`/`network` here are unused (they are derived "
@@ -476,6 +475,22 @@ class PpoBrConfig(GeneratorBase):
     )
     actor_type: ActorType = "mlp"
     total_timesteps: float = Field(default=1e6, gt=0, description="Per best-response trained.")
+    ego_init: Literal["warm_start", "scratch"] = Field(
+        default="warm_start",
+        description="How each BR ego's initial params are chosen. 'warm_start' (default, "
+        "unchanged prior behaviour): the paired `br` where one exists, else the self-play "
+        "member itself -- PPO fine-tunes rather than learns from scratch. 'scratch': a "
+        "fresh random init (oaht_bench.teammate_gen.marl.ippo.initialize_agent, the same "
+        "initializer every from-scratch generator uses), matching OMIS's own reference "
+        "(OMIS/pretraining/train_br.py: a brand-new PPO agent trained online against one "
+        "fixed, frozen opponent, no warm start at all). Warm-starting may be suppressing "
+        "exactly the cross-ego behavioural diversity the offline opponent-conditioning "
+        "mechanisms (D_epi/GetOffD) need, since every BR then inherits its source "
+        "population member's strategic bias before ever seeing its specific opponent. "
+        "`total_timesteps` tuned for fine-tuning a warm start is very unlikely to be "
+        "enough for from-scratch convergence -- raise it when switching to 'scratch', "
+        "and re-validate rather than assume the existing default transfers.",
+    )
 
 
 #: Discriminated union, selected by ``generator``.
