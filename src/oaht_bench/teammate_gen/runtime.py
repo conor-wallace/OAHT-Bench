@@ -75,6 +75,22 @@ class PpoRuntime(BaseConfig):
         """
         num_actors = num_agents * num_envs
         num_updates = int(total_timesteps // rollout_length // num_envs)
+
+        if ppo.minibatch_size is not None:
+            # A direct size, not a count (e.g. OMIS App. H.2's literal 4096) --
+            # derive the equivalent num_minibatches and carry it on a copy of
+            # ppo, so every downstream _create_minibatches(..., config.ppo.
+            # num_minibatches, ...) call site sees it with no other change.
+            batch = num_actors * rollout_length
+            if batch % ppo.minibatch_size:
+                raise ValueError(
+                    f"minibatch_size={ppo.minibatch_size} does not evenly divide "
+                    f"the batch of {batch} transitions (num_actors={num_actors} x "
+                    f"rollout_length={rollout_length}); pick a minibatch_size that "
+                    f"divides it, or adjust num_actors/rollout_length."
+                )
+            ppo = ppo.model_copy(update={"num_minibatches": batch // ppo.minibatch_size})
+
         minibatch_size = num_actors * rollout_length // ppo.num_minibatches
 
         if num_updates < 1:
@@ -265,6 +281,7 @@ class RpgRuntime(BaseConfig):
     # --- authored ---
     ppo: PpoHyperparams
     network: MlpNetwork
+    actor_type: ActorType
     rollout_length: int = Field(gt=0)
     num_envs: int = Field(gt=0)
     total_timesteps: float = Field(gt=0)
@@ -317,6 +334,7 @@ class RpgRuntime(BaseConfig):
         return cls(
             ppo=gen.ppo,
             network=gen.network,
+            actor_type=gen.actor_type,
             rollout_length=rollout_length,
             num_envs=gen.num_envs,
             total_timesteps=gen.total_timesteps,

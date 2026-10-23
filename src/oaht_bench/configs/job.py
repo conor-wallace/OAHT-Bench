@@ -422,6 +422,17 @@ class OfflineTrainingConfig(BaseConfig):
         "signal -- carries a twentieth of an observation feature's magnitude "
         "into a sum of three embeddings.",
     )
+    rtg_scale: float | None = Field(
+        default=None,
+        gt=0,
+        description="Override the computed return-to-go scale (the dataset-wide "
+        "RTG standard deviation) with a fixed constant. OMIS (App. H.2, confirmed "
+        "against OMIS/pretraining/utils.py's reward_scale_dict, not just the "
+        "paper's own table) divides by one environment-specific number rather "
+        "than a learned statistic -- 1.0 for LBF (a no-op), 100 for Overcooked/"
+        "MPE. None (default) keeps today's computed scale; ignored when "
+        "normalize_observations=False.",
+    )
 
     batch_size: int = Field(
         default=64,

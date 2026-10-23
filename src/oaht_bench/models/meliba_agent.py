@@ -37,6 +37,9 @@ class MelibaEncoder(nn.Module):
     latent_dim: int = 16
     hidden_dim: int = 32
     dropout: float = 0.1
+    ff_activation: str = "relu"
+    obs_embed_layers: int = 1
+    obs_embed_activation: str = "none"
 
     @nn.compact
     def __call__(self, rtg, obs, actions, *, timesteps, mask=None, train: bool = False):
@@ -45,6 +48,9 @@ class MelibaEncoder(nn.Module):
             hidden_dim=self.hidden_dim,
             use_cross_attention=False,
             dropout=self.dropout,
+            ff_activation=self.ff_activation,
+            obs_embed_layers=self.obs_embed_layers,
+            obs_embed_activation=self.obs_embed_activation,
         )(rtg, obs, actions, timesteps=timesteps, mask=mask, train=train)
 
         char_mean = nn.Dense(self.latent_dim, name="char_mean")(obs_hidden)
@@ -86,6 +92,9 @@ class MelibaNetwork(nn.Module):
     action_dim: int
     hidden_dim: int = 32
     dropout: float = 0.1
+    ff_activation: str = "relu"
+    obs_embed_layers: int = 1
+    obs_embed_activation: str = "none"
 
     @nn.compact
     def __call__(self, rtg, obs, actions, *, timesteps, belief, mask=None, train: bool = False):
@@ -94,6 +103,9 @@ class MelibaNetwork(nn.Module):
             hidden_dim=self.hidden_dim,
             use_cross_attention=False,
             dropout=self.dropout,
+            ff_activation=self.ff_activation,
+            obs_embed_layers=self.obs_embed_layers,
+            obs_embed_activation=self.obs_embed_activation,
         )(
             rtg,
             jnp.concatenate([obs, belief], axis=-1),
@@ -122,7 +134,13 @@ class MelibaAgent(ReturnConditionedAgent):
                 "obs_dim/action_dim are unresolved on the network config; the "
                 "runner must resolve them from the dataset before build_model()."
             )
-        common = dict(hidden_dim=net.hidden_dim, dropout=net.dropout)
+        common = dict(
+            hidden_dim=net.hidden_dim,
+            dropout=net.dropout,
+            ff_activation=net.ff_activation,
+            obs_embed_layers=net.obs_embed_layers,
+            obs_embed_activation=net.obs_embed_activation,
+        )
         self.encoder = MelibaEncoder(
             action_dim=net.action_dim, latent_dim=self.config.latent_dim, **common
         )

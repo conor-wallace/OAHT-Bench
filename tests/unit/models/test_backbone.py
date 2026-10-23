@@ -179,6 +179,80 @@ def test_off_defaults_are_byte_identical_to_the_pre_extension_backbone(extra_kwa
     np.testing.assert_allclose(np.asarray(out_old), np.asarray(out_new), atol=1e-6)
 
 
+def test_ff_activation_gelu_changes_the_output_vs_the_relu_default():
+    """ff_activation is a real switch, not a silently-ignored kwarg -- OMIS's
+    own GPT2 backbone uses GELU (App. F), everyone else's default stays ReLU."""
+    B, T, action_dim, obs_dim, hidden = 3, 5, 4, 6, 8
+    rtg, obs, actions, timesteps, mask = _inputs(B, T, action_dim, obs_dim)
+    kwargs = dict(action_dim=action_dim, hidden_dim=hidden, ff_dim=16, num_blocks=2, dropout=0.0)
+
+    relu_model = GPT2Model(**kwargs)
+    gelu_model = GPT2Model(**kwargs, ff_activation="gelu")
+
+    init_rng = jax.random.PRNGKey(42)
+    params = relu_model.init(init_rng, rtg, obs, actions, timesteps=timesteps, mask=mask)
+    out_relu = relu_model.apply(params, rtg, obs, actions, timesteps=timesteps, mask=mask)
+    out_gelu = gelu_model.apply(params, rtg, obs, actions, timesteps=timesteps, mask=mask)
+
+    assert out_relu.shape == out_gelu.shape
+    assert not np.allclose(np.asarray(out_relu), np.asarray(out_gelu))
+
+
+def test_ff_activation_default_is_byte_identical_to_relu():
+    B, T, action_dim, obs_dim, hidden = 3, 5, 4, 6, 8
+    rtg, obs, actions, timesteps, mask = _inputs(B, T, action_dim, obs_dim)
+    kwargs = dict(action_dim=action_dim, hidden_dim=hidden, ff_dim=16, num_blocks=2, dropout=0.0)
+
+    default_model = GPT2Model(**kwargs)
+    relu_model = GPT2Model(**kwargs, ff_activation="relu")
+
+    init_rng = jax.random.PRNGKey(42)
+    params = default_model.init(init_rng, rtg, obs, actions, timesteps=timesteps, mask=mask)
+    out_default = default_model.apply(params, rtg, obs, actions, timesteps=timesteps, mask=mask)
+    out_relu = relu_model.apply(params, rtg, obs, actions, timesteps=timesteps, mask=mask)
+    np.testing.assert_allclose(np.asarray(out_default), np.asarray(out_relu))
+
+
+def test_obs_embed_layers_changes_the_parameter_structure():
+    """OMIS's own embed_state (App. F) is a 3-layer MLP; action/RTG embeddings
+    stay a single unactivated Dense regardless -- only o_tok's depth differs."""
+    B, T, action_dim, obs_dim, hidden = 3, 5, 4, 6, 8
+    rtg, obs, actions, timesteps, mask = _inputs(B, T, action_dim, obs_dim)
+    kwargs = dict(action_dim=action_dim, hidden_dim=hidden, ff_dim=16, num_blocks=2, dropout=0.0)
+
+    shallow = GPT2Model(**kwargs)
+    deep = GPT2Model(**kwargs, obs_embed_layers=3, obs_embed_activation="leaky_relu")
+
+    init_rng = jax.random.PRNGKey(42)
+    params_shallow = shallow.init(init_rng, rtg, obs, actions, timesteps=timesteps, mask=mask)
+    params_deep = deep.init(init_rng, rtg, obs, actions, timesteps=timesteps, mask=mask)
+
+    def dense_kernel_count(params):
+        return sum(
+            1
+            for p, _ in jax.tree_util.tree_leaves_with_path(params)
+            if "kernel" in jax.tree_util.keystr(p)
+        )
+
+    # Two extra Dense layers building o_tok (3 total instead of 1), nothing else changes.
+    assert dense_kernel_count(params_deep) == dense_kernel_count(params_shallow) + 2
+
+
+def test_obs_embed_layers_default_is_byte_identical_to_a_single_dense():
+    B, T, action_dim, obs_dim, hidden = 3, 5, 4, 6, 8
+    rtg, obs, actions, timesteps, mask = _inputs(B, T, action_dim, obs_dim)
+    kwargs = dict(action_dim=action_dim, hidden_dim=hidden, ff_dim=16, num_blocks=2, dropout=0.0)
+
+    default_model = GPT2Model(**kwargs)
+    explicit_model = GPT2Model(**kwargs, obs_embed_layers=1, obs_embed_activation="none")
+
+    init_rng = jax.random.PRNGKey(42)
+    params = default_model.init(init_rng, rtg, obs, actions, timesteps=timesteps, mask=mask)
+    out_default = default_model.apply(params, rtg, obs, actions, timesteps=timesteps, mask=mask)
+    out_explicit = explicit_model.apply(params, rtg, obs, actions, timesteps=timesteps, mask=mask)
+    np.testing.assert_allclose(np.asarray(out_default), np.asarray(out_explicit))
+
+
 def test_d_step_and_d_epi_change_the_output_and_preserve_shape():
     """The new conditioning must actually reach the computation (not a
     silently-ignored kwarg) and must not change the output's shape -- the

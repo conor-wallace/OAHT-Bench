@@ -11,6 +11,7 @@ class ActorCritic(nn.Module):
     action_dim: Sequence[int]
     activation: str = "tanh"
     fc_hidden_dim: int = 64
+    num_layers: int = 2
 
     @nn.compact
     def __call__(self, x):
@@ -20,14 +21,12 @@ class ActorCritic(nn.Module):
             activation = nn.tanh
 
         obs, avail_actions = x
-        actor_mean = nn.Dense(
-            self.fc_hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(obs)
-        actor_mean = activation(actor_mean)
-        actor_mean = nn.Dense(
-            self.fc_hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(actor_mean)
-        actor_mean = activation(actor_mean)
+        actor_mean = obs
+        for _ in range(self.num_layers):
+            actor_mean = nn.Dense(
+                self.fc_hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            )(actor_mean)
+            actor_mean = activation(actor_mean)
         actor_mean = nn.Dense(
             self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
         )(actor_mean)
@@ -38,14 +37,12 @@ class ActorCritic(nn.Module):
 
         pi = distrax.Categorical(logits=actor_mean)
 
-        critic = nn.Dense(
-            self.fc_hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(obs)
-        critic = activation(critic)
-        critic = nn.Dense(
-            self.fc_hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(critic)
-        critic = activation(critic)
+        critic = obs
+        for _ in range(self.num_layers):
+            critic = nn.Dense(
+                self.fc_hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            )(critic)
+            critic = activation(critic)
         critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
             critic
         )
@@ -56,6 +53,7 @@ class ActorWithDoubleCritic(nn.Module):
     action_dim: Sequence[int]
     activation: str = "tanh"
     fc_hidden_dim: int = 64
+    num_layers: int = 2
 
     @nn.compact
     def __call__(self, x):
@@ -65,14 +63,12 @@ class ActorWithDoubleCritic(nn.Module):
             activation = nn.tanh
 
         obs, avail_actions = x
-        actor_mean = nn.Dense(
-            self.fc_hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(obs)
-        actor_mean = activation(actor_mean)
-        actor_mean = nn.Dense(
-            self.fc_hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(actor_mean)
-        actor_mean = activation(actor_mean)
+        actor_mean = obs
+        for _ in range(self.num_layers):
+            actor_mean = nn.Dense(
+                self.fc_hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            )(actor_mean)
+            actor_mean = activation(actor_mean)
         actor_mean = nn.Dense(
             self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
         )(actor_mean)
@@ -83,26 +79,22 @@ class ActorWithDoubleCritic(nn.Module):
 
         pi = distrax.Categorical(logits=actor_mean)
 
-        critic = nn.Dense(
-            self.fc_hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(obs)
-        critic = activation(critic)
-        critic = nn.Dense(
-            self.fc_hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(critic)
-        critic = activation(critic)
+        critic = obs
+        for _ in range(self.num_layers):
+            critic = nn.Dense(
+                self.fc_hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            )(critic)
+            critic = activation(critic)
         critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
             critic
         )
 
-        critic2 = nn.Dense(
-            self.fc_hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(obs)
-        critic2 = activation(critic2)
-        critic2 = nn.Dense(
-            self.fc_hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(critic2)
-        critic2 = activation(critic2)
+        critic2 = obs
+        for _ in range(self.num_layers):
+            critic2 = nn.Dense(
+                self.fc_hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            )(critic2)
+            critic2 = activation(critic2)
         critic2 = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
             critic2
         )
@@ -113,6 +105,7 @@ class ActorWithConditionalCritic(nn.Module):
     action_dim: Sequence[int]
     activation: str = "tanh"
     fc_hidden_dim: int = 64
+    num_layers: int = 2
 
     @nn.compact
     def __call__(self, x):
@@ -123,14 +116,12 @@ class ActorWithConditionalCritic(nn.Module):
 
         obs, teammate_id, avail_actions = x
         obs_with_teammate_id = jnp.concatenate([obs, teammate_id], axis=-1)
-        actor_mean = nn.Dense(
-            self.fc_hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(obs)
-        actor_mean = activation(actor_mean)
-        actor_mean = nn.Dense(
-            self.fc_hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(actor_mean)
-        actor_mean = activation(actor_mean)
+        actor_mean = obs
+        for _ in range(self.num_layers):
+            actor_mean = nn.Dense(
+                self.fc_hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            )(actor_mean)
+            actor_mean = activation(actor_mean)
         actor_mean = nn.Dense(
             self.action_dim, kernel_init=orthogonal(0.01), bias_init=constant(0.0)
         )(actor_mean)
@@ -141,14 +132,12 @@ class ActorWithConditionalCritic(nn.Module):
 
         pi = distrax.Categorical(logits=actor_mean)
 
-        critic = nn.Dense(
-            self.fc_hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(obs_with_teammate_id)
-        critic = activation(critic)
-        critic = nn.Dense(
-            self.fc_hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
-        )(critic)
-        critic = activation(critic)
+        critic = obs_with_teammate_id
+        for _ in range(self.num_layers):
+            critic = nn.Dense(
+                self.fc_hidden_dim, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0)
+            )(critic)
+            critic = activation(critic)
         critic = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))(
             critic
         )

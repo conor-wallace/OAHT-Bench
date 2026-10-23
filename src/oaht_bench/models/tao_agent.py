@@ -129,6 +129,9 @@ class TaoNetwork(nn.Module):
     action_dim: int
     hidden_dim: int = 32
     dropout: float = 0.1
+    ff_activation: str = "relu"
+    obs_embed_layers: int = 1
+    obs_embed_activation: str = "none"
 
     @nn.compact
     def __call__(
@@ -148,6 +151,9 @@ class TaoNetwork(nn.Module):
             hidden_dim=self.hidden_dim,
             use_cross_attention=True,  # Appendix F: z^-1 enters as key/value.
             dropout=self.dropout,
+            ff_activation=self.ff_activation,
+            obs_embed_layers=self.obs_embed_layers,
+            obs_embed_activation=self.obs_embed_activation,
         )(
             rtg,
             obs,
@@ -189,7 +195,12 @@ class TaoAgent(ReturnConditionedAgent):
         )
         self.decoder = AncillaryActionDecoder(action_dim=net.action_dim, hidden_dim=net.hidden_dim)
         self.network = TaoNetwork(
-            action_dim=net.action_dim, hidden_dim=net.hidden_dim, dropout=net.dropout
+            action_dim=net.action_dim,
+            hidden_dim=net.hidden_dim,
+            dropout=net.dropout,
+            ff_activation=net.ff_activation,
+            obs_embed_layers=net.obs_embed_layers,
+            obs_embed_activation=net.obs_embed_activation,
         )
 
     def act(self, params, rtg, obs, actions, *, timesteps, mask):

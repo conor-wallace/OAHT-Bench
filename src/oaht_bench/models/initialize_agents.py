@@ -120,6 +120,7 @@ def initialize_mlp_agent(config, env, rng):
         obs_dim=config.get("POLICY_INPUT_DIM", env.observation_space(env.agents[0]).shape[0]),
         activation=config.get("ACTIVATION", "tanh"),
         fc_hidden_dim=config.get("FC_HIDDEN_DIM", 64),
+        num_layers=config.get("NUM_LAYERS", 2),
     )
     rng, init_rng = jax.random.split(rng)
     init_params = policy.init_params(init_rng)
@@ -133,6 +134,7 @@ def initialize_actor_with_double_critic(config, env, rng):
         obs_dim=config.get("POLICY_INPUT_DIM", env.observation_space(env.agents[0]).shape[0]),
         activation=config.get("ACTIVATION", "tanh"),
         fc_hidden_dim=config.get("FC_HIDDEN_DIM", 64),
+        num_layers=config.get("NUM_LAYERS", 2),
     )
     rng, init_rng = jax.random.split(rng)
     init_params = policy.init_params(init_rng)
@@ -146,6 +148,7 @@ def initialize_pseudo_actor_with_double_critic(config, env, rng):
         obs_dim=config.get("POLICY_INPUT_DIM", env.observation_space(env.agents[0]).shape[0]),
         activation=config.get("ACTIVATION", "tanh"),
         fc_hidden_dim=config.get("FC_HIDDEN_DIM", 64),
+        num_layers=config.get("NUM_LAYERS", 2),
     )
     rng, init_rng = jax.random.split(rng)
     init_params = policy.init_params(init_rng)
@@ -177,6 +180,10 @@ def initialize_actor_with_conditional_critic(config, env, rng):
     elif policy_cls is CNNRNNActorWithConditionalCriticPolicy:
         kwargs["obs_shape"] = _unwrap_obs_shape(env)
         kwargs["gru_hidden_dim"] = config.get("GRU_HIDDEN_DIM", 128)
+    else:
+        # Plain MLP-based critic only -- the RNN/CNN-RNN variants above have a
+        # different architecture and no num_layers kwarg of their own.
+        kwargs["num_layers"] = config.get("NUM_LAYERS", 2)
     policy = policy_cls(**kwargs)
     rng, init_rng = jax.random.split(rng)
     init_params = policy.init_params(init_rng)
@@ -191,6 +198,7 @@ def initialize_pseudo_actor_with_conditional_critic(config, env, rng):
         pop_size=config["POP_SIZE"],
         activation=config.get("ACTIVATION", "tanh"),
         fc_hidden_dim=config.get("FC_HIDDEN_DIM", 64),
+        num_layers=config.get("NUM_LAYERS", 2),
     )
     rng, init_rng = jax.random.split(rng)
     init_params = policy.init_params(init_rng)

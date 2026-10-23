@@ -99,7 +99,9 @@ def run(job: TrainingJob) -> Path:
     save_job(job, run_dir / "job.json", minimal=False)
 
     cfg = job.offline
-    dataset = Dataset(job.dataset_path, normalize=cfg.normalize_observations)
+    dataset = Dataset(
+        job.dataset_path, normalize=cfg.normalize_observations, rtg_scale=cfg.rtg_scale
+    )
     action_dim = dataset.action_dim
     num_teammates = len(np.unique(dataset.batch.member_ids[:, dataset.mate]))
     log.info(

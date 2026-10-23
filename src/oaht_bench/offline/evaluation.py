@@ -82,11 +82,11 @@ def load_trained_agent(
 
     job = load_job(run_dir / "job.json")
     cfg = job.offline
-    key = (dataset_path or job.dataset_path, cfg.normalize_observations)
+    key = (dataset_path or job.dataset_path, cfg.normalize_observations, cfg.rtg_scale)
     if dataset_cache is not None and key in dataset_cache:
         dataset = dataset_cache[key]
     else:
-        dataset = Dataset(key[0], normalize=key[1])
+        dataset = Dataset(key[0], normalize=key[1], rtg_scale=key[2])
         if dataset_cache is not None:
             dataset_cache[key] = dataset
     with (run_dir / "params.pkl").open("rb") as fh:

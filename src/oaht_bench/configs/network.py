@@ -27,6 +27,16 @@ class MlpNetwork(BaseConfig):
     architecture: Literal["mlp"] = "mlp"
     activation: Activation = "tanh"
     hidden_dim: int = Field(default=64, gt=0)
+    num_layers: int = Field(
+        default=2,
+        gt=0,
+        description="Hidden Dense+activation layers before the output layer, "
+        "mirrored on actor and critic. 2 (the default) matches the absorbed "
+        "code's prior fixed depth; references vary (e.g. OMIS's own PPO net "
+        "for LBF is 5 hidden layers wide at hidden_dim -- confirmed directly "
+        "from OMIS/pretraining/ppo.py's PolicyNet/ValueNet, not the paper's "
+        "own ambiguous table).",
+    )
     policy_input_dim: int | None = Field(
         default=None,
         description="Override the observation width the policy expects. None "
@@ -42,6 +52,7 @@ class MlpNetwork(BaseConfig):
         out: dict[str, Any] = {
             "ACTIVATION": self.activation,
             "FC_HIDDEN_DIM": self.hidden_dim,
+            "NUM_LAYERS": self.num_layers,
         }
         if self.policy_input_dim is not None:
             out["POLICY_INPUT_DIM"] = self.policy_input_dim
@@ -54,6 +65,36 @@ class BaseOfflineAhtNetworkConfig(BaseConfig):
     num_blocks: int = Field(default=3, gt=0)
 
     dropout: float = Field(default=0.1, ge=0.0, lt=1.0)
+
+    ff_activation: Literal["relu", "gelu"] = Field(
+        default="relu",
+        description="Activation inside the transformer block's feed-forward "
+        "sublayer (Dense(ff_dim) -> activation -> Dense(hidden_dim)). OMIS's "
+        "own GPT2 backbone (App. F, confirmed against OMIS/pretraining/"
+        "pretrain.py's GPT2Config(activation_function='gelu_new')) uses GELU. "
+        "Default stays 'relu' -- this backbone is shared by every offline "
+        "baseline (BC/LIAM/MeLIBA/TAO/OMIS), and changing the default would "
+        "silently change already-validated results for baselines other than "
+        "OMIS. An OMIS-fidelity config sets this to 'gelu' explicitly.",
+    )
+    obs_embed_layers: int = Field(
+        default=1,
+        gt=0,
+        description="Dense layers building the observation/state token (o_tok), "
+        "with obs_embed_activation applied after every layer except the last. "
+        "OMIS's embed_state (App. F; confirmed against OMIS/pretraining/nets.py) "
+        "is a 3-layer MLP with LeakyReLU -- unlike its action/RTG embeddings, "
+        "which are a single Dense with no activation (already our default for "
+        "those two, unchanged). Default (1 layer) preserves today's single-"
+        "Dense, no-activation o_tok for every baseline; an OMIS-fidelity config "
+        "sets this to 3.",
+    )
+    obs_embed_activation: Literal["none", "leaky_relu"] = Field(
+        default="none",
+        description="Activation applied after every obs_embed_layers Dense "
+        "layer except the last. Paired with obs_embed_layers -- see its "
+        "description. 'none' (default) matches today's unactivated o_tok.",
+    )
 
     # Resolved from the dataset before a policy is built (see
     # ``offline.runner`` and ``BaseAhtTrainer``), so a policy is pure-config. Left

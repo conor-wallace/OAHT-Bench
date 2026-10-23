@@ -29,6 +29,9 @@ class BcNetwork(nn.Module):
     hidden_dim: int = 32
     dropout: float = 0.1
     num_teammates: int = 0
+    ff_activation: str = "relu"
+    obs_embed_layers: int = 1
+    obs_embed_activation: str = "none"
 
     @nn.compact
     def __call__(
@@ -40,6 +43,9 @@ class BcNetwork(nn.Module):
             use_cross_attention=False,
             dropout=self.dropout,
             num_teammates=self.num_teammates,
+            ff_activation=self.ff_activation,
+            obs_embed_layers=self.obs_embed_layers,
+            obs_embed_activation=self.obs_embed_activation,
         )(rtg, obs, actions, timesteps=timesteps, mask=mask, teammate_id=teammate_id, train=train)
         return nn.Dense(self.action_dim)(hidden)
 
@@ -61,7 +67,12 @@ class BcAgent(ReturnConditionedAgent):
                 "runner must resolve them from the dataset before build_model()."
             )
         self.network = BcNetwork(
-            action_dim=net.action_dim, hidden_dim=net.hidden_dim, dropout=net.dropout
+            action_dim=net.action_dim,
+            hidden_dim=net.hidden_dim,
+            dropout=net.dropout,
+            ff_activation=net.ff_activation,
+            obs_embed_layers=net.obs_embed_layers,
+            obs_embed_activation=net.obs_embed_activation,
         )
 
     def act(self, params, rtg, obs, actions, *, timesteps, mask):
@@ -92,6 +103,9 @@ class ConditionedBcAgent(BcAgent):
             hidden_dim=net.hidden_dim,
             dropout=net.dropout,
             num_teammates=self._num_teammates,
+            ff_activation=net.ff_activation,
+            obs_embed_layers=net.obs_embed_layers,
+            obs_embed_activation=net.obs_embed_activation,
         )
 
     def act(self, params, rtg, obs, actions, *, timesteps, mask):

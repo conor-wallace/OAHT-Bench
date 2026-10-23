@@ -66,6 +66,9 @@ class OmisBackbone(nn.Module):
     action_dim: int
     hidden_dim: int = 32
     dropout: float = 0.1
+    ff_activation: str = "relu"
+    obs_embed_layers: int = 1
+    obs_embed_activation: str = "none"
 
     @nn.compact
     def __call__(
@@ -87,6 +90,9 @@ class OmisBackbone(nn.Module):
             hidden_dim=self.hidden_dim,
             use_cross_attention=False,
             dropout=self.dropout,
+            ff_activation=self.ff_activation,
+            obs_embed_layers=self.obs_embed_layers,
+            obs_embed_activation=self.obs_embed_activation,
         )(
             rtg,
             obs,
@@ -152,7 +158,12 @@ class OmisAgent(ReturnConditionedAgent):
                 "runner must resolve them from the dataset before build_model()."
             )
         self.backbone = OmisBackbone(
-            action_dim=net.action_dim, hidden_dim=net.hidden_dim, dropout=net.dropout
+            action_dim=net.action_dim,
+            hidden_dim=net.hidden_dim,
+            dropout=net.dropout,
+            ff_activation=net.ff_activation,
+            obs_embed_layers=net.obs_embed_layers,
+            obs_embed_activation=net.obs_embed_activation,
         )
         self.heads = OmisHeads(action_dim=net.action_dim, hidden_dim=net.hidden_dim)
 

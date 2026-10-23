@@ -66,6 +66,7 @@ class Dataset:
         teammate_index: int | None = None,
         normalize: bool = True,
         variant: str | None = None,
+        rtg_scale: float | None = None,
     ):
         """Read the Flashbax Vault at ``vault_dir`` and resolve its transforms.
 
@@ -74,10 +75,24 @@ class Dataset:
         The normalisation is read from the collection-time sidecar when
         present, else computed once in a bounded pass (see
         :meth:`VaultReader.norm_stats`).
+
+        ``rtg_scale``, when given, overrides the *computed* return-to-go scale
+        (the dataset-wide RTG standard deviation) with a fixed constant --
+        matching references (e.g. OMIS App. H.2's ``reward_scale_dict``) that
+        divide by one environment-specific number rather than a learned
+        statistic. ``None`` (default) keeps today's computed scale exactly.
+        Ignored when ``normalize=False`` (there is no ``Normalization`` to
+        carry it).
         """
         self.batch = VaultReader(vault_dir, variant=variant)
         self.ego, self.mate = resolve_seats(self.batch, teammate_index)
-        self.norm = Normalization(*self.batch.norm_stats()) if normalize else None
+        if normalize:
+            obs_mean, obs_std, computed_rtg_scale = self.batch.norm_stats()
+            self.norm = Normalization(
+                obs_mean, obs_std, rtg_scale if rtg_scale is not None else computed_rtg_scale
+            )
+        else:
+            self.norm = None
 
     @property
     def obs_dim(self) -> int:

@@ -112,6 +112,7 @@ class Block(nn.Module):
     ff_dim: int
     use_cross_attention: bool
     dropout: float
+    ff_activation: str = "relu"
 
     @nn.compact
     def __call__(self, x, *, context=None, causal_mask, cross_mask=None, train: bool):
@@ -140,7 +141,7 @@ class Block(nn.Module):
             x = nn.LayerNorm()(x + nn.Dropout(self.dropout, deterministic=not train)(cross))
 
         ff = nn.Dense(self.ff_dim)(x)
-        ff = nn.relu(ff)
+        ff = nn.gelu(ff) if self.ff_activation == "gelu" else nn.relu(ff)
         ff = nn.Dense(self.hidden_dim)(ff)
         return nn.LayerNorm()(x + nn.Dropout(self.dropout, deterministic=not train)(ff))
 
@@ -166,6 +167,18 @@ class GPT2Model(nn.Module):
     use_cross_attention: bool = False
     dropout: float = 0.1
     max_timesteps: int = 4096
+    #: Each block's feed-forward activation. "relu" (default) is every existing
+    #: baseline's byte-identical behavior; OMIS's own reference uses "gelu"
+    #: (App. F / GPT2Config(activation_function="gelu_new")).
+    ff_activation: str = "relu"
+    #: Dense layers building the observation token (o_tok), activated after
+    #: every layer but the last. 1 (default) is today's single, unactivated
+    #: Dense; OMIS's own embed_state is 3 layers with obs_embed_activation
+    #: "leaky_relu" (App. F / OMIS/pretraining/nets.py). action/RTG embeddings
+    #: stay a single unactivated Dense regardless -- only o_tok's depth here
+    #: differs in the reference.
+    obs_embed_layers: int = 1
+    obs_embed_activation: str = "none"
     #: >0 turns on the teammate-identity oracle: a learned per-teammate embedding
     #: added to every token (like the positional encoding). Off (0) by default, so
     #: every existing baseline is byte-identical. Not a deployable method -- it
@@ -194,9 +207,17 @@ class GPT2Model(nn.Module):
         B, T = obs.shape[0], obs.shape[1]
         embed_t = nn.Embed(self.max_timesteps, self.hidden_dim)
 
-        # Modality-specific linear layers, 32 nodes, no activation.
+        # Modality-specific linear layers, 32 nodes, no activation -- except
+        # o_tok, whose depth/activation are configurable (obs_embed_layers/
+        # obs_embed_activation): 1/"none" (default) is this same single,
+        # unactivated Dense; OMIS's own embed_state is a deeper, activated MLP
+        # (see the class docstring above).
         g_tok = nn.Dense(self.hidden_dim)(rtg[..., None])
-        o_tok = nn.Dense(self.hidden_dim)(obs)
+        o_tok = obs
+        for i in range(self.obs_embed_layers):
+            o_tok = nn.Dense(self.hidden_dim)(o_tok)
+            if i < self.obs_embed_layers - 1 and self.obs_embed_activation == "leaky_relu":
+                o_tok = nn.leaky_relu(o_tok)
         a_tok = nn.Dense(self.hidden_dim)(jax.nn.one_hot(actions, self.action_dim))
 
         # Episodic timestep encoding, added to every modality (Chen et al. 2021).
@@ -304,9 +325,13 @@ class GPT2Model(nn.Module):
             cross_mask = nn.make_attention_mask(q, context_mask.astype(bool))
 
         for _ in range(self.num_blocks):
-            x = Block(self.hidden_dim, self.ff_dim, self.use_cross_attention, self.dropout)(
-                x, context=context, causal_mask=attn_mask, cross_mask=cross_mask, train=train
-            )
+            x = Block(
+                self.hidden_dim,
+                self.ff_dim,
+                self.use_cross_attention,
+                self.dropout,
+                ff_activation=self.ff_activation,
+            )(x, context=context, causal_mask=attn_mask, cross_mask=cross_mask, train=train)
 
         # Hidden states are read off the o_t positions: index 1 of each group,
         # after slicing off the D_epi prefix (always 0 when D_epi is unused, so

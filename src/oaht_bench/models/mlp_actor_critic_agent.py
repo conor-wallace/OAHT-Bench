@@ -12,16 +12,19 @@ from oaht_bench.models.mlp_actor_critic import ActorWithConditionalCritic
 class MLPActorCriticPolicy(AgentPolicy):
     """Policy wrapper for MLP Actor-Critic"""
 
-    def __init__(self, action_dim, obs_dim, activation="tanh", fc_hidden_dim=64):
+    def __init__(self, action_dim, obs_dim, activation="tanh", fc_hidden_dim=64, num_layers=2):
         """
         Args:
             action_dim: int, dimension of the action space
             obs_dim: int, dimension of the observation space
             activation: str, activation function to use
             fc_hidden_dim: int, hidden dimension for the FC layers
+            num_layers: int, hidden layers before the output layer
         """
         super().__init__(action_dim, obs_dim)
-        self.network = ActorCritic(action_dim, activation=activation, fc_hidden_dim=fc_hidden_dim)
+        self.network = ActorCritic(
+            action_dim, activation=activation, fc_hidden_dim=fc_hidden_dim, num_layers=num_layers
+        )
 
     @partial(jax.jit, static_argnums=(0,))
     def get_action(self, params, obs, done, avail_actions, hstate, rng,
@@ -51,16 +54,19 @@ class MLPActorCriticPolicy(AgentPolicy):
 class ActorWithDoubleCriticPolicy(AgentPolicy):
     """Policy wrapper for Actor with Double Critics"""
 
-    def __init__(self, action_dim, obs_dim, activation="tanh", fc_hidden_dim=64):
+    def __init__(self, action_dim, obs_dim, activation="tanh", fc_hidden_dim=64, num_layers=2):
         """
         Args:
             action_dim: int, dimension of the action space
             obs_dim: int, dimension of the observation space
             activation: str, activation function to use
             fc_hidden_dim: int, hidden dimension for the FC layers
+            num_layers: int, hidden layers before the output layer
         """
         super().__init__(action_dim, obs_dim)
-        self.network = ActorWithDoubleCritic(action_dim, activation=activation, fc_hidden_dim=fc_hidden_dim)
+        self.network = ActorWithDoubleCritic(
+            action_dim, activation=activation, fc_hidden_dim=fc_hidden_dim, num_layers=num_layers
+        )
 
     @partial(jax.jit, static_argnums=(0,))
     def get_action(self, params, obs, done, avail_actions, hstate, rng,
@@ -91,8 +97,8 @@ class ActorWithDoubleCriticPolicy(AgentPolicy):
 
 class PseudoActorWithDoubleCriticPolicy(ActorWithDoubleCriticPolicy):
     """Enables ActorWithDoubleCritic to masquerade as an actor with a single critic."""
-    def __init__(self, action_dim, obs_dim, activation="tanh", fc_hidden_dim=64):
-        super().__init__(action_dim, obs_dim, activation, fc_hidden_dim=fc_hidden_dim)
+    def __init__(self, action_dim, obs_dim, activation="tanh", fc_hidden_dim=64, num_layers=2):
+        super().__init__(action_dim, obs_dim, activation, fc_hidden_dim=fc_hidden_dim, num_layers=num_layers)
 
     def get_action_value_policy(self, params, obs, done, avail_actions, hstate, rng,
                                 aux_obs=None, env_state=None):
@@ -104,7 +110,7 @@ class PseudoActorWithDoubleCriticPolicy(ActorWithDoubleCriticPolicy):
 class ActorWithConditionalCriticPolicy(AgentPolicy):
     """Policy wrapper for ActorWithConditionalCritic
     """
-    def __init__(self, action_dim, obs_dim, pop_size, activation="tanh", fc_hidden_dim=64):
+    def __init__(self, action_dim, obs_dim, pop_size, activation="tanh", fc_hidden_dim=64, num_layers=2):
         """
         Args:
             action_dim: int, dimension of the action space
@@ -112,10 +118,13 @@ class ActorWithConditionalCriticPolicy(AgentPolicy):
             pop_size: int, number of agents in the population that the critic was trained with
             activation: str, activation function to use
             fc_hidden_dim: int, hidden dimension for the FC layers
+            num_layers: int, hidden layers before the output layer
         """
         super().__init__(action_dim, obs_dim)
         self.pop_size = pop_size
-        self.network = ActorWithConditionalCritic(action_dim, activation=activation, fc_hidden_dim=fc_hidden_dim)
+        self.network = ActorWithConditionalCritic(
+            action_dim, activation=activation, fc_hidden_dim=fc_hidden_dim, num_layers=num_layers
+        )
 
     @partial(jax.jit, static_argnums=(0,))
     def get_action(self, params, obs, done, avail_actions, hstate, rng,
@@ -153,8 +162,10 @@ class PseudoActorWithConditionalCriticPolicy(ActorWithConditionalCriticPolicy):
     """Enables PseudoActorWithConditionalCriticPolicy to act as an MLPActorCriticPolicy.
     by passing in a dummy agent id.
     """
-    def __init__(self, action_dim, obs_dim, pop_size, activation="tanh", fc_hidden_dim=64):
-        super().__init__(action_dim, obs_dim, pop_size, activation, fc_hidden_dim=fc_hidden_dim)
+    def __init__(self, action_dim, obs_dim, pop_size, activation="tanh", fc_hidden_dim=64, num_layers=2):
+        super().__init__(
+            action_dim, obs_dim, pop_size, activation, fc_hidden_dim=fc_hidden_dim, num_layers=num_layers
+        )
 
     def get_action_value_policy(self, params, obs, done, avail_actions, hstate, rng,
                                 aux_obs=None, env_state=None):

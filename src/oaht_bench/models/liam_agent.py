@@ -37,6 +37,9 @@ class LiamEncoder(nn.Module):
     action_dim: int
     hidden_dim: int = 32
     dropout: float = 0.1
+    ff_activation: str = "relu"
+    obs_embed_layers: int = 1
+    obs_embed_activation: str = "none"
 
     @nn.compact
     def __call__(self, rtg, obs, actions, *, timesteps, mask=None, train: bool = False):
@@ -45,6 +48,9 @@ class LiamEncoder(nn.Module):
             hidden_dim=self.hidden_dim,
             use_cross_attention=False,
             dropout=self.dropout,
+            ff_activation=self.ff_activation,
+            obs_embed_layers=self.obs_embed_layers,
+            obs_embed_activation=self.obs_embed_activation,
         )(rtg, obs, actions, timesteps=timesteps, mask=mask, train=train)
         return obs_hidden
 
@@ -85,6 +91,9 @@ class LiamNetwork(nn.Module):
     action_dim: int
     hidden_dim: int = 32
     dropout: float = 0.1
+    ff_activation: str = "relu"
+    obs_embed_layers: int = 1
+    obs_embed_activation: str = "none"
 
     @nn.compact
     def __call__(self, rtg, obs, actions, *, timesteps, embedding, mask=None, train: bool = False):
@@ -93,6 +102,9 @@ class LiamNetwork(nn.Module):
             hidden_dim=self.hidden_dim,
             use_cross_attention=False,
             dropout=self.dropout,
+            ff_activation=self.ff_activation,
+            obs_embed_layers=self.obs_embed_layers,
+            obs_embed_activation=self.obs_embed_activation,
         )(
             rtg,
             jnp.concatenate([obs, embedding], axis=-1),
@@ -124,7 +136,13 @@ class LiamAgent(ReturnConditionedAgent):
                 "obs_dim/action_dim are unresolved on the network config; the "
                 "runner must resolve them from the dataset before build_model()."
             )
-        common = dict(hidden_dim=net.hidden_dim, dropout=net.dropout)
+        common = dict(
+            hidden_dim=net.hidden_dim,
+            dropout=net.dropout,
+            ff_activation=net.ff_activation,
+            obs_embed_layers=net.obs_embed_layers,
+            obs_embed_activation=net.obs_embed_activation,
+        )
         self.encoder = LiamEncoder(action_dim=net.action_dim, **common)
         self.decoder = LiamDecoder(
             obs_dim=net.obs_dim, action_dim=net.action_dim, hidden_dim=net.hidden_dim

@@ -73,6 +73,64 @@ def test_runtime_rejects_empty_minibatches():
         )
 
 
+def test_runtime_derives_num_minibatches_from_a_direct_minibatch_size():
+    """OMIS App. H.2 states PPO batch size as a literal number (4096), not a
+    minibatch count -- minibatch_size lets a config state it that way too."""
+    from oaht_bench.configs.network import MlpNetwork
+    from oaht_bench.configs.teammate_gen import PpoHyperparams
+    from oaht_bench.teammate_gen.runtime import PpoRuntime
+
+    rt = PpoRuntime.from_config(
+        ppo=PpoHyperparams(minibatch_size=4096),
+        network=MlpNetwork(),
+        actor_type="mlp",
+        rollout_length=128,
+        num_envs=64,
+        total_timesteps=1e6,
+        num_checkpoints=2,
+        num_agents=2,
+    )
+    assert rt.ppo.num_minibatches == (2 * 64 * 128) // 4096
+    assert rt.minibatch_size == 4096
+
+
+def test_runtime_rejects_a_minibatch_size_that_does_not_divide_evenly():
+    from oaht_bench.configs.network import MlpNetwork
+    from oaht_bench.configs.teammate_gen import PpoHyperparams
+    from oaht_bench.teammate_gen.runtime import PpoRuntime
+
+    with pytest.raises(ValueError, match="does not evenly divide"):
+        PpoRuntime.from_config(
+            ppo=PpoHyperparams(minibatch_size=4097),
+            network=MlpNetwork(),
+            actor_type="mlp",
+            rollout_length=128,
+            num_envs=64,
+            total_timesteps=1e6,
+            num_checkpoints=2,
+            num_agents=2,
+        )
+
+
+def test_runtime_ignores_minibatch_size_when_unset():
+    """None (the default) must leave num_minibatches exactly as authored."""
+    from oaht_bench.configs.network import MlpNetwork
+    from oaht_bench.configs.teammate_gen import PpoHyperparams
+    from oaht_bench.teammate_gen.runtime import PpoRuntime
+
+    rt = PpoRuntime.from_config(
+        ppo=PpoHyperparams(num_minibatches=4),
+        network=MlpNetwork(),
+        actor_type="mlp",
+        rollout_length=128,
+        num_envs=8,
+        total_timesteps=1e6,
+        num_checkpoints=5,
+        num_agents=2,
+    )
+    assert rt.ppo.num_minibatches == 4
+
+
 def test_runtime_derives_the_same_values_upstream_computed():
     from oaht_bench.configs.network import MlpNetwork
     from oaht_bench.configs.teammate_gen import PpoHyperparams

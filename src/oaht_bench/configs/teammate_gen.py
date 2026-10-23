@@ -65,6 +65,17 @@ class PpoHyperparams(BaseConfig):
     learning_rate: float = Field(default=1e-4, gt=0)
     update_epochs: int = Field(default=15, gt=0)
     num_minibatches: int = Field(default=4, gt=0)
+    minibatch_size: int | None = Field(
+        default=None,
+        gt=0,
+        description="Train batch size as a direct size, not a count -- some "
+        "references (e.g. OMIS App. H.2: a literal 4096) state PPO batch size "
+        "this way rather than as a minibatch count, the same gap TAO's own "
+        "paper has. When set, PpoRuntime.from_config derives num_minibatches "
+        "from num_actors*rollout_length/minibatch_size instead of reading "
+        "num_minibatches directly; None (default) leaves num_minibatches as "
+        "the authored value, unchanged.",
+    )
     gamma: float = Field(default=0.99, gt=0, le=1)
     gae_lambda: float = Field(default=0.95, gt=0, le=1)
     clip_eps: float = Field(default=0.05, gt=0)
