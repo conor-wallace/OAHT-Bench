@@ -42,6 +42,13 @@ def _mirror_opponent_batch(obs_dim=3, action_dim=2, T=6, n_ep_per_teammate=6, se
     actions only* -- observations are noise, uncorrelated with teammate
     identity or the ego label, so there is no shortcut around using the
     context.
+
+    ``member_rows`` labels every episode ``[teammate, teammate]`` -- matched,
+    not ``[0, teammate]`` -- because ``TaoTrainer.prepare``'s decoder pool now
+    filters to identity-matched episodes (``member_ids[:,ego] ==
+    member_ids[:,mate]``); this fixture tests in-context adaptation via
+    GetOffD, not the mismatch filter itself, so every episode must survive
+    that filter or half the decoder training signal silently vanishes.
     """
     from oaht_bench.dataset.schema import Episode, EpisodeBatch
 
@@ -60,7 +67,7 @@ def _mirror_opponent_batch(obs_dim=3, action_dim=2, T=6, n_ep_per_teammate=6, se
                     dones=np.zeros(T, dtype=bool),
                 )
             )
-            member_rows.append([0, teammate])
+            member_rows.append([teammate, teammate])
     return EpisodeBatch(episodes=episodes, member_ids=np.array(member_rows), ego_index=0, meta={})
 
 

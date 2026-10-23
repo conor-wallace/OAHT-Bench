@@ -1169,6 +1169,72 @@ def test_mismatch_needs_two_members():
         _seat_plan([3], 10, 0.5, np.random.default_rng(0))
 
 
+def test_seatings_from_pairs_groups_by_pairing_and_folds_count():
+    """_seatings_from_pairs must produce the same (ego, teammate)-grouped,
+    count-folding shape plan_seatings/plan_weighted_seatings already produce,
+    so _collect_pooled's stream() needs no change to consume either kind of
+    plan."""
+    from oaht_bench.dataset.construction.runner import _seatings_from_pairs
+
+    pairs = [(0, 0), (1, 1), (0, 0), (2, 3)]
+    seatings = _seatings_from_pairs(pairs, pooled_matrix=None)
+    by_key = {(s.ego, s.teammate): s.count for s in seatings}
+    assert by_key == {(0, 0): 2, (1, 1): 1, (2, 3): 1}
+
+
+def test_seatings_from_pairs_epsilon_from_matrix_when_given():
+    """When a PooledMatrix is supplied, epsilon/target are populated
+    descriptively from pooled_matrix.quality -- never used to select the
+    pairing itself, that's _seat_plan's job upstream."""
+    import numpy as np
+
+    from oaht_bench.dataset.construction.epsilon_sampler import PooledMatrix
+    from oaht_bench.dataset.construction.runner import _seatings_from_pairs
+
+    quality = np.array([[1.0, 0.2], [0.3, 1.0]])
+    matrix = PooledMatrix(
+        matrix=quality,
+        generator=np.array(["g", "g"]),
+        member=np.array([0, 1]),
+        role=np.array(["self", "self"]),
+        quality=quality,
+        meta={},
+    )
+    seatings = _seatings_from_pairs([(0, 1)], pooled_matrix=matrix)
+    assert seatings[0].epsilon == seatings[0].target == 0.2
+
+
+def test_seatings_from_pairs_epsilon_defaults_to_zero_without_a_matrix():
+    from oaht_bench.dataset.construction.runner import _seatings_from_pairs
+
+    seatings = _seatings_from_pairs([(0, 1)], pooled_matrix=None)
+    assert seatings[0].epsilon == seatings[0].target == 0.0
+
+
+def test_collect_pooled_rejects_mismatch_with_an_epsilon_band_variant():
+    """mismatch_fraction only composes with variant='expert'; the ε bands
+    ('mixed', 'br_vs_worst', 'weighted') don't yet layer with a mismatch
+    split -- the guard must fire before any population/matrix loading (so a
+    dummy env is safe to pass here)."""
+    import pytest as _pytest
+
+    from oaht_bench.configs.job import DatasetCollectionJob
+    from oaht_bench.dataset.construction.runner import _collect_pooled
+
+    job = DatasetCollectionJob(
+        label="t",
+        env=get_preset("lbf_12x12"),
+        population_path=["a", "b"],
+        pooled_matrix_path="unused.npz",
+        br_population_path="unused_br",
+        variant="mixed",
+        mismatch_fraction=0.5,
+        num_episodes=4,
+    )
+    with _pytest.raises(NotImplementedError, match="mismatch_fraction.*variant='expert'"):
+        _collect_pooled(job, object())
+
+
 # --- AD-RPG (clean-room reimplementation) -----------------------------------
 
 

@@ -41,6 +41,13 @@ def _mirror_opponent_batch(obs_dim=3, action_dim=2, T=6, n_ep_per_teammate=6, se
     same name (duplicated rather than imported: this package has no
     ``__init__.py``, so cross-test-file imports aren't how this repo's test
     suite is structured).
+
+    ``member_rows`` labels every episode ``[teammate, teammate]`` -- matched,
+    not ``[0, teammate]`` -- because ``OmisTrainer.prepare``'s decoder pool
+    now filters to identity-matched episodes (``member_ids[:,ego] ==
+    member_ids[:,mate]``); this fixture tests in-context adaptation via
+    D_epi/D_step, not the mismatch filter itself, so every episode must
+    survive that filter or half the decoder training signal silently vanishes.
     """
     from oaht_bench.dataset.schema import Episode, EpisodeBatch
 
@@ -59,7 +66,7 @@ def _mirror_opponent_batch(obs_dim=3, action_dim=2, T=6, n_ep_per_teammate=6, se
                     dones=np.zeros(T, dtype=bool),
                 )
             )
-            member_rows.append([0, teammate])
+            member_rows.append([teammate, teammate])
     return EpisodeBatch(episodes=episodes, member_ids=np.array(member_rows), ego_index=0, meta={})
 
 
@@ -73,6 +80,11 @@ def _identity_by_observation_batch(
     actions) cannot shortcut this task the way it can mirror-the-opponent.
     The ego label is tied directly to identity (not to the opponent's
     noisy current-episode action), so the only usable signal is D_epi.
+
+    ``member_rows`` labels every episode ``[teammate, teammate]`` -- matched
+    -- for the same reason ``_mirror_opponent_batch`` does: ``OmisTrainer.
+    prepare``'s decoder pool now filters to identity-matched episodes, and
+    this fixture is testing D_epi's signal, not that filter.
     """
     from oaht_bench.dataset.schema import Episode, EpisodeBatch
 
@@ -94,7 +106,7 @@ def _identity_by_observation_batch(
                     dones=np.zeros(T, dtype=bool),
                 )
             )
-            member_rows.append([0, teammate])
+            member_rows.append([teammate, teammate])
     return EpisodeBatch(episodes=episodes, member_ids=np.array(member_rows), ego_index=0, meta={})
 
 
@@ -318,3 +330,70 @@ def test_evaluate_incontext_produces_a_real_per_episode_curve_not_nan():
     for label in ("opponent_0", "opponent_1"):
         assert len(curve[label]) == num_episodes
         assert not any(np.isnan(v) for v in curve[label])
+
+
+def _prepared_pool(member_rows, *, T=6, obs_dim=3, action_dim=2):
+    """Build an OmisTrainer against a hand-built EpisodeBatch with the given
+    (ego, teammate) member_ids rows and return its prepared self._pool,
+    without running any training steps."""
+    from oaht_bench.dataset.schema import Episode, EpisodeBatch
+
+    episodes = [
+        Episode(
+            obs=np.zeros((2, T, obs_dim), dtype=np.float32),
+            actions=np.zeros((2, T), dtype=np.int64),
+            rewards=np.zeros((2, T), dtype=np.float32),
+            avail_actions=np.ones((2, T, action_dim), dtype=np.float32),
+            dones=np.zeros(T, dtype=bool),
+        )
+        for _ in member_rows
+    ]
+    batch = EpisodeBatch(
+        episodes=episodes, member_ids=np.array(member_rows), ego_index=0, meta={}
+    )
+    dataset = SimpleNamespace(batch=batch, ego=0, mate=1, norm=None)
+
+    cfg = OfflineTrainingConfig(
+        network=OmisNetworkConfig(obs_dim=obs_dim, action_dim=action_dim, hidden_dim=8),
+        context_length=T,
+        stride=T,
+        batch_size=4,
+        context_trajectories=2,
+        epi_length=4,
+    )
+    trainer = OmisTrainer(cfg)
+    trainer.build_model()
+    trainer.prepare(
+        dataset, _NullLogger(), rng=jax.random.PRNGKey(0), np_rng=np.random.default_rng(0)
+    )
+    return trainer
+
+
+def test_omis_pool_only_contains_identity_matched_episodes():
+    """OmisTrainer._pool must exclude any episode where the ego seat is not
+    teammate k's own dedicated best response -- D_step's BC target would
+    otherwise be polluted by a mismatched partner's sub-optimal actions.
+    """
+    # rows: matched (0,0), (1,1); mismatched (0,1), (1,0).
+    trainer = _prepared_pool([[0, 0], [1, 1], [0, 1], [1, 0]])
+    episode_ids, _ = trainer._pool
+    assert set(episode_ids.tolist()) == {0, 1}
+
+
+def test_omis_pool_is_unchanged_when_every_episode_is_matched():
+    """Regression guard: every dataset collected before this change is
+    100% best-response-matched, so the identity filter must be a no-op on
+    that data -- the full pool, not a subset of it."""
+    trainer = _prepared_pool([[0, 0], [1, 1], [2, 2]])
+    episode_ids, _ = trainer._pool
+    assert set(episode_ids.tolist()) == {0, 1, 2}
+
+
+def test_omis_pool_is_empty_and_fails_loudly_when_every_episode_is_mismatched():
+    import pytest
+
+    trainer = _prepared_pool([[0, 1], [1, 0]])
+    episode_ids, _ = trainer._pool
+    assert len(episode_ids) == 0
+    with pytest.raises(ValueError):
+        trainer._sample_batch(0)

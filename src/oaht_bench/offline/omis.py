@@ -326,12 +326,21 @@ class OmisTrainer(BaseAhtTrainer):
 
     def prepare(self, dataset, logger, *, rng, np_rng, num_seeds: int = 1) -> None:
         super().prepare(dataset, logger, rng=rng, np_rng=np_rng, num_seeds=num_seeds)
-        # The decoder window is "any window in the dataset" (D_step is read
-        # from its own episode by construction, not sampled), so this is the
-        # same stride-enumerated pool the ego-history baselines draw from.
-        self._pool = enumerate_windows(
+        # D_step is read from the decoder window's OWN episode by construction
+        # (never sampled elsewhere -- see build_d_step), and that episode's ego
+        # actions are the actor's BC imitation target. So the decoder window
+        # pool must be restricted to episodes where the ego seat IS teammate
+        # k's own dedicated best response -- roster-index identity equality,
+        # not a quality/epsilon threshold -- or a mismatched pairing's ego
+        # actions pollute the target. D_epi (below) stays unrestricted: it
+        # needs teammate-behaviour diversity across ANY ego, the opposite
+        # requirement -- see build_d_epi/teammate_episode_ids.
+        matched = dataset.batch.member_ids[:, dataset.ego] == dataset.batch.member_ids[:, dataset.mate]
+        episode_ids, ts = enumerate_windows(
             dataset.batch, h=self.config.context_length, stride=self.config.stride
         )
+        keep = matched[episode_ids]
+        self._pool = (episode_ids[keep], ts[keep])
 
     def _sample_batch(self, _step):
         episode_ids, ts = self._pool

@@ -335,12 +335,25 @@ class TaoTrainer(BaseAhtTrainer):
 
     def prepare(self, dataset, logger, *, rng, np_rng, num_seeds: int = 1) -> None:
         super().prepare(dataset, logger, rng=rng, np_rng=np_rng, num_seeds=num_seeds)
-        # Stage 2's decoder windows: "any window in the dataset", so this is
-        # the same stride-enumerated pool the ego-history baselines draw from
-        # (and what _deployment_context_one seeds the offline C=all OCW from).
-        self._pool = enumerate_windows(
+        # Stage 2's decoder window (_stage2_batch, Eq. 5) needs a near-optimal
+        # ego action target, same reasoning as OMIS's D_step: restrict to
+        # episodes where the ego seat IS the mate's own dedicated best
+        # response (roster-index identity equality, not a quality/epsilon
+        # threshold). A mismatched pairing's ego actions are not that
+        # teammate's best response and would pollute the BC target.
+        #
+        # _deployment_context_one also reads this pool (for the offline C=all
+        # Opponent Context Window) -- that use is about encoding TEAMMATE
+        # behaviour, closer in spirit to GetOffD/D_epi, which wants diversity
+        # across ANY ego, not matched-only. Restricting it here is a side
+        # effect of sharing one pool with stage 2, not a requirement; flagged,
+        # not resolved -- see that method's own docstring.
+        matched = dataset.batch.member_ids[:, dataset.ego] == dataset.batch.member_ids[:, dataset.mate]
+        episode_ids, ts = enumerate_windows(
             dataset.batch, h=self.config.context_length, stride=self.config.stride
         )
+        keep = matched[episode_ids]
+        self._pool = (episode_ids[keep], ts[keep])
 
     def _stage1_batch(self, _step):
         # Factor the single ``batch_size`` into TAO's teammate-first contrastive
@@ -539,6 +552,15 @@ class TaoTrainer(BaseAhtTrainer):
         trajectory independently, so this gives byte-identical tokens to
         encoding the whole pool and slicing afterward, without materializing
         it.
+
+        Reads from the same ``self._pool`` that ``TaoTrainer.prepare`` now
+        restricts to identity-matched episodes (stage 2's own near-optimal-
+        target requirement) -- a side effect for this method, not a
+        requirement of it: this context is about encoding TEAMMATE behaviour
+        (closer in spirit to GetOffD/D_epi), which would prefer the same
+        diversity-across-any-ego D_epi gets. Not resolved here; flagged as
+        acceptable because this method only ever reads the first ``c``
+        windows of the pool, a small, likely-inconsequential slice.
         """
         c = self.config.context_trajectories
         hidden = self.config.network.hidden_dim

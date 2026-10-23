@@ -25,6 +25,8 @@ from oaht_bench.configs.job import DatasetCollectionJob
 from oaht_bench.dataset.construction.collect import clear_rollout_cache, collect_episodes_batched
 from oaht_bench.dataset.construction.epsilon_sampler import (
     EPSILON_TARGETS,
+    PooledMatrix,
+    Seating,
     load_pooled_matrix,
     plan_for_variant,
     plan_weighted_seatings,
@@ -108,6 +110,41 @@ def _seat_plan(eligible: list[int], num_episodes: int, mismatch_fraction: float,
     # Interleave, or any consumer that slices the dataset by index gets a
     # biased subset.
     return [plan[i] for i in rng.permutation(len(plan))]
+
+
+def _seatings_from_pairs(
+    pairs: list[tuple[int, int]], pooled_matrix: PooledMatrix | None
+) -> list[Seating]:
+    """``_seat_plan``'s flat per-episode ``(primary, partner)`` list, grouped
+    into :class:`Seating`\\ s so ``_collect_pooled``'s ``stream()`` -- which
+    assumes exactly one ``Seating`` per unique pairing -- can consume a
+    mismatch-based plan with no change of its own.
+
+    ``primary`` is the ego identity (the member whose own best response is
+    seated); ``partner`` is the teammate roster index -- matching
+    ``_collect_single``'s own ``(primary, partner)`` convention.
+    ``epsilon``/``target`` are populated descriptively from
+    ``pooled_matrix.quality`` when a matrix is available -- never a selection
+    criterion here, that is ``_seat_plan``'s job upstream -- and default to
+    ``0.0`` without one (a dead branch in practice, since pooled mode keeps
+    ``pooled_matrix_path`` required regardless of ``mismatch_fraction``).
+    """
+    groups: dict[tuple[int, int], Seating] = {}
+    for primary, partner in pairs:
+        key = (primary, partner)
+        prev = groups.get(key)
+        if prev is None:
+            eps = (
+                float(pooled_matrix.quality[primary, partner])
+                if pooled_matrix is not None
+                else 0.0
+            )
+            groups[key] = Seating(ego=primary, teammate=partner, epsilon=eps, target=eps, count=1)
+        else:
+            groups[key] = Seating(
+                prev.ego, prev.teammate, prev.epsilon, prev.target, prev.count + 1
+            )
+    return list(groups.values())
 
 
 def _pooled_matrix_hash(path: Path) -> str:
@@ -267,12 +304,17 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
             "seated is that teammate's own dedicated best response, never a "
             "reused population policy."
         )
-    if job.mismatch_fraction:
-        # Pairing correctness is orthogonal to ε and not yet layered onto the
-        # pooled seating; fail rather than silently ignore a requested split.
+    if job.mismatch_fraction and job.variant != "expert":
+        # Pairing correctness is orthogonal to ε, but that composition isn't
+        # implemented: mismatch_fraction draws by roster-index identity
+        # (_seat_plan), the ε bands draw by quality (plan_for_variant /
+        # plan_weighted_seatings) -- only one can decide a given episode's
+        # seating. Collect an 'expert' + mismatch_fraction dataset separately
+        # from an ε-band one rather than composing them.
         raise NotImplementedError(
-            "mismatch_fraction is not yet supported in pooled mode; the ε bands "
-            "define the seating. Leave it at 0."
+            f"mismatch_fraction is only supported with variant='expert' in "
+            f"pooled mode (got variant={job.variant!r}); the ε bands ('mixed', "
+            f"'br_vs_worst', 'weighted') don't yet compose with a mismatch split."
         )
 
     print("Loading pooled populations from ", job.population_path)
@@ -305,7 +347,19 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
     manifest_path = Path(job.run_dir()) / "teammate_split.json"
     manifest_path.write_text(json.dumps(split.to_dict(), indent=2) + "\n")
 
-    if job.variant == "weighted":
+    if job.mismatch_fraction:
+        # variant == "expert" guaranteed by the guard above. Pure roster-index
+        # identity matching -- no quality/epsilon involved in the pairing
+        # choice itself; pooled_matrix is only used below to label the
+        # realised pairing's quality descriptively.
+        seat_pairs = _seat_plan(
+            list(split.train_indices),
+            job.num_episodes,
+            job.mismatch_fraction,
+            np.random.default_rng(job.seed),
+        )
+        plan = _seatings_from_pairs(seat_pairs, pooled_matrix)
+    elif job.variant == "weighted":
         plan = plan_weighted_seatings(
             pooled_matrix,
             job.num_episodes,
@@ -376,6 +430,7 @@ def _collect_pooled(job: DatasetCollectionJob, env) -> tuple[dict, Iterator]:
         "pooled_matrix_path": str(job.pooled_matrix_path),
         "pooled_matrix_hash": _pooled_matrix_hash(job.pooled_matrix_path),
         "allow_self_pairing": job.allow_self_pairing,
+        "mismatch_fraction": job.mismatch_fraction,
         # Seat 0 is always the trained best-response for whichever teammate identity
         # the ε sampler drew as "ego", never a reused population policy.
         "br_population_path": job.br_population_path,
