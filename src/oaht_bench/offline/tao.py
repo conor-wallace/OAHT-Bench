@@ -36,7 +36,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from oaht_bench.dataset.windowing import enumerate_windows, teammate_episode_ids, window_slice_batch
+from oaht_bench.dataset.windowing import (
+    enumerate_windows,
+    identity_matched_episode_ids,
+    teammate_episode_ids,
+    window_slice_batch,
+)
 from oaht_bench.models.tao_agent import OpponentPolicyEncoder, TaoAgent
 from oaht_bench.offline.registry import BaseAhtTrainer
 from oaht_bench.offline.utils import mask_logits, normalize_window_batch, safe_cross_entropy, to_jax
@@ -348,11 +353,11 @@ class TaoTrainer(BaseAhtTrainer):
         # across ANY ego, not matched-only. Restricting it here is a side
         # effect of sharing one pool with stage 2, not a requirement; flagged,
         # not resolved -- see that method's own docstring.
-        matched = dataset.batch.member_ids[:, dataset.ego] == dataset.batch.member_ids[:, dataset.mate]
+        matched_episodes = identity_matched_episode_ids(dataset.batch, dataset.ego, dataset.mate)
         episode_ids, ts = enumerate_windows(
             dataset.batch, h=self.config.context_length, stride=self.config.stride
         )
-        keep = matched[episode_ids]
+        keep = np.isin(episode_ids, matched_episodes)
         self._pool = (episode_ids[keep], ts[keep])
 
     def _stage1_batch(self, _step):

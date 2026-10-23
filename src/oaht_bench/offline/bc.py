@@ -11,7 +11,10 @@ baselines in the inventory can answer on their own.
 fraction of episodes by ego return (`JAX-CORL`'s filtered-BC convention).
 ``top_return_quantile=1.0`` — the default — keeps every episode, which is plain
 BC on the whole dataset; the filter is a data-selection knob, not part of the
-method's definition.
+method's definition. Always intersected with the identity-matched-episode
+filter every baseline's BC/decoder target needs (:func:`~oaht_bench.dataset.
+windowing.identity_matched_episode_ids`) -- the two are independent knobs, not
+alternatives to each other.
 
 **One stage, not two.** :func:`oaht_bench.offline.runner.run` always calls
 ``train_stage_1`` then ``train_stage_2`` — every other baseline needs both, so
@@ -37,7 +40,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from oaht_bench.dataset.windowing import enumerate_windows
+from oaht_bench.dataset.windowing import enumerate_windows, identity_matched_episode_ids
 from oaht_bench.models.bc_agent import BcAgent
 from oaht_bench.offline.registry import BaseAhtTrainer
 from oaht_bench.offline.utils import (
@@ -110,8 +113,16 @@ class BcTrainer(BaseAhtTrainer):
 
     def prepare(self, dataset, logger, *, rng, np_rng, num_seeds: int = 1) -> None:
         super().prepare(dataset, logger, rng=rng, np_rng=np_rng, num_seeds=num_seeds)
-        keep_episodes = _filter_by_return(
-            dataset.batch, dataset.ego, self.config.network.top_return_quantile
+        # BC clones the ego's own actions as the near-optimal response target,
+        # same as LIAM's/OMIS's D_step -- sound only when the ego seat IS the
+        # mate's own dedicated best response, or a mismatched pairing's
+        # suboptimal actions pollute the target. Intersected with the
+        # existing return-quantile filter: the two are independent selection
+        # knobs (identity match vs. realised return), not a replacement for
+        # one another.
+        keep_episodes = np.intersect1d(
+            _filter_by_return(dataset.batch, dataset.ego, self.config.network.top_return_quantile),
+            identity_matched_episode_ids(dataset.batch, dataset.ego, dataset.mate),
         )
         episode_ids, ts = enumerate_windows(
             dataset.batch, h=self.config.context_length, stride=self.config.stride
@@ -120,9 +131,9 @@ class BcTrainer(BaseAhtTrainer):
         self._episode_ids, self._ts = episode_ids[keep], ts[keep]
         if len(self._episode_ids) < self.config.batch_size:
             raise ValueError(
-                f"top_return_quantile={self.config.network.top_return_quantile} keeps "
-                f"only {len(self._episode_ids)} windows, fewer than "
-                f"batch_size={self.config.batch_size}. Raise the "
+                f"top_return_quantile={self.config.network.top_return_quantile} combined "
+                f"with the identity-matched filter keeps only {len(self._episode_ids)} "
+                f"windows, fewer than batch_size={self.config.batch_size}. Raise the "
                 f"quantile or lower the batch size."
             )
 

@@ -19,9 +19,15 @@ from oaht_bench.dataset.vault import read_vault, write_vault
 
 
 def _dataset(tmp_path: Path, n_ep=8, T=14, obs_dim=6, teammates=(0, 1, 2, 3)) -> Path:
-    """Write a small vault from ragged episodes, the way collection does."""
+    """Write a small vault from ragged episodes, the way collection does.
+
+    ``member_ids`` labels every episode ``[teammate, teammate]`` -- matched --
+    since every baseline's decoder/BC window now filters to identity-matched
+    episodes (``identity_matched_episode_ids``); this fixture is testing the
+    runner's contracts, not that filter, so every episode must survive it.
+    """
     rng = np.random.default_rng(0)
-    member_ids = np.array([[0, teammates[i % len(teammates)]] for i in range(n_ep)])
+    member_ids = np.array([[teammates[i % len(teammates)]] * 2 for i in range(n_ep)])
     episodes = [
         Episode(
             obs=rng.normal(size=(2, T, obs_dim)).astype(np.float32),

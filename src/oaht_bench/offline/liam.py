@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
-from oaht_bench.dataset.windowing import enumerate_windows
+from oaht_bench.dataset.windowing import enumerate_windows, identity_matched_episode_ids
 from oaht_bench.models.liam_agent import LiamAgent
 from oaht_bench.offline.registry import BaseAhtTrainer
 from oaht_bench.offline.utils import (
@@ -149,9 +150,32 @@ class LiamTrainer(BaseAhtTrainer):
 
     def prepare(self, dataset, logger, *, rng, np_rng, num_seeds: int = 1) -> None:
         super().prepare(dataset, logger, rng=rng, np_rng=np_rng, num_seeds=num_seeds)
-        self._pool = enumerate_windows(
+        # LIAM's stage-2 policy clones the ego's own actions as the
+        # near-optimal response target, same as BC's and OMIS's D_step --
+        # sound only when the ego seat IS the mate's own dedicated best
+        # response. Restrict the window pool to identity-matched episodes
+        # or a mismatched pairing's suboptimal actions pollute the target.
+        #
+        # Stage 1's reconstruction encoder shares this same pool (both stages
+        # call _sample_batch), so it also only ever sees matched episodes --
+        # a side effect of sharing one pool with stage 2, not a requirement:
+        # reconstructing the teammate's behaviour from the ego's history
+        # doesn't need a near-optimal ego, and would in principle benefit
+        # from the same cross-ego diversity D_epi gets. Not resolved here;
+        # LIAM has no separate diversity-seeking channel the way OMIS/TAO do.
+        matched_episodes = identity_matched_episode_ids(dataset.batch, dataset.ego, dataset.mate)
+        episode_ids, ts = enumerate_windows(
             dataset.batch, h=self.config.context_length, stride=self.config.stride
         )
+        keep = np.isin(episode_ids, matched_episodes)
+        self._pool = (episode_ids[keep], ts[keep])
+        if len(self._pool[0]) < self.config.batch_size:
+            raise ValueError(
+                f"the identity-matched filter keeps only {len(self._pool[0])} windows, "
+                f"fewer than batch_size={self.config.batch_size}. The vault's "
+                f"mismatch_fraction is too high relative to its size, or batch_size "
+                f"needs lowering."
+            )
 
     def _sample_batch(self, _step):
         """Sample a batch of windows. LIAM's encoder reads the ego stream, so a

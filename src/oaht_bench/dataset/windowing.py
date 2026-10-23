@@ -261,3 +261,19 @@ def teammate_episode_ids(batch, mate: int, teammate_id: int) -> np.ndarray:
     calls this at all, because it reads the decoder window's own episode id.
     """
     return np.flatnonzero(batch.member_ids[:, mate] == teammate_id)
+
+
+def identity_matched_episode_ids(batch, ego: int, mate: int) -> np.ndarray:
+    """Ids of episodes where the ego seat IS the mate seat's own identity --
+    roster-index equality, not a quality/epsilon threshold.
+
+    Every baseline that clones the ego's actions as a "near-optimal response"
+    target (BC, LIAM, MeLIBA's policy, OMIS's D_step, TAO's stage 2) needs its
+    decoder/BC window restricted to these episodes, or a mismatched partner's
+    suboptimal actions pollute the target the moment a vault isn't 100%
+    expert (``mismatch_fraction`` in pooled collection). The opposite-pool
+    functions (:func:`teammate_episode_ids`, used by D_epi/GetOffD) stay
+    unrestricted by design -- diversity across any ego is the point there --
+    so this is deliberately a separate function, not a parameter on that one.
+    """
+    return np.flatnonzero(batch.member_ids[:, ego] == batch.member_ids[:, mate])

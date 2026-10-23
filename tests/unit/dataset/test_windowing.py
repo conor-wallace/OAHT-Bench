@@ -13,7 +13,12 @@ import numpy as np
 import pytest
 
 from oaht_bench.dataset.schema import Episode, EpisodeBatch
-from oaht_bench.dataset.windowing import enumerate_windows, teammate_episode_ids, window_slice_batch
+from oaht_bench.dataset.windowing import (
+    enumerate_windows,
+    identity_matched_episode_ids,
+    teammate_episode_ids,
+    window_slice_batch,
+)
 
 OBS_DIM = 3
 
@@ -166,3 +171,11 @@ def test_teammate_episode_ids_filters_only_on_the_mate_seat():
     batch = _batch(lengths=[4, 4, 4], member_ids=[[0, 5], [1, 5], [0, 7]])
     ids = teammate_episode_ids(batch, mate=1, teammate_id=5)
     assert list(ids) == [0, 1]
+
+
+def test_identity_matched_episode_ids_requires_ego_and_mate_to_agree():
+    # episode 0: ego==mate (matched); episode 1: ego != mate (mismatched);
+    # episode 2: ego==mate again (matched, a different identity).
+    batch = _batch(lengths=[4, 4, 4], member_ids=[[5, 5], [0, 7], [3, 3]])
+    ids = identity_matched_episode_ids(batch, ego=0, mate=1)
+    assert list(ids) == [0, 2]
